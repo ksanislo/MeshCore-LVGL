@@ -61,6 +61,24 @@ struct NodePrefs { // persisted to file
   uint8_t rx_boosted_gain; // power settings
   uint8_t path_hash_mode;   // which path mode to use when sending
   uint8_t loop_detect;
+  // WiFi settings (ESP32 only; persisted across all builds for layout stability)
+  uint8_t  wifi_enabled;    // boolean
+  char     wifi_ssid[33];   // 32-char SSID + null
+  char     wifi_password[64]; // up to 63-char WPA2 PSK + null
+  uint32_t wifi_ip;         // 0 = DHCP, else static IPv4 in network byte order (a|b<<8|c<<16|d<<24)
+  uint32_t wifi_netmask;
+  uint32_t wifi_gateway;
+  uint32_t wifi_dns;
+  // MQTT bridge settings
+  uint8_t  mqtt_enabled;       // boolean
+  char     mqtt_host[64];      // broker hostname or IP
+  uint16_t mqtt_port;          // typically 1883 (plain) or 8883 (TLS)
+  char     mqtt_user[32];      // optional, empty = anonymous
+  char     mqtt_password[64];  // optional
+  char     mqtt_client_id[24]; // empty = auto-derive from pubkey
+  char     mqtt_topic_prefix[48]; // empty = "meshcore/<client_id>"
+  uint8_t  mqtt_tls;           // boolean; insecure-mode TLS for v1
+  uint8_t  mqtt_publish_tx;    // boolean; if on, also publish our own TX'd packets
 };
 
 class CommonCLICallbacks {
@@ -109,6 +127,25 @@ public:
 
   virtual void setRxBoostedGain(bool enable) {
     // no op by default
+  };
+
+  virtual void applyWifiConfig() {
+    // no op by default
+  };
+
+  // Fill `reply` with a human-readable WiFi status string ("disconnected", "connected ip=... rssi=...", etc).
+  // Default writes "not supported" so non-WiFi builds give a sensible answer.
+  virtual void getWifiStatus(char* reply) {
+    strcpy(reply, "not supported");
+  };
+
+  virtual void applyMqttConfig() {
+    // no op by default
+  };
+
+  // Fill `reply` with a human-readable MQTT status ("disabled", "connected msgs_tx=N msgs_rx=N", etc).
+  virtual void getMqttStatus(char* reply) {
+    strcpy(reply, "not supported");
   };
 };
 

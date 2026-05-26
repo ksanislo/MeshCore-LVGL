@@ -26,6 +26,43 @@ static bool isValidName(const char *n) {
   return true;
 }
 
+// Parse dotted-quad IPv4 ("a.b.c.d") into a uint32_t (a | b<<8 | c<<16 | d<<24).
+// Returns true on success. "0.0.0.0" or "" sets *out to 0 (interpreted as "use DHCP").
+static bool parseIPv4(const char* s, uint32_t* out) {
+  if (!s || !*s) { *out = 0; return true; }
+  uint32_t parts[4] = {0, 0, 0, 0};
+  int idx = 0;
+  uint32_t cur = 0;
+  bool has_digit = false;
+  while (*s) {
+    if (*s >= '0' && *s <= '9') {
+      cur = cur * 10 + (*s - '0');
+      if (cur > 255) return false;
+      has_digit = true;
+    } else if (*s == '.') {
+      if (!has_digit || idx >= 3) return false;
+      parts[idx++] = cur;
+      cur = 0;
+      has_digit = false;
+    } else {
+      return false;
+    }
+    s++;
+  }
+  if (!has_digit || idx != 3) return false;
+  parts[idx] = cur;
+  *out = parts[0] | (parts[1] << 8) | (parts[2] << 16) | (parts[3] << 24);
+  return true;
+}
+
+static void formatIPv4(uint32_t ip, char* out) {
+  sprintf(out, "%u.%u.%u.%u",
+          (unsigned)(ip & 0xFF),
+          (unsigned)((ip >> 8) & 0xFF),
+          (unsigned)((ip >> 16) & 0xFF),
+          (unsigned)((ip >> 24) & 0xFF));
+}
+
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   if (fs->exists("/com_prefs")) {
     loadPrefsInt(fs, "/com_prefs");   // new filename
@@ -88,7 +125,23 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->adc_multiplier, sizeof(_prefs->adc_multiplier));                 // 166
     file.read((uint8_t *)_prefs->owner_info, sizeof(_prefs->owner_info));                          // 170
     file.read((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));              // 290
-    // next: 291
+    file.read((uint8_t *)&_prefs->wifi_enabled, sizeof(_prefs->wifi_enabled));                    // 291
+    file.read((uint8_t *)_prefs->wifi_ssid, sizeof(_prefs->wifi_ssid));                           // 292
+    file.read((uint8_t *)_prefs->wifi_password, sizeof(_prefs->wifi_password));                   // 325
+    file.read((uint8_t *)&_prefs->wifi_ip, sizeof(_prefs->wifi_ip));                              // 389
+    file.read((uint8_t *)&_prefs->wifi_netmask, sizeof(_prefs->wifi_netmask));                    // 393
+    file.read((uint8_t *)&_prefs->wifi_gateway, sizeof(_prefs->wifi_gateway));                    // 397
+    file.read((uint8_t *)&_prefs->wifi_dns, sizeof(_prefs->wifi_dns));                            // 401
+    file.read((uint8_t *)&_prefs->mqtt_enabled, sizeof(_prefs->mqtt_enabled));                    // 405
+    file.read((uint8_t *)_prefs->mqtt_host, sizeof(_prefs->mqtt_host));                           // 406
+    file.read((uint8_t *)&_prefs->mqtt_port, sizeof(_prefs->mqtt_port));                          // 470
+    file.read((uint8_t *)_prefs->mqtt_user, sizeof(_prefs->mqtt_user));                           // 472
+    file.read((uint8_t *)_prefs->mqtt_password, sizeof(_prefs->mqtt_password));                   // 504
+    file.read((uint8_t *)_prefs->mqtt_client_id, sizeof(_prefs->mqtt_client_id));                 // 568
+    file.read((uint8_t *)_prefs->mqtt_topic_prefix, sizeof(_prefs->mqtt_topic_prefix));           // 592
+    file.read((uint8_t *)&_prefs->mqtt_tls, sizeof(_prefs->mqtt_tls));                            // 640
+    file.read((uint8_t *)&_prefs->mqtt_publish_tx, sizeof(_prefs->mqtt_publish_tx));              // 641
+    // next: 642
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -118,6 +171,21 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
 
     // sanitise settings
     _prefs->rx_boosted_gain = constrain(_prefs->rx_boosted_gain, 0, 1); // boolean
+
+    // sanitise WiFi prefs (zero-init by default if file was older / fields absent)
+    _prefs->wifi_enabled = constrain(_prefs->wifi_enabled, 0, 1);
+    _prefs->wifi_ssid[sizeof(_prefs->wifi_ssid) - 1] = 0;
+    _prefs->wifi_password[sizeof(_prefs->wifi_password) - 1] = 0;
+
+    // sanitise MQTT prefs
+    _prefs->mqtt_enabled = constrain(_prefs->mqtt_enabled, 0, 1);
+    _prefs->mqtt_tls = constrain(_prefs->mqtt_tls, 0, 1);
+    _prefs->mqtt_publish_tx = constrain(_prefs->mqtt_publish_tx, 0, 1);
+    _prefs->mqtt_host[sizeof(_prefs->mqtt_host) - 1] = 0;
+    _prefs->mqtt_user[sizeof(_prefs->mqtt_user) - 1] = 0;
+    _prefs->mqtt_password[sizeof(_prefs->mqtt_password) - 1] = 0;
+    _prefs->mqtt_client_id[sizeof(_prefs->mqtt_client_id) - 1] = 0;
+    _prefs->mqtt_topic_prefix[sizeof(_prefs->mqtt_topic_prefix) - 1] = 0;
 
     file.close();
   }
@@ -179,7 +247,23 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->adc_multiplier, sizeof(_prefs->adc_multiplier));                 // 166
     file.write((uint8_t *)_prefs->owner_info, sizeof(_prefs->owner_info));                          // 170
     file.write((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));              // 290
-    // next: 291
+    file.write((uint8_t *)&_prefs->wifi_enabled, sizeof(_prefs->wifi_enabled));                    // 291
+    file.write((uint8_t *)_prefs->wifi_ssid, sizeof(_prefs->wifi_ssid));                           // 292
+    file.write((uint8_t *)_prefs->wifi_password, sizeof(_prefs->wifi_password));                   // 325
+    file.write((uint8_t *)&_prefs->wifi_ip, sizeof(_prefs->wifi_ip));                              // 389
+    file.write((uint8_t *)&_prefs->wifi_netmask, sizeof(_prefs->wifi_netmask));                    // 393
+    file.write((uint8_t *)&_prefs->wifi_gateway, sizeof(_prefs->wifi_gateway));                    // 397
+    file.write((uint8_t *)&_prefs->wifi_dns, sizeof(_prefs->wifi_dns));                            // 401
+    file.write((uint8_t *)&_prefs->mqtt_enabled, sizeof(_prefs->mqtt_enabled));                    // 405
+    file.write((uint8_t *)_prefs->mqtt_host, sizeof(_prefs->mqtt_host));                           // 406
+    file.write((uint8_t *)&_prefs->mqtt_port, sizeof(_prefs->mqtt_port));                          // 470
+    file.write((uint8_t *)_prefs->mqtt_user, sizeof(_prefs->mqtt_user));                           // 472
+    file.write((uint8_t *)_prefs->mqtt_password, sizeof(_prefs->mqtt_password));                   // 504
+    file.write((uint8_t *)_prefs->mqtt_client_id, sizeof(_prefs->mqtt_client_id));                 // 568
+    file.write((uint8_t *)_prefs->mqtt_topic_prefix, sizeof(_prefs->mqtt_topic_prefix));           // 592
+    file.write((uint8_t *)&_prefs->mqtt_tls, sizeof(_prefs->mqtt_tls));                            // 640
+    file.write((uint8_t *)&_prefs->mqtt_publish_tx, sizeof(_prefs->mqtt_publish_tx));              // 641
+    // next: 642
 
     file.close();
   }
@@ -712,6 +796,111 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     savePrefs();
     strcpy(reply, "OK");
 #endif
+  } else if (memcmp(config, "wifi.ssid ", 10) == 0) {
+    StrHelper::strncpy(_prefs->wifi_ssid, &config[10], sizeof(_prefs->wifi_ssid));
+    savePrefs();
+    _callbacks->applyWifiConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "wifi.password ", 14) == 0) {
+    StrHelper::strncpy(_prefs->wifi_password, &config[14], sizeof(_prefs->wifi_password));
+    savePrefs();
+    _callbacks->applyWifiConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "wifi.address ", 13) == 0) {
+    uint32_t v;
+    if (parseIPv4(&config[13], &v)) {
+      _prefs->wifi_ip = v;
+      savePrefs();
+      _callbacks->applyWifiConfig();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: expected a.b.c.d (or 0.0.0.0 for DHCP)");
+    }
+  } else if (memcmp(config, "wifi.netmask ", 13) == 0) {
+    uint32_t v;
+    if (parseIPv4(&config[13], &v)) {
+      _prefs->wifi_netmask = v;
+      savePrefs();
+      _callbacks->applyWifiConfig();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: expected a.b.c.d");
+    }
+  } else if (memcmp(config, "wifi.gateway ", 13) == 0) {
+    uint32_t v;
+    if (parseIPv4(&config[13], &v)) {
+      _prefs->wifi_gateway = v;
+      savePrefs();
+      _callbacks->applyWifiConfig();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: expected a.b.c.d");
+    }
+  } else if (memcmp(config, "wifi.dns ", 9) == 0) {
+    uint32_t v;
+    if (parseIPv4(&config[9], &v)) {
+      _prefs->wifi_dns = v;
+      savePrefs();
+      _callbacks->applyWifiConfig();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: expected a.b.c.d");
+    }
+  } else if (memcmp(config, "wifi.enabled ", 13) == 0) {
+    _prefs->wifi_enabled = memcmp(&config[13], "on", 2) == 0;
+    savePrefs();
+    _callbacks->applyWifiConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.enabled ", 13) == 0) {
+    _prefs->mqtt_enabled = memcmp(&config[13], "on", 2) == 0;
+    savePrefs();
+    _callbacks->applyMqttConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.host ", 10) == 0) {
+    StrHelper::strncpy(_prefs->mqtt_host, &config[10], sizeof(_prefs->mqtt_host));
+    savePrefs();
+    _callbacks->applyMqttConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.port ", 10) == 0) {
+    uint32_t p = _atoi(&config[10]);
+    if (p > 0 && p < 65536) {
+      _prefs->mqtt_port = (uint16_t)p;
+      savePrefs();
+      _callbacks->applyMqttConfig();
+      strcpy(reply, "OK");
+    } else {
+      strcpy(reply, "Error: port must be 1-65535");
+    }
+  } else if (memcmp(config, "mqtt.user ", 10) == 0) {
+    StrHelper::strncpy(_prefs->mqtt_user, &config[10], sizeof(_prefs->mqtt_user));
+    savePrefs();
+    _callbacks->applyMqttConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.password ", 14) == 0) {
+    StrHelper::strncpy(_prefs->mqtt_password, &config[14], sizeof(_prefs->mqtt_password));
+    savePrefs();
+    _callbacks->applyMqttConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.client_id ", 15) == 0) {
+    StrHelper::strncpy(_prefs->mqtt_client_id, &config[15], sizeof(_prefs->mqtt_client_id));
+    savePrefs();
+    _callbacks->applyMqttConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.topic_prefix ", 18) == 0) {
+    StrHelper::strncpy(_prefs->mqtt_topic_prefix, &config[18], sizeof(_prefs->mqtt_topic_prefix));
+    savePrefs();
+    _callbacks->applyMqttConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.tls ", 9) == 0) {
+    _prefs->mqtt_tls = memcmp(&config[9], "on", 2) == 0;
+    savePrefs();
+    _callbacks->applyMqttConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.publish_tx ", 16) == 0) {
+    _prefs->mqtt_publish_tx = memcmp(&config[16], "on", 2) == 0;
+    savePrefs();
+    _callbacks->applyMqttConfig();
+    strcpy(reply, "OK");
   } else if (memcmp(config, "adc.multiplier ", 15) == 0) {
     _prefs->adc_multiplier = atof(&config[15]);
     if (_board->setAdcMultiplier(_prefs->adc_multiplier)) {
@@ -841,6 +1030,48 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "bridge.secret", 13) == 0) {
     sprintf(reply, "> %s", _prefs->bridge_secret);
 #endif
+  } else if (memcmp(config, "wifi.ssid", 9) == 0) {
+    sprintf(reply, "> %s", _prefs->wifi_ssid);
+  } else if (memcmp(config, "wifi.password", 13) == 0) {
+    sprintf(reply, "> %s", _prefs->wifi_password);
+  } else if (memcmp(config, "wifi.address", 12) == 0) {
+    char ip[20]; formatIPv4(_prefs->wifi_ip, ip);
+    sprintf(reply, "> %s", ip);
+  } else if (memcmp(config, "wifi.netmask", 12) == 0) {
+    char ip[20]; formatIPv4(_prefs->wifi_netmask, ip);
+    sprintf(reply, "> %s", ip);
+  } else if (memcmp(config, "wifi.gateway", 12) == 0) {
+    char ip[20]; formatIPv4(_prefs->wifi_gateway, ip);
+    sprintf(reply, "> %s", ip);
+  } else if (memcmp(config, "wifi.dns", 8) == 0) {
+    char ip[20]; formatIPv4(_prefs->wifi_dns, ip);
+    sprintf(reply, "> %s", ip);
+  } else if (memcmp(config, "wifi.enabled", 12) == 0) {
+    sprintf(reply, "> %s", _prefs->wifi_enabled ? "on" : "off");
+  } else if (memcmp(config, "wifi.status", 11) == 0) {
+    strcpy(reply, "> ");
+    _callbacks->getWifiStatus(reply + 2);
+  } else if (memcmp(config, "mqtt.host", 9) == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_host);
+  } else if (memcmp(config, "mqtt.port", 9) == 0) {
+    sprintf(reply, "> %d", (uint32_t)_prefs->mqtt_port);
+  } else if (memcmp(config, "mqtt.user", 9) == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_user);
+  } else if (memcmp(config, "mqtt.password", 13) == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_password);
+  } else if (memcmp(config, "mqtt.client_id", 14) == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_client_id);
+  } else if (memcmp(config, "mqtt.topic_prefix", 17) == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_topic_prefix);
+  } else if (memcmp(config, "mqtt.tls", 8) == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_tls ? "on" : "off");
+  } else if (memcmp(config, "mqtt.publish_tx", 15) == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_publish_tx ? "on" : "off");
+  } else if (memcmp(config, "mqtt.enabled", 12) == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_enabled ? "on" : "off");
+  } else if (memcmp(config, "mqtt.status", 11) == 0) {
+    strcpy(reply, "> ");
+    _callbacks->getMqttStatus(reply + 2);
   } else if (memcmp(config, "bootloader.ver", 14) == 0) {
   #ifdef NRF52_PLATFORM
       char ver[32];

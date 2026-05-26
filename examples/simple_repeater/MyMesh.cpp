@@ -474,6 +474,13 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
     bridge.sendPacket(pkt);
   }
 #endif
+#ifdef WITH_MQTT_BRIDGE
+  // Always publish RX'd packets to MQTT (separate policy from legacy bridge)
+  int rssi = (int)_radio->getLastRSSI();
+  int snr  = (int)(_radio->getLastSNR() * 4);
+  mqtt_bridge.setLastSignal((int8_t)rssi, (int8_t)snr);
+  mqtt_bridge.sendPacket(pkt);
+#endif
 
   if (_logging) {
     File f = openAppend(PACKET_LOG_FILE);
@@ -499,6 +506,9 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
   if (_prefs.bridge_pkt_src == 0) {
     bridge.sendPacket(pkt);
   }
+#endif
+#ifdef WITH_MQTT_BRIDGE
+  mqtt_bridge.onPacketTransmitted(pkt);  // honors mqtt_publish_tx internally
 #endif
 
   if (_logging) {
@@ -855,6 +865,9 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 #if defined(WITH_ESPNOW_BRIDGE)
       , bridge(&_prefs, _mgr, &rtc)
 #endif
+#if defined(WITH_MQTT_BRIDGE)
+      , mqtt_bridge(&_prefs, _mgr, &rtc)
+#endif
 {
   last_millis = 0;
   uptime_millis = 0;
@@ -863,6 +876,9 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   set_radio_at = revert_radio_at = 0;
   _logging = false;
   region_load_active = false;
+#if defined(WITH_WIFI) && defined(ESP32)
+  _wifi_started = false;
+#endif
 
 #if MAX_NEIGHBOURS
   memset(neighbours, 0, sizeof(neighbours));
@@ -950,6 +966,19 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #if defined(WITH_BRIDGE)
   if (_prefs.bridge_enabled) {
     bridge.begin();
+  }
+#endif
+
+#if defined(WITH_WIFI) && defined(ESP32)
+  if (_prefs.wifi_enabled) {
+    startWifi();
+  }
+#endif
+
+#if defined(WITH_MQTT_BRIDGE)
+  mqtt_bridge.setLocalPubkey(self_id.pub_key, PUB_KEY_SIZE);
+  if (_prefs.mqtt_enabled) {
+    mqtt_bridge.begin();
   }
 #endif
 
@@ -1260,6 +1289,9 @@ void MyMesh::loop() {
 #ifdef WITH_BRIDGE
   bridge.loop();
 #endif
+#ifdef WITH_MQTT_BRIDGE
+  mqtt_bridge.loop();
+#endif
 
   mesh::Mesh::loop();
 
@@ -1306,5 +1338,93 @@ bool MyMesh::hasPendingWork() const {
 #if defined(WITH_BRIDGE)
   if (bridge.isRunning()) return true;  // bridge needs WiFi radio, can't sleep
 #endif
+#if defined(WITH_WIFI) && defined(ESP32)
+  if (_wifi_started) return true;  // WiFi station active, can't sleep
+#endif
+#if defined(WITH_MQTT_BRIDGE)
+  if (mqtt_bridge.isRunning()) return true;  // MQTT bridge active, can't sleep
+#endif
   return _mgr->getOutboundTotal() > 0;
 }
+
+#if defined(WITH_MQTT_BRIDGE)
+void MyMesh::applyMqttConfig() {
+  if (mqtt_bridge.isRunning()) mqtt_bridge.end();
+  if (_prefs.mqtt_enabled) {
+    mqtt_bridge.setLocalPubkey(self_id.pub_key, PUB_KEY_SIZE);
+    mqtt_bridge.begin();
+  }
+}
+
+void MyMesh::getMqttStatus(char* reply) {
+  mqtt_bridge.describeStatus(reply);
+}
+#endif
+
+#if defined(WITH_WIFI) && defined(ESP32)
+#include <WiFi.h>
+
+void MyMesh::startWifi() {
+  if (_wifi_started) return;
+  if (_prefs.wifi_ssid[0] == 0) {
+    Serial.println("WiFi: no SSID configured, skipping");
+    return;
+  }
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  if (_prefs.wifi_ip != 0) {
+    IPAddress ip(_prefs.wifi_ip);
+    IPAddress gw(_prefs.wifi_gateway);
+    IPAddress nm(_prefs.wifi_netmask);
+    IPAddress dns(_prefs.wifi_dns);
+    if (!WiFi.config(ip, gw, nm, dns)) {
+      Serial.println("WiFi: static config failed");
+    }
+  }
+  Serial.printf("WiFi: connecting to '%s'...\r\n", _prefs.wifi_ssid);
+  WiFi.begin(_prefs.wifi_ssid, _prefs.wifi_password);
+  _wifi_started = true;
+}
+
+void MyMesh::stopWifi() {
+  if (!_wifi_started) return;
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_OFF);
+  _wifi_started = false;
+}
+
+void MyMesh::applyWifiConfig() {
+  // Restart so new prefs take effect. Called whenever any wifi.* setting changes.
+  stopWifi();
+  if (_prefs.wifi_enabled) {
+    startWifi();
+  }
+}
+
+void MyMesh::getWifiStatus(char* reply) {
+  if (!_prefs.wifi_enabled) {
+    strcpy(reply, "disabled");
+    return;
+  }
+  if (!_wifi_started) {
+    strcpy(reply, "stopped");
+    return;
+  }
+  wl_status_t st = WiFi.status();
+  if (st == WL_CONNECTED) {
+    sprintf(reply, "connected ip=%s rssi=%ddBm",
+            WiFi.localIP().toString().c_str(),
+            (int)WiFi.RSSI());
+  } else if (st == WL_IDLE_STATUS) {
+    strcpy(reply, "idle");
+  } else if (st == WL_NO_SSID_AVAIL) {
+    strcpy(reply, "no SSID found");
+  } else if (st == WL_CONNECT_FAILED) {
+    strcpy(reply, "connect failed (bad password?)");
+  } else if (st == WL_DISCONNECTED) {
+    strcpy(reply, "disconnected");
+  } else {
+    sprintf(reply, "status=%d", (int)st);
+  }
+}
+#endif

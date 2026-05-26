@@ -23,6 +23,10 @@
 #define WITH_BRIDGE
 #endif
 
+#ifdef WITH_MQTT_BRIDGE
+#include "helpers/bridges/MqttBridge.h"
+#endif
+
 #include <helpers/AdvertDataHelpers.h>
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/ClientACL.h>
@@ -117,6 +121,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   RS232Bridge bridge;
 #elif defined(WITH_ESPNOW_BRIDGE)
   ESPNowBridge bridge;
+#endif
+#ifdef WITH_MQTT_BRIDGE
+  MqttBridge mqtt_bridge;
 #endif
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
@@ -251,5 +258,20 @@ public:
 
 #if defined(USE_SX1262) || defined(USE_SX1268)
   void setRxBoostedGain(bool enable) override;
+#endif
+
+#if defined(WITH_WIFI) && defined(ESP32)
+  void applyWifiConfig() override;
+  void getWifiStatus(char* reply) override;
+private:
+  bool _wifi_started;
+  void startWifi();
+  void stopWifi();
+public:
+#endif
+
+#ifdef WITH_MQTT_BRIDGE
+  void applyMqttConfig() override;
+  void getMqttStatus(char* reply) override;
 #endif
 };
