@@ -29,7 +29,10 @@ Usage:
 """
 
 import argparse
+import base64
+import binascii
 import hashlib
+import hmac
 import json
 import os
 import signal
@@ -37,8 +40,14 @@ import struct
 import sys
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, List, Dict
+
+try:
+    from Crypto.Cipher import AES
+    _HAVE_AES = True
+except ImportError:
+    _HAVE_AES = False
 
 try:
     import paho.mqtt.client as mqtt
@@ -96,9 +105,148 @@ SIGNATURE_SIZE = 64
 BRIDGE_HDR_LEN = 7
 BRIDGE_HDR_VER = 1
 
-PAYLOAD_TYPE_ACK    = 0x03
-PAYLOAD_TYPE_ADVERT = 0x04
-PAYLOAD_TYPE_TRACE  = 0x09
+PAYLOAD_TYPE_ACK     = 0x03
+PAYLOAD_TYPE_ADVERT  = 0x04
+PAYLOAD_TYPE_GRP_TXT = 0x05
+PAYLOAD_TYPE_GRP_DAT = 0x06
+PAYLOAD_TYPE_TRACE   = 0x09
+
+# MeshCore crypto constants (from src/MeshCore.h)
+CIPHER_KEY_SIZE = 16   # AES-128 key size in bytes
+CIPHER_MAC_SIZE = 2    # MAC bytes prefixed in encrypted payloads
+PUB_KEY_SIZE    = 32   # HMAC key length used by firmware (PSK zero-padded to this)
+
+# The hardcoded Public channel PSK that every MeshCore companion firmware
+# pre-populates at first boot. See examples/companion_radio/MyMesh.cpp.
+PUBLIC_GROUP_PSK_B64 = "izOH6cXN6mrJ5e26oRXNcg=="
+
+
+# ---- Channel decryption --------------------------------------------------------
+
+@dataclass
+class ChannelKey:
+    name: str
+    psk: bytes              # 16 or 32 bytes
+    hash_byte: int          # first byte of SHA256(psk) -- the on-wire channel_hash
+
+
+def _channel_hash_byte(psk: bytes) -> int:
+    """First byte of SHA256(psk) -- matches firmware's `mesh::Utils::sha256(
+    dest->channel.hash, sizeof(dest->channel.hash), psk, len)` with
+    sizeof(hash) = PATH_HASH_SIZE = 1."""
+    return hashlib.sha256(psk).digest()[0]
+
+
+def _channel_decrypt(psk: bytes, mac_and_ct: bytes) -> Optional[bytes]:
+    """
+    Mirror of `Utils::MACThenDecrypt`. Returns plaintext (with zero-padding
+    intact) if HMAC verifies, else None.
+
+    Firmware semantics:
+      - HMAC key is the channel.secret buffer (PUB_KEY_SIZE = 32 bytes);
+        PSKs shorter than 32 bytes are zero-padded.
+      - HMAC output is truncated to CIPHER_MAC_SIZE (2 bytes).
+      - AES-128-ECB decryption uses the first CIPHER_KEY_SIZE (16) bytes
+        of the secret as the key.
+      - Ciphertext is zero-padded to a 16-byte multiple at encrypt time.
+    """
+    if not _HAVE_AES:
+        return None
+    if len(mac_and_ct) <= CIPHER_MAC_SIZE:
+        return None
+    mac_received = mac_and_ct[:CIPHER_MAC_SIZE]
+    ct = mac_and_ct[CIPHER_MAC_SIZE:]
+    if len(ct) == 0 or len(ct) % 16 != 0:
+        return None
+    hmac_key = psk.ljust(PUB_KEY_SIZE, b"\x00")[:PUB_KEY_SIZE]
+    mac_expected = hmac.new(hmac_key, ct, hashlib.sha256).digest()[:CIPHER_MAC_SIZE]
+    if not hmac.compare_digest(mac_expected, mac_received):
+        return None
+    aes_key = psk[:CIPHER_KEY_SIZE].ljust(CIPHER_KEY_SIZE, b"\x00")[:CIPHER_KEY_SIZE]
+    cipher = AES.new(aes_key, AES.MODE_ECB)
+    return cipher.decrypt(ct)
+
+
+def _parse_grp_txt(plain: bytes) -> Optional[Tuple[int, str, str]]:
+    """
+    Parse a decrypted GRP_TXT payload.
+
+    Wire format (after decryption, per BaseChatMesh::sendGroupMessage):
+      [0..3]  uint32_t timestamp  (little-endian)
+      [4]     txt_type byte       (high 6 bits must be 0)
+      [5..]   "sender_name: message" UTF-8, zero-padded to AES block size
+    """
+    if len(plain) < 5:
+        return None
+    ts = struct.unpack_from("<I", plain, 0)[0]
+    txt_type = plain[4]
+    if (txt_type >> 2) != 0:
+        return None
+    body = plain[5:]
+    # Strip AES zero-padding (text was null-terminated before encryption).
+    nul = body.find(b"\x00")
+    if nul >= 0:
+        body = body[:nul]
+    try:
+        text = body.decode("utf-8", errors="replace")
+    except Exception:
+        text = body.hex()
+    if ": " in text:
+        sender, _, message = text.partition(": ")
+    else:
+        sender, message = "", text
+    return ts, sender, message
+
+
+class ChannelRegistry:
+    """
+    Holds PSKs for any channels we want to decrypt. Public is pre-loaded.
+    Multiple channels can share the same on-wire hash byte (1-in-256 chance);
+    we try each in turn against the HMAC.
+    """
+
+    def __init__(self):
+        self.by_hash: Dict[int, List[ChannelKey]] = {}
+        self._add_internal("Public", base64.b64decode(PUBLIC_GROUP_PSK_B64))
+
+    def _add_internal(self, name: str, psk: bytes) -> None:
+        if len(psk) not in (16, 32):
+            raise ValueError(f"channel PSK must be 16 or 32 bytes; got {len(psk)}")
+        h = _channel_hash_byte(psk)
+        self.by_hash.setdefault(h, []).append(ChannelKey(name=name, psk=psk, hash_byte=h))
+
+    def add_from_spec(self, spec: str) -> None:
+        """Accept 'Name:base64psk' from a CLI arg."""
+        if ":" not in spec:
+            raise ValueError(
+                "channel spec must be 'NAME:base64_psk' (e.g. 'PNW:abc123==')"
+            )
+        name, _, psk_b64 = spec.partition(":")
+        try:
+            psk = base64.b64decode(psk_b64, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise ValueError(f"channel '{name}' PSK is not valid base64: {e}")
+        self._add_internal(name.strip(), psk)
+
+    def try_decode_grp(self, payload: bytes) -> Optional[Tuple[str, int, str, str]]:
+        """
+        Attempt to decrypt a GRP_TXT payload.
+        Returns (channel_name, timestamp, sender, message) on success.
+        """
+        if len(payload) < 1 + CIPHER_MAC_SIZE:
+            return None
+        hb = payload[0]
+        mac_and_ct = payload[1:]
+        for ch in self.by_hash.get(hb, []):
+            plain = _channel_decrypt(ch.psk, mac_and_ct)
+            if plain is None:
+                continue
+            parsed = _parse_grp_txt(plain)
+            if parsed is None:
+                continue
+            ts, sender, message = parsed
+            return ch.name, ts, sender, message
+        return None
 
 
 # ---- Node registry (built from observed ADVERTs) -------------------------------
@@ -520,6 +668,7 @@ def hexdump(b: bytes, indent: str = "    ") -> str:
 def render_packet(topic: str, payload: bytes, verbose: bool, debug: bool = False,
                   dedup: Optional[DedupCache] = None,
                   registry: Optional["NodeRegistry"] = None,
+                  channels: Optional["ChannelRegistry"] = None,
                   label_min_bytes: int = 2) -> str:
     parts = []
     bridge_id = topic.split("/")[-2] if "/" in topic else topic
@@ -620,6 +769,15 @@ def render_packet(topic: str, payload: bytes, verbose: bool, debug: bool = False
             # Register the node so future paths can be labeled with its name.
             if registry is not None:
                 registry.register(adv.pub_key, adv.name, adv.adv_type)
+    elif pkt.payload_type == PAYLOAD_TYPE_GRP_TXT and channels is not None:
+        decoded = channels.try_decode_grp(pkt.payload)
+        if decoded is not None:
+            chan_name, ts, sender, message = decoded
+            age = int(time.time()) - ts
+            sender_disp = sender if sender else "(no-sender)"
+            parts.append(
+                f"  CHAN[{chan_name}] {sender_disp}: {message}  (age={age}s)"
+            )
 
     # Default: show the labeled path on a second line for any non-empty path.
     if pkt.hop_count > 0:
@@ -666,6 +824,7 @@ def on_message(client, userdata, msg):
         userdata["verbose"], userdata["debug"],
         dedup=userdata.get("dedup"),
         registry=userdata.get("registry"),
+        channels=userdata.get("channels"),
         label_min_bytes=userdata.get("label_min_bytes", 2),
     )
     print(line)
@@ -718,6 +877,12 @@ def main():
                          "(default ~/.meshcore_node_registry.json)")
     ap.add_argument("--no-persist-registry", action="store_true",
                     help="disable loading/saving the node registry across runs")
+    ap.add_argument("--channel", action="append", default=[], metavar="NAME:BASE64_PSK",
+                    help="add a channel key for decryption (repeatable). "
+                         "The Public channel is always pre-loaded. Example: "
+                         "--channel 'MyClub:abc123def456=='")
+    ap.add_argument("--no-channels", action="store_true",
+                    help="disable channel decryption entirely (don't even try Public)")
     ap.add_argument("--client-id", default=f"meshcore-sniffer-{int(time.time())}",
                     help="MQTT client id")
     args = ap.parse_args()
@@ -725,6 +890,23 @@ def main():
     dedup = None if args.no_dedup else DedupCache(window_secs=args.dedup_window)
     registry_path = None if args.no_persist_registry else args.registry_file
     registry = NodeRegistry(persist_path=registry_path)
+
+    channels: Optional[ChannelRegistry] = None
+    if not args.no_channels:
+        if not _HAVE_AES:
+            sys.stderr.write(
+                "[warn] pycryptodome not installed; channel decryption disabled. "
+                "Run: pip install -r requirements.txt\n"
+            )
+        else:
+            channels = ChannelRegistry()
+            for spec in args.channel:
+                try:
+                    channels.add_from_spec(spec)
+                except ValueError as e:
+                    sys.stderr.write(f"[warn] --channel {spec!r}: {e}\n")
+            chan_names = sorted({c.name for clist in channels.by_hash.values() for c in clist})
+            print(f"[{ts_now()}] channels loaded: {', '.join(chan_names)}")
 
     topics = args.topic if args.topic else ["meshcore/+/rx", "meshcore/+/tx"]
 
@@ -735,6 +917,7 @@ def main():
         "bridge_filter": args.bridge,
         "dedup": dedup,
         "registry": registry,
+        "channels": channels,
         "label_min_bytes": args.label_min_bytes,
         "msg_count": 0,
         "stats_every": args.stats_every,
