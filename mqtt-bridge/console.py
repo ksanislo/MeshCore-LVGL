@@ -485,9 +485,26 @@ def reader_loop(ser, stop_event, echo_filter=None):
             break
 
 
+def _normalize_cmd(cmd):
+    """
+    Trim a command for sending:
+
+    - Strip any trailing CR/LF/tab (never intentional input).
+    - Strip exactly ONE trailing space if present. Tab completion adds a
+      space after every unique match, which the firmware doesn't always
+      handle cleanly. If the user actually wants a trailing space (e.g.
+      `set foo ` to clear a string pref), they can type two spaces and
+      this strip leaves one behind.
+    """
+    cmd = cmd.rstrip("\r\n\t")
+    if cmd.endswith(" "):
+        cmd = cmd[:-1]
+    return cmd
+
+
 def send_line(ser, cmd):
     """Send a command followed by \\r (the firmware's line terminator)."""
-    ser.write((cmd + "\r").encode("utf-8"))
+    ser.write((_normalize_cmd(cmd) + "\r").encode("utf-8"))
 
 
 def _strip_echo_prefix(raw: str, cmd: str) -> str:
@@ -518,6 +535,7 @@ def send_and_collect(ser, cmd, settle=0.1):
     Once we DO see the `-> ` marker, the deadline is extended by 0.2 s so
     a slow trailing newline doesn't cut off the reply.
     """
+    cmd = _normalize_cmd(cmd)  # match send_line so _strip_echo_prefix's match works
     ser.reset_input_buffer()
     send_line(ser, cmd)
 
