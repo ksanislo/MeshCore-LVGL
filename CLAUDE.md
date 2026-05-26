@@ -1,9 +1,9 @@
 # MeshCore — `meshed-up` fork
 
-This repo is a fork of `meshcore-dev/MeshCore` on a branch called
-**`meshed-up`**, owned by Ken Sanislo. It adds WiFi and an MQTT bridge to the
-simple_repeater firmware on the Heltec v4, plus a small set of Python
-tools that talk to the broker.
+This repo is a personal fork of `meshcore-dev/MeshCore` on a branch called
+**`meshed-up`**. It adds WiFi and an MQTT bridge to the simple_repeater
+firmware on the Heltec v4, plus a small set of Python tools that talk
+to the broker.
 
 - **Origin** (`git push`): `https://github.com/ksanislo/MeshCore`
 - **Upstream** (`git fetch upstream`): `https://github.com/meshcore-dev/MeshCore`
@@ -148,11 +148,17 @@ python3 mqtt-bridge/console.py --cmd "help"   # client-side help, no device
 
 ## Conventions
 
-- **No co-author trailers in commits.** This is a personal fork; commits are
-  authored by Ken alone.
+- **No co-author trailers in commits.** This is a personal fork; commits
+  stand under the maintainer's authorship alone.
 - **Push to `origin` (ksanislo fork), never to `upstream`** (meshcore-dev).
   Upstream explicitly rejected MQTT in the reference bridges (per PR #454);
   we maintain MQTT support as a personal fork only.
+- **Never push without explicit approval.** Treat `commit` and `push` as
+  two separate authorization scopes. After committing, end with "want me
+  to push?" unless the user already said so. Even small follow-on commits
+  in the same session should wait for a fresh push instruction — the
+  maintainer wants the option to review or amend before things hit the
+  remote.
 - **Firmware stays a dumb pub/sub shovel.** Any policy logic (filtering,
   routing, NAT, dedup beyond what the mesh layer already does) belongs in
   user-space Python under `mqtt-bridge/`, not in firmware.
