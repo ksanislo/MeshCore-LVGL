@@ -30,7 +30,10 @@ except ImportError:
 # ---- Known commands for tab completion -----------------------------------------
 
 # Properties that work as `get <prop>` (verified against CommonCLI.cpp::handleGetCmd).
+# Also includes "all" -- a client-side virtual property that runs the full
+# config dump (same as the --get-all CLI flag).
 GET_PROPS = [
+    "all",            # client-side virtual; runs the full config dump
     "dutycycle", "af", "int.thresh", "agc.reset.interval", "multi.acks",
     "allow.read.only", "flood.advert.interval", "advert.interval",
     "guest.password", "name", "repeat", "lat", "lon",
@@ -92,13 +95,15 @@ TOP = [
 # to send to the firmware (some are top-level like "ver", not "get ver").
 GET_ALL_COMMANDS = [
     "ver",
+    "board",                     # hardware manufacturer/model
     "get role",
     "get name",
     "get public.key",
     "get lat",
     "get lon",
+    "clock",                     # current RTC time -- useful for sync check
     "get freq",
-    "get radio",         # gives freq,bw,sf,cr in one line
+    "get radio",                 # gives freq,bw,sf,cr in one line
     "get tx",
     "get radio.rxgain",
     "get repeat",
@@ -113,6 +118,7 @@ GET_ALL_COMMANDS = [
     "get af",
     "get int.thresh",
     "get multi.acks",
+    "get bridge.type",           # rs232 | espnow | none -- which legacy bridge built in
     "get wifi.enabled",
     "get wifi.ssid",
     "get wifi.password",
@@ -164,7 +170,8 @@ Topics:
 
 Other client-only commands:
   exit / quit            leave the interactive shell (^D also works)
-  --get-all    dumps every interesting `get <prop>` in one shot
+  get all                full config dump (every interesting `get <prop>`)
+  --get-all              same dump, as a one-shot CLI flag
 
 Things to know:
   * Top-level commands (ver, advert, reboot, ...) are sent without `get`/`set`.
@@ -226,13 +233,22 @@ MQTT bridge config:
   set mqtt.password <pass>
   set mqtt.tls on|off            insecure-mode TLS (no cert verify) for v1
   set mqtt.client_id <id>        blank = "meshcore-<first 8 hex of pubkey>"
-  set mqtt.topic_prefix <pfx>    blank = "meshcore/<client_id>"
+  set mqtt.topic_prefix <pfx>    blank = "meshcore/{client_id}"
   set mqtt.publish_rx on|off     publish heard packets to <prefix>/rx
   set mqtt.publish_tx on|off     publish transmitted packets to <prefix>/tx
   set mqtt.subscribe <topic>     blank = "<prefix>/rf"; wildcards (+, #) OK
   set mqtt.enabled on|off
 
   get mqtt.status                connection state + resolved subscribe topic
+
+Placeholders in mqtt.topic_prefix and mqtt.subscribe:
+  {client_id}  -> the resolved client_id (set value, or "meshcore-<8hex>")
+  {pubkey}     -> first 8 hex chars of this device's pubkey
+
+Examples:
+  set mqtt.topic_prefix meshedup/{client_id}    # auto-fills the client id
+  set mqtt.topic_prefix mything/{pubkey}        # uses raw 8-hex pubkey prefix
+  set mqtt.subscribe meshedup/+/tx              # any peer's TX (no placeholder)
 """,
     "bridge": """\
 Legacy bridge config (RS232 / ESPNow):
@@ -324,7 +340,10 @@ def intercept(line: str) -> bool:
     """
     Handle commands that should run client-side instead of being sent to the
     firmware. Returns True if intercepted (caller should NOT send to device).
-    Raises ConsoleExit on exit/quit/q so the interactive loop can unwind.
+    Raises ConsoleExit on exit/quit so the interactive loop can unwind.
+
+    Note: `get all` is intercepted separately via intercept_with_serial()
+    because it needs the serial port to run real `get` commands.
     """
     stripped = line.strip()
     if not stripped:
@@ -337,6 +356,17 @@ def intercept(line: str) -> bool:
         return True
     if cmd in ("exit", "quit"):
         raise ConsoleExit()
+    return False
+
+
+def intercept_with_serial(line: str, ser, settle: float) -> bool:
+    """
+    Like intercept(), but for commands that need the serial port. Handles
+    `get all` -- runs the full config dump (same as the --get-all CLI flag).
+    """
+    if line.strip().lower() == "get all":
+        run_get_all(ser, settle)
+        return True
     return False
 
 
@@ -452,21 +482,52 @@ def _strip_echo_prefix(raw: str, cmd: str) -> str:
     return raw
 
 
-def send_and_collect(ser, cmd, settle=0.5):
-    """Send a command, wait `settle` seconds, return reply with echo stripped."""
+def send_and_collect(ser, cmd, settle=0.1):
+    """
+    Send a command and return its reply with the echo stripped.
+
+    Detection is event-driven: the firmware formats replies as
+    `  -> <text>\\r\\n` (main.cpp prints "  -> " then Serial.println(reply)),
+    so we return as soon as we see the marker followed by a newline.
+
+    `settle` acts only as the no-reply fallback timeout -- commands that
+    don't produce a reply (rare; `reboot` is an example) wait this long
+    then give up. Reply-producing commands typically complete in 30-80 ms.
+
+    Once we DO see the `-> ` marker, the deadline is extended by 0.2 s so
+    a slow trailing newline doesn't cut off the reply.
+    """
     ser.reset_input_buffer()
     send_line(ser, cmd)
-    time.sleep(settle)
-    buf = ser.read(ser.in_waiting or 0)
-    # Sometimes the reply arrives in chunks; keep reading while data is flowing.
-    deadline = time.time() + 0.2
+
+    buf = b""
+    saw_marker = False
+    marker_end = 0
+    deadline = time.time() + settle
+
     while time.time() < deadline:
-        more = ser.read(ser.in_waiting or 0)
-        if more:
-            buf += more
-            deadline = time.time() + 0.1
-        else:
-            time.sleep(0.02)
+        chunk = ser.read(ser.in_waiting or 1)
+        if not chunk:
+            continue  # serial timeout (port has its own 50ms timeout); re-check deadline
+        buf += chunk
+        if not saw_marker:
+            idx = buf.find(b"-> ")
+            if idx >= 0:
+                saw_marker = True
+                marker_end = idx + 3
+                # Extend the deadline now that we know a reply is on the way.
+                deadline = max(deadline, time.time() + 0.2)
+        if saw_marker:
+            nl_idx = buf.find(b"\n", marker_end)
+            if nl_idx >= 0:
+                # Brief tail-drain for any straggling bytes from the firmware
+                # (CRLF endings, trailing whitespace, etc).
+                time.sleep(0.02)
+                more = ser.read(ser.in_waiting or 0)
+                if more:
+                    buf += more
+                break
+
     return _strip_echo_prefix(buf.decode("utf-8", errors="replace"), cmd)
 
 
@@ -496,6 +557,8 @@ def run_one_shot(ser, cmd, settle):
             return
     except ConsoleExit:
         return  # `--cmd exit` is a clean no-op
+    if intercept_with_serial(cmd, ser, settle):
+        return
     out = send_and_collect(ser, cmd, settle)
     sys.stdout.write(out)
     if not out.endswith("\n"):
@@ -516,6 +579,8 @@ def run_batch(ser, path, settle):
             except ConsoleExit:
                 # An `exit` in a batch script stops further commands.
                 return
+            if intercept_with_serial(cmd, ser, settle):
+                continue
             out = send_and_collect(ser, cmd, settle)
             sys.stdout.write(out)
 
@@ -550,9 +615,9 @@ def _display_key(cmd):
 # time. The `get` command returns the literal stored value (empty), not the
 # resolved one, so we show the *pattern* the firmware will use.
 BLANK_DEFAULT_DESCRIPTIONS = {
-    "mqtt.client_id":   '(default: "meshcore-<first 8 hex of pubkey>")',
-    "mqtt.topic_prefix": '(default: "meshcore/<client_id>")',
-    "mqtt.subscribe":   '(default: "<topic_prefix>/rf")',
+    "mqtt.client_id":   '(default: "meshcore-{pubkey}")',
+    "mqtt.topic_prefix": '(default: "meshcore/{client_id}"; supports {client_id}/{pubkey} placeholders)',
+    "mqtt.subscribe":   '(default: "<topic_prefix>/rf"; supports {client_id}/{pubkey} placeholders)',
 }
 
 # Same idea but for numeric fields where "0" means "use default".
@@ -579,7 +644,7 @@ def run_get_all(ser, settle):
         print(f"{key:<24} {display}")
 
 
-def run_interactive(ser):
+def run_interactive(ser, settle=0.1):
     stop = threading.Event()
     echo_filter = EchoFilter()
     rt = threading.Thread(target=reader_loop, args=(ser, stop, echo_filter), daemon=True)
@@ -608,6 +673,8 @@ def run_interactive(ser):
                     continue
             except ConsoleExit:
                 break
+            if intercept_with_serial(line, ser, settle):
+                continue
             echo_filter.expect_echo(line)
             send_line(ser, line)
             # Give the reader a moment to flush the firmware's reply
@@ -636,8 +703,9 @@ def main():
                     help="run commands from file (one per line; '#' for comments)")
     ap.add_argument("--get-all", action="store_true",
                     help="dump every known property via 'get <prop>'")
-    ap.add_argument("--settle", type=float, default=0.5,
-                    help="seconds to wait per command for response (default 0.5)")
+    ap.add_argument("--settle", type=float, default=0.1,
+                    help="seconds to wait per command before reading the response "
+                         "(default 0.1; the drain loop catches late stragglers)")
     args = ap.parse_args()
 
     # For a one-shot help / exit, skip opening the serial port entirely.
@@ -657,7 +725,7 @@ def main():
         elif args.get_all:
             run_get_all(ser, args.settle)
         else:
-            run_interactive(ser)
+            run_interactive(ser, args.settle)
     finally:
         ser.close()
 

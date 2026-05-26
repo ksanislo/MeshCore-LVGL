@@ -57,14 +57,44 @@ void MqttBridge::resolvedClientId(char *dest, size_t dest_sz) {
 }
 
 void MqttBridge::resolvedTopicPrefix(char *dest, size_t dest_sz) {
-  if (_prefs->mqtt_topic_prefix[0]) {
-    strncpy(dest, _prefs->mqtt_topic_prefix, dest_sz - 1);
-    dest[dest_sz - 1] = 0;
-  } else {
-    char cid[24];
-    resolvedClientId(cid, sizeof(cid));
-    snprintf(dest, dest_sz, "meshcore/%s", cid);
+  // Empty value resolves to the implicit default "meshcore/{client_id}".
+  // Either way, run the result through expandPlaceholders so user-supplied
+  // strings and the default both follow the same substitution rules.
+  const char *src = _prefs->mqtt_topic_prefix[0]
+                      ? _prefs->mqtt_topic_prefix
+                      : "meshcore/{client_id}";
+  expandPlaceholders(src, dest, dest_sz);
+}
+
+void MqttBridge::expandPlaceholders(const char *src, char *dest, size_t dest_sz) {
+  if (dest_sz == 0) return;
+  size_t out = 0;
+  while (*src && out + 1 < dest_sz) {
+    if (*src == '{') {
+      const char *end = strchr(src + 1, '}');
+      if (end) {
+        size_t name_len = (size_t)(end - src - 1);
+        const char *replacement = nullptr;
+        char cid_buf[24];
+        if (name_len == 9 && memcmp(src + 1, "client_id", 9) == 0) {
+          resolvedClientId(cid_buf, sizeof(cid_buf));
+          replacement = cid_buf;
+        } else if (name_len == 6 && memcmp(src + 1, "pubkey", 6) == 0) {
+          replacement = _pubkey_short_hex;
+        }
+        if (replacement) {
+          while (*replacement && out + 1 < dest_sz) {
+            dest[out++] = *replacement++;
+          }
+          src = end + 1;
+          continue;
+        }
+        // Unknown placeholder; pass through literally.
+      }
+    }
+    dest[out++] = *src++;
   }
+  dest[out] = 0;
 }
 
 void MqttBridge::buildTopic(char *dest, size_t dest_sz, const char *suffix) {
@@ -97,8 +127,10 @@ void MqttBridge::begin() {
   buildTopic(_topic_tx,     sizeof(_topic_tx),     "tx");
   buildTopic(_topic_status, sizeof(_topic_status), "status");
   if (_prefs->mqtt_subscribe[0]) {
-    strncpy(_topic_subscribe, _prefs->mqtt_subscribe, sizeof(_topic_subscribe) - 1);
-    _topic_subscribe[sizeof(_topic_subscribe) - 1] = 0;
+    // Placeholders ({client_id}, {pubkey}) work here too -- useful if you
+    // want e.g. "yourcluster/{client_id}/rf" without hard-coding the id.
+    expandPlaceholders(_prefs->mqtt_subscribe, _topic_subscribe,
+                       sizeof(_topic_subscribe));
   } else {
     buildTopic(_topic_subscribe, sizeof(_topic_subscribe), "rf");
   }

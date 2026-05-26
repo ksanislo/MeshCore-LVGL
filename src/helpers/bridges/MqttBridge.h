@@ -30,6 +30,16 @@
  * into a passive listener that re-broadcasts whatever the peer transmits --
  * no daemon required for simple symmetric pairing.
  *
+ * Placeholder substitution: both mqtt.topic_prefix and mqtt.subscribe
+ * accept these tokens which are expanded at connect time:
+ *   {client_id}  -> the resolved client_id (mqtt.client_id, or its
+ *                   auto-derived default "meshcore-<8 hex of pubkey>")
+ *   {pubkey}     -> the first 8 hex chars of this device's pubkey
+ * Example: mqtt.topic_prefix = "meshedup/{client_id}" resolves to
+ * "meshedup/meshcore-10db83e6" without you having to look anything up.
+ * The empty default for mqtt.topic_prefix is equivalent to
+ * "meshcore/{client_id}".
+ *
  * Loop suppression is delegated to the underlying mesh layer's own
  * SimpleMeshTables. MeshCore is designed to handle constant RF echoes; an
  * MQTT-arrived packet that the mesh has already seen (because we originated
@@ -93,6 +103,11 @@ private:
   void buildTopic(char *dest, size_t dest_sz, const char *suffix);
   void resolvedClientId(char *dest, size_t dest_sz);
   void resolvedTopicPrefix(char *dest, size_t dest_sz);
+
+  // Expand {client_id} and {pubkey} placeholders in user-supplied topic
+  // strings (mqtt.topic_prefix, mqtt.subscribe). Unknown placeholders
+  // pass through literally. Output is always null-terminated.
+  void expandPlaceholders(const char *src, char *dest, size_t dest_sz);
 
   WiFiClient       _plain_client;
   WiFiClientSecure _tls_client;
