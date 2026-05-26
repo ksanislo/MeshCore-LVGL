@@ -376,25 +376,33 @@ def render_path(path: bytes, hash_size: int) -> str:
 
 
 def render_path_labeled(path: bytes, hash_size: int,
-                        registry: Optional["NodeRegistry"]) -> str:
+                        registry: Optional["NodeRegistry"],
+                        label_min_bytes: int = 2) -> str:
     """
     Compact path render. Each chunk (1-, 2-, or 3-byte hash, per hash_size)
     is shown as hex; when one or more known nodes share the prefix, their
     names are appended in parentheses, comma-separated. Chunks are joined
     with '-' to keep long paths readable on a single line.
 
+    Names are only shown when hash_size >= label_min_bytes. With 1-byte
+    hashes and a regional mesh (e.g. Cascadia at ~1700 nodes across 256
+    buckets), every chunk would otherwise match 5+ nodes -- the noise
+    drowns out any signal. 2- and 3-byte hashes give meaningfully unique
+    matches and are worth labeling.
+
     Examples:
-        c7-d4-db-7f                             (no names known)
-        c7(SouthCapHill)-d4-db-7f               (one match)
-        c7(SouthCapHill,Joe,Bridge)-d4(Mike)    (collision shown)
+        c7-d4-db-7f                             (1-byte hashes; no labels)
+        a1b2(SouthCapHill)-c3d4(Bob)-e5f6       (2-byte; usually unique)
+        a1b2c3(SouthCap)-d4e5f6(MikeRep)        (3-byte; effectively unique)
     """
     if not path:
         return "(empty)"
+    show_labels = (registry is not None) and (hash_size >= label_min_bytes)
     parts = []
     for i in range(0, len(path), hash_size):
         chunk = path[i:i + hash_size]
         label = chunk.hex()
-        if registry is not None:
+        if show_labels:
             matches = registry.lookup_all_prefix(chunk)
             if matches:
                 names = ",".join(m.name for m in matches)
@@ -415,7 +423,8 @@ def hexdump(b: bytes, indent: str = "    ") -> str:
 
 def render_packet(topic: str, payload: bytes, verbose: bool, debug: bool = False,
                   dedup: Optional[DedupCache] = None,
-                  registry: Optional["NodeRegistry"] = None) -> str:
+                  registry: Optional["NodeRegistry"] = None,
+                  label_min_bytes: int = 2) -> str:
     parts = []
     bridge_id = topic.split("/")[-2] if "/" in topic else topic
 
@@ -520,7 +529,7 @@ def render_packet(topic: str, payload: bytes, verbose: bool, debug: bool = False
     if pkt.hop_count > 0:
         parts.append(
             f"  path[{pkt.hop_count}@{pkt.path_hash_size}]: "
-            f"{render_path_labeled(pkt.path, pkt.path_hash_size, registry)}"
+            f"{render_path_labeled(pkt.path, pkt.path_hash_size, registry, label_min_bytes)}"
         )
 
     # Verbose: extra details (transport codes, raw bytes, uptime)
@@ -541,9 +550,9 @@ def ts_now() -> str:
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
     print(f"[{ts_now()}] connected: {reason_code}")
-    topic = userdata["topic"]
-    client.subscribe(topic, qos=0)
-    print(f"[{ts_now()}] subscribed: {topic}")
+    for topic in userdata["topics"]:
+        client.subscribe(topic, qos=0)
+        print(f"[{ts_now()}] subscribed: {topic}")
 
 
 def on_disconnect(client, userdata, *args):
@@ -561,6 +570,7 @@ def on_message(client, userdata, msg):
         userdata["verbose"], userdata["debug"],
         dedup=userdata.get("dedup"),
         registry=userdata.get("registry"),
+        label_min_bytes=userdata.get("label_min_bytes", 2),
     )
     print(line)
 
@@ -577,8 +587,10 @@ def main():
     ap = argparse.ArgumentParser(description="MeshCore MQTT sniffer")
     ap.add_argument("--host", required=True, help="MQTT broker hostname or IP")
     ap.add_argument("--port", type=int, default=1883, help="MQTT broker port (default 1883)")
-    ap.add_argument("--topic", default="meshcore/+/down",
-                    help="topic to subscribe (default: meshcore/+/down)")
+    ap.add_argument("--topic", action="append", default=None,
+                    help="topic(s) to subscribe; repeatable. "
+                         "Default: meshcore/+/rx AND meshcore/+/tx "
+                         "(covers any bridge publishing in either flavor).")
     ap.add_argument("--user", help="MQTT username")
     ap.add_argument("--password", help="MQTT password")
     ap.add_argument("--tls", action="store_true",
@@ -594,6 +606,10 @@ def main():
                     help="dedup time window in seconds (default 60)")
     ap.add_argument("--stats-every", type=int, default=100,
                     help="print dedup stats line every N messages (0 to disable)")
+    ap.add_argument("--label-min-bytes", type=int, default=2, choices=[1, 2, 3],
+                    help="only attach known-node names when hash_size >= this many "
+                         "bytes (default 2; 1-byte hashes collide too often in big "
+                         "meshes to be informative)")
     ap.add_argument("--client-id", default=f"meshcore-sniffer-{int(time.time())}",
                     help="MQTT client id")
     args = ap.parse_args()
@@ -601,13 +617,16 @@ def main():
     dedup = None if args.no_dedup else DedupCache(window_secs=args.dedup_window)
     registry = NodeRegistry()
 
+    topics = args.topic if args.topic else ["meshcore/+/rx", "meshcore/+/tx"]
+
     userdata = {
-        "topic": args.topic,
+        "topics": topics,
         "verbose": args.verbose,
         "debug": args.debug,
         "bridge_filter": args.bridge,
         "dedup": dedup,
         "registry": registry,
+        "label_min_bytes": args.label_min_bytes,
         "msg_count": 0,
         "stats_every": args.stats_every,
     }

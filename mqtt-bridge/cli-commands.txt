@@ -1,0 +1,94 @@
+MeshCore meshed-up firmware — CLI quick reference
+===================================================
+
+Copy-paste these into the bridge's serial console at 115200 baud.
+
+
+MQTT — get current config
+-------------------------
+get mqtt.enabled
+get mqtt.host
+get mqtt.port
+get mqtt.user
+get mqtt.password
+get mqtt.client_id
+get mqtt.topic_prefix
+get mqtt.tls
+get mqtt.publish_rx
+get mqtt.publish_tx
+get mqtt.subscribe
+get mqtt.status
+
+
+MQTT — set commands
+-------------------
+set mqtt.enabled on|off
+set mqtt.host <hostname-or-ip>
+set mqtt.port <1-65535>
+set mqtt.user <username>             # blank = anonymous
+set mqtt.password <password>
+set mqtt.client_id <string>          # blank = auto from pubkey: meshcore-<8hex>
+set mqtt.topic_prefix <prefix>       # blank = "meshcore/<client_id>"
+set mqtt.tls on|off
+set mqtt.publish_rx on|off           # publishes RX-flavor to <prefix>/rx
+set mqtt.publish_tx on|off           # publishes TX-flavor to <prefix>/tx
+set mqtt.subscribe <topic-pattern>   # blank = "<prefix>/rf"; wildcards (+, #) OK
+
+
+WiFi — get current config
+-------------------------
+get wifi.enabled
+get wifi.ssid
+get wifi.password
+get wifi.address
+get wifi.netmask
+get wifi.gateway
+get wifi.dns
+get wifi.status
+
+
+WiFi — set commands
+-------------------
+set wifi.enabled on|off
+set wifi.ssid <ssid>
+set wifi.password <pass>
+set wifi.address <a.b.c.d>           # 0.0.0.0 = DHCP
+set wifi.netmask <a.b.c.d>
+set wifi.gateway <a.b.c.d>
+set wifi.dns <a.b.c.d>
+
+
+Radio basics
+------------
+get name
+get role
+get ver
+get radio
+get freq
+get tx
+get public.key
+
+
+Sample setup — peer-paired bridges (home + RV)
+----------------------------------------------
+On the home bridge (replace SSID/PASSWORD/etc):
+set wifi.ssid YourWiFi
+set wifi.password YourWiFiPass
+set wifi.enabled on
+set mqtt.host broker.example.com
+set mqtt.port 1883
+set mqtt.client_id ks-home
+set mqtt.publish_tx on
+set mqtt.subscribe meshcore/ks-rv/tx
+set mqtt.enabled on
+
+On the RV bridge (mirror image):
+set wifi.ssid StarlinkOrWhatever
+set wifi.password StarlinkPass
+set wifi.enabled on
+set mqtt.host broker.example.com
+set mqtt.port 1883
+set mqtt.client_id ks-rv
+set mqtt.publish_tx on
+set mqtt.subscribe meshcore/ks-home/tx
+set mqtt.enabled on
