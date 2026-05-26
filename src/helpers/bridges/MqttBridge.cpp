@@ -203,11 +203,6 @@ void MqttBridge::sendPacket(mesh::Packet *packet) {
   }
 }
 
-void MqttBridge::onPacketTransmitted(mesh::Packet *packet) {
-  if (!_prefs->mqtt_publish_tx) return;
-  sendPacket(packet);
-}
-
 void MqttBridge::onMqttMessage(const char *topic, const uint8_t *payload, unsigned int length) {
   if (length == 0 || length > MAX_MESH_PACKET) {
     BRIDGE_DEBUG_PRINTLN("MQTT: rx invalid len=%u\n", length);

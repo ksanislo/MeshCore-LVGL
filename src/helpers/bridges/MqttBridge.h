@@ -46,9 +46,6 @@ public:
   void sendPacket(mesh::Packet *packet) override;
   void onPacketReceived(mesh::Packet *packet) override;
 
-  // Called by main when a TX has happened (only used if mqtt_publish_tx is on)
-  void onPacketTransmitted(mesh::Packet *packet);
-
   // Record signal stats for the next sendPacket() call (called from logRx)
   void setLastSignal(int8_t rssi_dbm, int8_t snr_x4) {
     _last_rssi = rssi_dbm;

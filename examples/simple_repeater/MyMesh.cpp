@@ -475,11 +475,15 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
   }
 #endif
 #ifdef WITH_MQTT_BRIDGE
-  // Always publish RX'd packets to MQTT (separate policy from legacy bridge)
-  int rssi = (int)_radio->getLastRSSI();
-  int snr  = (int)(_radio->getLastSNR() * 4);
-  mqtt_bridge.setLastSignal((int8_t)rssi, (int8_t)snr);
-  mqtt_bridge.sendPacket(pkt);
+  // mqtt.publish_tx is a mode selector:
+  //   off (default) -> publish on RX: what we heard from RF, pre-forward
+  //   on            -> publish on TX: what we put on the air, post-hop-stamp
+  if (!_prefs.mqtt_publish_tx) {
+    int rssi = (int)_radio->getLastRSSI();
+    int snr  = (int)(_radio->getLastSNR() * 4);
+    mqtt_bridge.setLastSignal((int8_t)rssi, (int8_t)snr);
+    mqtt_bridge.sendPacket(pkt);
+  }
 #endif
 
   if (_logging) {
@@ -508,7 +512,9 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
   }
 #endif
 #ifdef WITH_MQTT_BRIDGE
-  mqtt_bridge.onPacketTransmitted(pkt);  // honors mqtt_publish_tx internally
+  if (_prefs.mqtt_publish_tx) {
+    mqtt_bridge.sendPacket(pkt);
+  }
 #endif
 
   if (_logging) {
