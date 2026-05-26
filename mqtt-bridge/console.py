@@ -72,6 +72,7 @@ SET_PROPS = [
 TOP = [
     "get", "set",
     "help", "?",          # intercepted client-side
+    "exit", "quit",       # intercepted client-side
     "ver", "board",
     "advert", "advert.zerohop",
     "reboot", "shutdown", "poweroff", "clkreboot",
@@ -135,7 +136,14 @@ GET_ALL_COMMANDS = [
 ]
 
 
-# ---- Help (intercepted client-side; firmware has no `help` command) ------------
+# ---- Client-side commands (intercepted before sending to firmware) -------------
+
+class ConsoleExit(Exception):
+    """Raised by intercept() when the user types exit/quit/q."""
+    pass
+
+
+
 
 HELP_OVERVIEW = """\
 meshcore console — client-side help (the firmware doesn't have its own).
@@ -155,6 +163,7 @@ Topics:
   examples     a few useful command sequences
 
 Other client-only commands:
+  exit / quit            leave the interactive shell (^D also works)
   --get-all    dumps every interesting `get <prop>` in one shot
 
 Things to know:
@@ -315,6 +324,7 @@ def intercept(line: str) -> bool:
     """
     Handle commands that should run client-side instead of being sent to the
     firmware. Returns True if intercepted (caller should NOT send to device).
+    Raises ConsoleExit on exit/quit/q so the interactive loop can unwind.
     """
     stripped = line.strip()
     if not stripped:
@@ -325,6 +335,8 @@ def intercept(line: str) -> bool:
     if cmd in ("help", "?"):
         show_help(rest)
         return True
+    if cmd in ("exit", "quit"):
+        raise ConsoleExit()
     return False
 
 
@@ -479,8 +491,11 @@ def save_history():
 # ---- Modes ---------------------------------------------------------------------
 
 def run_one_shot(ser, cmd, settle):
-    if intercept(cmd):
-        return
+    try:
+        if intercept(cmd):
+            return
+    except ConsoleExit:
+        return  # `--cmd exit` is a clean no-op
     out = send_and_collect(ser, cmd, settle)
     sys.stdout.write(out)
     if not out.endswith("\n"):
@@ -495,8 +510,12 @@ def run_batch(ser, path, settle):
                 continue
             sys.stdout.write(f"\n>>> {cmd}\n")
             sys.stdout.flush()
-            if intercept(cmd):
-                continue
+            try:
+                if intercept(cmd):
+                    continue
+            except ConsoleExit:
+                # An `exit` in a batch script stops further commands.
+                return
             out = send_and_collect(ser, cmd, settle)
             sys.stdout.write(out)
 
@@ -584,8 +603,11 @@ def run_interactive(ser):
                 break
             if not line.strip():
                 continue
-            if intercept(line):
-                continue
+            try:
+                if intercept(line):
+                    continue
+            except ConsoleExit:
+                break
             echo_filter.expect_echo(line)
             send_line(ser, line)
             # Give the reader a moment to flush the firmware's reply
@@ -618,9 +640,13 @@ def main():
                     help="seconds to wait per command for response (default 0.5)")
     args = ap.parse_args()
 
-    # For a one-shot help, skip opening the serial port entirely.
-    if args.cmd and intercept(args.cmd):
-        return
+    # For a one-shot help / exit, skip opening the serial port entirely.
+    if args.cmd:
+        try:
+            if intercept(args.cmd):
+                return
+        except ConsoleExit:
+            return
 
     ser = open_serial(args.port, args.baud)
     try:
