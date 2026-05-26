@@ -32,8 +32,6 @@ MqttBridge::MqttBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   _topic_status[0] = 0;
   _topic_subscribe[0] = 0;
   _pubkey_short_hex[0] = 0;
-  memset(_pubkey_bytes, 0, sizeof(_pubkey_bytes));
-  _pubkey_bytes_len = 0;
   _client.setCallback(mqtt_cb);
   _client.setBufferSize(MQTT_BUFFER_SIZE);
 }
@@ -42,10 +40,8 @@ void MqttBridge::setLocalPubkey(const uint8_t *pubkey, size_t len) {
   size_t to_copy = (len < 4) ? len : 4;
   for (size_t i = 0; i < to_copy; i++) {
     sprintf(&_pubkey_short_hex[i * 2], "%02x", pubkey[i]);
-    _pubkey_bytes[i] = pubkey[i];   // raw bytes for path-stamping
   }
   _pubkey_short_hex[to_copy * 2] = 0;
-  _pubkey_bytes_len = (uint8_t)to_copy;
 }
 
 void MqttBridge::resolvedClientId(char *dest, size_t dest_sz) {
@@ -237,15 +233,15 @@ void MqttBridge::sendPacket(mesh::Packet *packet) {
   (void)packet;
 }
 
-static void buildHeader(uint8_t *out, int8_t rssi, int8_t snr_x4) {
+// Write the version byte and uptime_ms (little-endian) into the first 5 bytes.
+// Both v0 and v1 share this prefix; v1 additionally writes rssi/snr at [5..6].
+static void buildHeaderPrefix(uint8_t *out, uint8_t version) {
   uint32_t up = millis();
-  out[0] = MqttBridge::DOWN_HEADER_VER;
+  out[0] = version;
   out[1] = (uint8_t)(up & 0xFF);
   out[2] = (uint8_t)((up >> 8) & 0xFF);
   out[3] = (uint8_t)((up >> 16) & 0xFF);
   out[4] = (uint8_t)((up >> 24) & 0xFF);
-  out[5] = (uint8_t)rssi;
-  out[6] = (uint8_t)snr_x4;
 }
 
 void MqttBridge::publishRx(mesh::Packet *packet) {
@@ -256,10 +252,13 @@ void MqttBridge::publishRx(mesh::Packet *packet) {
   int pkt_len = packet->writeTo(pkt_buf);
   if (pkt_len <= 0 || pkt_len > (int)MAX_MESH_PACKET) return;
 
-  uint8_t out[DOWN_HEADER_LEN + MAX_MESH_PACKET];
-  buildHeader(out, _last_rssi, _last_snr_x4);
-  memcpy(out + DOWN_HEADER_LEN, pkt_buf, pkt_len);
-  if (_client.publish(_topic_rx, out, DOWN_HEADER_LEN + pkt_len, false)) {
+  // /rx carries v1: version + uptime + rssi + snr_x4 (real signal measurements).
+  uint8_t out[DOWN_HEADER_LEN_MAX + MAX_MESH_PACKET];
+  buildHeaderPrefix(out, DOWN_HEADER_VER_V1);
+  out[5] = (uint8_t)_last_rssi;
+  out[6] = (uint8_t)_last_snr_x4;
+  memcpy(out + DOWN_HEADER_LEN_V1, pkt_buf, pkt_len);
+  if (_client.publish(_topic_rx, out, DOWN_HEADER_LEN_V1 + pkt_len, false)) {
     _msgs_pub++;
   }
 }
@@ -272,67 +271,12 @@ void MqttBridge::publishTx(mesh::Packet *packet) {
   int pkt_len = packet->writeTo(pkt_buf);
   if (pkt_len <= 0 || pkt_len > (int)MAX_MESH_PACKET) return;
 
-  uint8_t out[DOWN_HEADER_LEN + MAX_MESH_PACKET];
-  // TX-flavor publishes carry stale RSSI/SNR (from last RX); the daemon
-  // should treat those fields as informational only for /tx topic.
-  buildHeader(out, _last_rssi, _last_snr_x4);
-  memcpy(out + DOWN_HEADER_LEN, pkt_buf, pkt_len);
-  if (_client.publish(_topic_tx, out, DOWN_HEADER_LEN + pkt_len, false)) {
-    _msgs_pub++;
-  }
-}
-
-void MqttBridge::publishStampedFromRx(mesh::Packet *packet) {
-  // "Phantom forward" publish. In REPEAT_BRIDGE mode we don't actually
-  // transmit RF-received packets on the radio (keeps the airwaves quiet)
-  // but downstream peers subscribing to our /tx still expect to see a
-  // packet stamped with our path hash. Synthesize that publish here.
-  if (!_running || !packet || !_client.connected()) return;
-  if (!_prefs->mqtt_publish_tx) return;
-  if (_pubkey_bytes_len == 0) return;  // pubkey not set yet, can't stamp
-
-  // Bail if path is at the protocol max -- can't stamp another hop.
-  uint8_t cur_count = packet->getPathHashCount();
-  uint8_t hash_sz   = packet->getPathHashSize();
-  if (hash_sz > _pubkey_bytes_len) return;  // shouldn't happen; pubkey is short
-  if (((int)(cur_count) + 1) * hash_sz > MAX_PATH_SIZE) return;
-
-  // Serialize the packet first; the wire bytes lay out as header + (optional
-  // transport_codes) + path_len + path + payload. We need to insert our hash
-  // bytes between the end of the current path and the start of the payload,
-  // and bump path_len's count by 1. Easier: serialize via writeTo, then
-  // rewrite the path region in the buffer.
-  uint8_t pkt_buf[MAX_MESH_PACKET];
-  int orig_len = packet->writeTo(pkt_buf);
-  if (orig_len <= 0 || orig_len > (int)MAX_MESH_PACKET) return;
-
-  // Compute byte offsets inside pkt_buf.
-  // [0] header
-  // [1..4 optional] transport_codes
-  // [N] path_len byte
-  // [N+1 .. N+old_path_bytes] path
-  // [N+1+old_path_bytes .. end] payload
-  int path_len_off = 1 + (packet->hasTransportCodes() ? 4 : 0);
-  int old_path_bytes = cur_count * hash_sz;
-  int payload_off = path_len_off + 1 + old_path_bytes;
-  int payload_bytes = orig_len - payload_off;
-  if (payload_bytes < 0) return;  // malformed
-  int new_len = orig_len + hash_sz;
-  if (new_len > (int)MAX_MESH_PACKET) return;
-
-  // Shift the payload right by hash_sz bytes to make room for our hash.
-  memmove(&pkt_buf[payload_off + hash_sz], &pkt_buf[payload_off], payload_bytes);
-  // Insert our hash at the end of the existing path.
-  memcpy(&pkt_buf[payload_off], _pubkey_bytes, hash_sz);
-  // Bump path_len's hop count by 1 (keeps hash_size bits intact).
-  uint8_t new_path_len_byte = (pkt_buf[path_len_off] & 0xC0) | ((cur_count + 1) & 0x3F);
-  pkt_buf[path_len_off] = new_path_len_byte;
-
-  // Now wrap in the same header/publish path that publishTx uses.
-  uint8_t out[DOWN_HEADER_LEN + MAX_MESH_PACKET];
-  buildHeader(out, _last_rssi, _last_snr_x4);
-  memcpy(out + DOWN_HEADER_LEN, pkt_buf, new_len);
-  if (_client.publish(_topic_tx, out, DOWN_HEADER_LEN + new_len, false)) {
+  // /tx carries v0: version + uptime only. No signal data applies to a
+  // packet that's about to be (or could have been) transmitted.
+  uint8_t out[DOWN_HEADER_LEN_MAX + MAX_MESH_PACKET];
+  buildHeaderPrefix(out, DOWN_HEADER_VER_V0);
+  memcpy(out + DOWN_HEADER_LEN_V0, pkt_buf, pkt_len);
+  if (_client.publish(_topic_tx, out, DOWN_HEADER_LEN_V0 + pkt_len, false)) {
     _msgs_pub++;
   }
 }
@@ -344,9 +288,10 @@ void MqttBridge::onMqttMessage(const char *topic, const uint8_t *payload, unsign
     return;
   }
 
-  // Topics ending in "/rx" or "/tx" carry the fixed publish header before the
-  // packet bytes. Strip it. Any other topic (e.g. our /rf or whatever the user
-  // pointed mqtt.subscribe at) is treated as raw mesh packet bytes.
+  // Topics ending in "/rx" or "/tx" carry a versioned publish header before
+  // the packet bytes. Read byte 0 (version) to determine strip length.
+  // Any other topic (e.g. /rf or whatever the user pointed mqtt.subscribe at)
+  // is treated as raw mesh packet bytes.
   const uint8_t *pkt_bytes = payload;
   unsigned int pkt_len = length;
   size_t topic_len = strlen(topic);
@@ -354,12 +299,26 @@ void MqttBridge::onMqttMessage(const char *topic, const uint8_t *payload, unsign
                      (strcmp(topic + topic_len - 3, "/rx") == 0 ||
                       strcmp(topic + topic_len - 3, "/tx") == 0));
   if (has_header) {
-    if (length < DOWN_HEADER_LEN) {
-      BRIDGE_DEBUG_PRINTLN("MQTT: rx short header on %s\n", topic);
+    if (length < 1) {
+      BRIDGE_DEBUG_PRINTLN("MQTT: rx empty payload on %s\n", topic);
       return;
     }
-    pkt_bytes += DOWN_HEADER_LEN;
-    pkt_len -= DOWN_HEADER_LEN;
+    size_t hdr_len;
+    switch (payload[0]) {
+      case DOWN_HEADER_VER_V0: hdr_len = DOWN_HEADER_LEN_V0; break;
+      case DOWN_HEADER_VER_V1: hdr_len = DOWN_HEADER_LEN_V1; break;
+      default:
+        BRIDGE_DEBUG_PRINTLN("MQTT: unknown header version %u on %s\n",
+                             (unsigned)payload[0], topic);
+        return;
+    }
+    if (length < hdr_len) {
+      BRIDGE_DEBUG_PRINTLN("MQTT: rx short v%u header on %s\n",
+                           (unsigned)payload[0], topic);
+      return;
+    }
+    pkt_bytes += hdr_len;
+    pkt_len -= hdr_len;
   }
 
   if (pkt_len == 0 || pkt_len > MAX_MESH_PACKET) {

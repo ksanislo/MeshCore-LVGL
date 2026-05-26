@@ -44,10 +44,19 @@ meshcore/<id>/status   retained "online"/"offline" via LWT
 neither. The subscribe topic (`mqtt.subscribe`) is configurable; setting it
 to a peer's `/tx` topic gives you daemon-free peer-pairing.
 
-`/rx` and `/tx` carry a 7-byte fixed header (version + uptime + rssi +
-snr_x4) prefixed to the raw mesh packet bytes. `/rf` expects raw bytes only
-(no header). The firmware strips the header automatically when the
-subscribed topic ends in `/rx` or `/tx`.
+`/rx` and `/tx` carry a versioned publish header prefixed to the raw mesh
+packet bytes. The first byte is the version; receivers dispatch on it to
+determine header length.
+
+- **v0** (5 bytes): `version + uptime_ms(LE)`. Used on `/tx` -- no signal
+  measurement applies to a packet that's about to be (or could have been)
+  transmitted.
+- **v1** (7 bytes): `version + uptime_ms(LE) + rssi(i8) + snr_x4(i8)`. Used
+  on `/rx` where rssi/snr describe a real radio reception.
+
+`/rf` expects raw bytes only (no header). The firmware strips the header
+automatically when the subscribed topic ends in `/rx` or `/tx`, using the
+version byte to pick the right strip length.
 
 ### Loop suppression
 

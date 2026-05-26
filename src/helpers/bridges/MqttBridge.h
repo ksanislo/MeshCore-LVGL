@@ -69,10 +69,17 @@
  */
 class MqttBridge : public BridgeBase {
 public:
-  static const size_t MAX_MESH_PACKET   = 256;
-  static const size_t DOWN_HEADER_LEN   = 7;
-  static const size_t MQTT_BUFFER_SIZE  = 384;  // header + max packet + slack
-  static const uint8_t DOWN_HEADER_VER  = 1;
+  static const size_t MAX_MESH_PACKET    = 256;
+  // Header versions and their on-wire sizes. v0 carries only the version
+  // byte + uptime_ms (used on /tx where signal data doesn't apply); v1 adds
+  // rssi + snr_x4 (used on /rx where the values describe a real reception).
+  // Receiver dispatches on the version byte to know how many bytes to strip.
+  static const uint8_t DOWN_HEADER_VER_V0 = 0;
+  static const uint8_t DOWN_HEADER_VER_V1 = 1;
+  static const size_t DOWN_HEADER_LEN_V0  = 5;
+  static const size_t DOWN_HEADER_LEN_V1  = 7;
+  static const size_t DOWN_HEADER_LEN_MAX = DOWN_HEADER_LEN_V1;
+  static const size_t MQTT_BUFFER_SIZE    = 384;  // header + max packet + slack
 
   MqttBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc);
 
@@ -145,19 +152,6 @@ private:
 
   // Local node pubkey hex (first 8 hex chars) used as fallback client id
   char      _pubkey_short_hex[9];
-  // Raw pubkey bytes (first 4) used to append our path hash when synthesizing
-  // a phantom /tx publish in REPEAT_BRIDGE mode -- matches the firmware's
-  // path-stamping convention where the on-wire hash is just a prefix of the
-  // pubkey (see src/Identity.h::copyHashTo).
-  uint8_t   _pubkey_bytes[4];
-  uint8_t   _pubkey_bytes_len;
-
-public:
-  // Publish a path-stamped copy of an RF-received packet to /tx, without
-  // actually transmitting on RF. Used by MyMesh::logRx in REPEAT_BRIDGE mode
-  // so cross-subscribers see a consistent path chain (Cascadia hops + our
-  // hash) even though we're a quiet RF observer.
-  void publishStampedFromRx(mesh::Packet *packet);
 };
 
 #endif // WITH_MQTT_BRIDGE

@@ -455,13 +455,32 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   // Past every gate: this packet would have been forwarded under REPEAT_ON.
   // For REPEAT_BRIDGE, only retransmit on RF if the packet came from a
   // Bridge (MQTT/RS232/ESPNow). For RF-received packets we instead synthesize
-  // a path-stamped /tx publish so cross-subscribers still see a consistent
-  // hop chain -- but the radio stays quiet. Placing this here (after the
+  // a /tx publish so cross-subscribers see a packet mutated as if we HAD
+  // forwarded it -- the airwaves stay quiet. Placing this here (after the
   // mesh seen-table check and the standard gates) means we fire exactly
   // once per logical packet that would have been a legit forward.
+  //
+  // Mirror the mesh's own path-mutation primitives so the published bytes
+  // are identical to what would have gone on the air:
+  //   FLOOD:  append self_id hash to end, bump count (per routeRecvPacket).
+  //   DIRECT: removeSelfFromPath (per onRecvPacket's direct branch).
   if (_prefs.disable_fwd == REPEAT_BRIDGE && !packet->_from_bridge_inject) {
 #ifdef WITH_MQTT_BRIDGE
-    mqtt_bridge.publishStampedFromRx(const_cast<mesh::Packet*>(packet));
+    mesh::Packet *p = const_cast<mesh::Packet*>(packet);
+    uint8_t n  = p->getPathHashCount();
+    uint8_t sz = p->getPathHashSize();
+    if (p->isRouteFlood()) {
+      self_id.copyHashTo(&p->path[n * sz], sz);
+      p->setPathHashCount(n + 1);
+    } else if (p->isRouteDirect() && n > 0) {
+      // Inline mirror of Mesh::removeSelfFromPath (private in base class):
+      // drop the first path entry by shifting the remaining entries left.
+      p->setPathHashCount(n - 1);
+      for (int k = 0; k < (n - 1) * sz; k += sz) {
+        memcpy(&p->path[k], &p->path[k + sz], sz);
+      }
+    }
+    mqtt_bridge.publishTx(p);
 #endif
     return false;
   }

@@ -44,7 +44,13 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple, List, Dict
 
 try:
-    from Crypto.Cipher import AES
+    # Upstream PyCryptodome installs as `Crypto` (pip install pycryptodome).
+    # Debian's python3-pycryptodome installs as `Cryptodome` to avoid colliding
+    # with the legacy python-crypto package -- fall back to that namespace.
+    try:
+        from Crypto.Cipher import AES
+    except ImportError:
+        from Cryptodome.Cipher import AES
     _HAVE_AES = True
 except ImportError:
     _HAVE_AES = False
@@ -102,8 +108,13 @@ ADV_NAME_MASK   = 0x80
 PUB_KEY_SIZE   = 32
 SIGNATURE_SIZE = 64
 
-BRIDGE_HDR_LEN = 7
-BRIDGE_HDR_VER = 1
+# Bridge publish header layouts. v0 = version + uptime_ms only (used on /tx,
+# where there's no signal data to report). v1 adds rssi + snr_x4 (used on /rx,
+# where the values describe a real radio reception).
+BRIDGE_HDR_VER_V0 = 0
+BRIDGE_HDR_VER_V1 = 1
+BRIDGE_HDR_LEN_V0 = 5
+BRIDGE_HDR_LEN_V1 = 7
 
 PAYLOAD_TYPE_ACK     = 0x03
 PAYLOAD_TYPE_ADVERT  = 0x04
@@ -479,15 +490,27 @@ class DedupCache:
 class BridgeHeader:
     version: int
     uptime_ms: int
-    rssi: int
-    snr_db: float  # already converted from x4
+    header_len: int                  # 5 (v0) or 7 (v1)
+    rssi: Optional[int] = None       # v1 only
+    snr_db: Optional[float] = None   # v1 only (already converted from x4)
 
     @classmethod
     def parse(cls, buf: bytes) -> "BridgeHeader":
-        if len(buf) < BRIDGE_HDR_LEN:
-            raise ValueError(f"bridge header too short ({len(buf)} bytes)")
-        ver, uptime, rssi, snr_x4 = struct.unpack_from("<BIbb", buf, 0)
-        return cls(version=ver, uptime_ms=uptime, rssi=rssi, snr_db=snr_x4 / 4.0)
+        if len(buf) < 1:
+            raise ValueError("empty payload")
+        ver = buf[0]
+        if ver == BRIDGE_HDR_VER_V0:
+            if len(buf) < BRIDGE_HDR_LEN_V0:
+                raise ValueError(f"bridge v0 header too short ({len(buf)} bytes)")
+            _ver, uptime = struct.unpack_from("<BI", buf, 0)
+            return cls(version=ver, uptime_ms=uptime, header_len=BRIDGE_HDR_LEN_V0)
+        if ver == BRIDGE_HDR_VER_V1:
+            if len(buf) < BRIDGE_HDR_LEN_V1:
+                raise ValueError(f"bridge v1 header too short ({len(buf)} bytes)")
+            _ver, uptime, rssi, snr_x4 = struct.unpack_from("<BIbb", buf, 0)
+            return cls(version=ver, uptime_ms=uptime, header_len=BRIDGE_HDR_LEN_V1,
+                       rssi=rssi, snr_db=snr_x4 / 4.0)
+        raise ValueError(f"unknown bridge header version {ver}")
 
 
 @dataclass
@@ -679,33 +702,41 @@ def render_packet(topic: str, payload: bytes, verbose: bool, debug: bool = False
         parts.append(f"[{ts_now()}] {bridge_id} RAW mqtt payload ({len(payload)} bytes):")
         parts.append(hexdump(payload))
 
-    # Bridge header
+    # Bridge header (version byte selects layout: v0 = 5 bytes, v1 = 7 bytes)
     try:
         hdr = BridgeHeader.parse(payload)
     except ValueError as e:
         parts.append(f"[{ts_now()}] {bridge_id} (bad bridge header: {e})")
         return "\n".join(parts)
 
-    if hdr.version != BRIDGE_HDR_VER:
-        parts.append(f"[{ts_now()}] {bridge_id} (unknown bridge header version {hdr.version})")
-        return "\n".join(parts)
-
     if debug:
-        bh = payload[:BRIDGE_HDR_LEN]
-        parts.append(
+        bh = payload[:hdr.header_len]
+        bh_desc = (
             "  bridge_hdr: "
             f"ver=0x{bh[0]:02x} "
-            f"uptime=0x{bh[4]:02x}{bh[3]:02x}{bh[2]:02x}{bh[1]:02x}(LE)={hdr.uptime_ms} "
-            f"rssi=0x{bh[5]:02x}({hdr.rssi}) "
-            f"snr_x4=0x{bh[6]:02x}({hdr.snr_db:.2f}dB)"
+            f"uptime=0x{bh[4]:02x}{bh[3]:02x}{bh[2]:02x}{bh[1]:02x}(LE)={hdr.uptime_ms}"
         )
+        if hdr.version == BRIDGE_HDR_VER_V1:
+            bh_desc += (
+                f" rssi=0x{bh[5]:02x}({hdr.rssi})"
+                f" snr_x4=0x{bh[6]:02x}({hdr.snr_db:.2f}dB)"
+            )
+        parts.append(bh_desc)
 
-    mesh_bytes = payload[BRIDGE_HDR_LEN:]
+    mesh_bytes = payload[hdr.header_len:]
+
+    # rssi/snr only meaningful when present (v1); v0 publishes (e.g. /tx) carry
+    # no signal data, so omit those fields entirely from the rendered line.
+    sig_str = (
+        f" rssi={hdr.rssi} snr={hdr.snr_db:.1f}dB"
+        if hdr.rssi is not None and hdr.snr_db is not None
+        else ""
+    )
 
     try:
         pkt = MeshPacket.parse(mesh_bytes)
     except ValueError as e:
-        parts.append(f"[{ts_now()}] {bridge_id} (bad mesh packet: {e}) rssi={hdr.rssi}")
+        parts.append(f"[{ts_now()}] {bridge_id} (bad mesh packet: {e}){sig_str}")
         if debug:
             parts.append(f"  mesh bytes ({len(mesh_bytes)}):")
             parts.append(hexdump(mesh_bytes))
@@ -726,8 +757,8 @@ def render_packet(topic: str, payload: bytes, verbose: bool, debug: bool = False
     # One-line summary
     line = (
         f"[{ts_now()}] {bridge_id} "
-        f"hop={pkt.hop_count} {pkt.payload_name} {pkt.route_name} "
-        f"rssi={hdr.rssi} snr={hdr.snr_db:.1f}dB len={pkt.raw_len}{dup_tag}"
+        f"hop={pkt.hop_count} {pkt.payload_name} {pkt.route_name}"
+        f"{sig_str} len={pkt.raw_len}{dup_tag}"
     )
     parts.append(line)
 
