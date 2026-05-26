@@ -30,6 +30,8 @@ Usage:
 
 import argparse
 import hashlib
+import json
+import os
 import signal
 import struct
 import sys
@@ -115,15 +117,37 @@ class NodeRegistry:
     MeshCore are just the first N bytes of the pubkey (see Identity.h's
     `copyHashTo` -- `memcpy(dest, pub_key, len)`), so we can label any
     path entry whose prefix matches a known pubkey.
+
+    Optionally persisted to a JSON file across runs so we don't lose
+    accumulated knowledge to every restart. Adverts in a regional mesh
+    can be minutes-to-hours apart, so rebuilding from scratch every
+    time costs real observability.
     """
 
-    def __init__(self):
+    PERSIST_FORMAT_VERSION = 1
+    AUTOSAVE_INTERVAL_SECS = 30.0   # min wall-clock between disk writes
+
+    def __init__(self, persist_path: Optional[str] = None):
         self.nodes: dict = {}  # full pubkey -> NodeInfo
+        self.persist_path = persist_path
+        self._dirty = False
+        self._last_save = 0.0
+        if persist_path:
+            self._load()
 
     def register(self, pubkey: bytes, name: str, adv_type: int) -> None:
-        self.nodes[pubkey] = NodeInfo(
-            pubkey=pubkey, name=name, adv_type=adv_type, last_seen=time.time()
-        )
+        existing = self.nodes.get(pubkey)
+        now = time.time()
+        if existing and existing.name == name and existing.adv_type == adv_type:
+            # Same data; just refresh last_seen. Still mark dirty so the
+            # timestamp gets persisted, but the autosave throttle keeps
+            # writes bounded.
+            existing.last_seen = now
+        else:
+            self.nodes[pubkey] = NodeInfo(
+                pubkey=pubkey, name=name, adv_type=adv_type, last_seen=now,
+            )
+        self._dirty = True
 
     def lookup_prefix(self, prefix: bytes):
         """
@@ -144,6 +168,78 @@ class NodeRegistry:
         """
         return [info for pk, info in self.nodes.items()
                 if pk.startswith(prefix)]
+
+    # ---- persistence ---------------------------------------------------------
+
+    def maybe_save(self, force: bool = False) -> None:
+        """Save if dirty and either forced or autosave interval has elapsed."""
+        if not self.persist_path or not self._dirty:
+            return
+        now = time.time()
+        if not force and (now - self._last_save) < self.AUTOSAVE_INTERVAL_SECS:
+            return
+        self._save()
+
+    def _save(self) -> None:
+        tmp_path = self.persist_path + ".tmp"
+        try:
+            payload = {
+                "version": self.PERSIST_FORMAT_VERSION,
+                "saved_at": time.time(),
+                "nodes": [
+                    {
+                        "pubkey": info.pubkey.hex(),
+                        "name": info.name,
+                        "adv_type": info.adv_type,
+                        "last_seen": info.last_seen,
+                    }
+                    for info in self.nodes.values()
+                ],
+            }
+            with open(tmp_path, "w") as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp_path, self.persist_path)
+            self._last_save = time.time()
+            self._dirty = False
+        except OSError as e:
+            sys.stderr.write(f"[{ts_now()}] warning: registry save failed: {e}\n")
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    def _load(self) -> None:
+        if not os.path.exists(self.persist_path):
+            return
+        try:
+            with open(self.persist_path) as f:
+                data = json.load(f)
+            ver = data.get("version", 0)
+            if ver != self.PERSIST_FORMAT_VERSION:
+                sys.stderr.write(
+                    f"[{ts_now()}] warning: registry version mismatch "
+                    f"(file v{ver}, expected v{self.PERSIST_FORMAT_VERSION}); "
+                    f"starting fresh\n"
+                )
+                return
+            loaded = 0
+            for entry in data.get("nodes", []):
+                try:
+                    pk = bytes.fromhex(entry["pubkey"])
+                    self.nodes[pk] = NodeInfo(
+                        pubkey=pk,
+                        name=entry.get("name", ""),
+                        adv_type=int(entry.get("adv_type", 0)),
+                        last_seen=float(entry.get("last_seen", 0.0)),
+                    )
+                    loaded += 1
+                except (ValueError, KeyError, TypeError):
+                    continue
+            print(f"[{ts_now()}] registry: loaded {loaded} nodes from "
+                  f"{self.persist_path}")
+            self._last_save = time.time()
+        except (json.JSONDecodeError, OSError) as e:
+            sys.stderr.write(f"[{ts_now()}] warning: registry load failed: {e}\n")
 
 
 # ---- Dedup cache ---------------------------------------------------------------
@@ -582,6 +678,12 @@ def on_message(client, userdata, msg):
         if every > 0 and userdata["msg_count"] % every == 0:
             print(f"[{ts_now()}] -- {dedup.stats()}")
 
+    # Throttled autosave of the node registry. Cheap (no-op when not dirty
+    # or when within the autosave interval).
+    reg: Optional[NodeRegistry] = userdata.get("registry")
+    if reg is not None:
+        reg.maybe_save()
+
 
 def main():
     ap = argparse.ArgumentParser(description="MeshCore MQTT sniffer")
@@ -610,12 +712,19 @@ def main():
                     help="only attach known-node names when hash_size >= this many "
                          "bytes (default 2; 1-byte hashes collide too often in big "
                          "meshes to be informative)")
+    ap.add_argument("--registry-file",
+                    default=os.path.expanduser("~/.meshcore_node_registry.json"),
+                    help="path to persisted node registry JSON "
+                         "(default ~/.meshcore_node_registry.json)")
+    ap.add_argument("--no-persist-registry", action="store_true",
+                    help="disable loading/saving the node registry across runs")
     ap.add_argument("--client-id", default=f"meshcore-sniffer-{int(time.time())}",
                     help="MQTT client id")
     args = ap.parse_args()
 
     dedup = None if args.no_dedup else DedupCache(window_secs=args.dedup_window)
-    registry = NodeRegistry()
+    registry_path = None if args.no_persist_registry else args.registry_file
+    registry = NodeRegistry(persist_path=registry_path)
 
     topics = args.topic if args.topic else ["meshcore/+/rx", "meshcore/+/tx"]
 
@@ -651,6 +760,10 @@ def main():
     except KeyboardInterrupt:
         if dedup is not None:
             print(f"\n[{ts_now()}] -- final {dedup.stats()}")
+        registry.maybe_save(force=True)
+        if registry.persist_path:
+            print(f"[{ts_now()}] -- registry: {len(registry.nodes)} nodes -> "
+                  f"{registry.persist_path}")
         print("bye")
 
 
