@@ -94,8 +94,56 @@ SIGNATURE_SIZE = 64
 BRIDGE_HDR_LEN = 7
 BRIDGE_HDR_VER = 1
 
-PAYLOAD_TYPE_ACK   = 0x03
-PAYLOAD_TYPE_TRACE = 0x09
+PAYLOAD_TYPE_ACK    = 0x03
+PAYLOAD_TYPE_ADVERT = 0x04
+PAYLOAD_TYPE_TRACE  = 0x09
+
+
+# ---- Node registry (built from observed ADVERTs) -------------------------------
+
+@dataclass
+class NodeInfo:
+    pubkey: bytes
+    name: str
+    adv_type: int
+    last_seen: float
+
+
+class NodeRegistry:
+    """
+    Tracks (pubkey -> name) from every ADVERT we parse. Path hashes in
+    MeshCore are just the first N bytes of the pubkey (see Identity.h's
+    `copyHashTo` -- `memcpy(dest, pub_key, len)`), so we can label any
+    path entry whose prefix matches a known pubkey.
+    """
+
+    def __init__(self):
+        self.nodes: dict = {}  # full pubkey -> NodeInfo
+
+    def register(self, pubkey: bytes, name: str, adv_type: int) -> None:
+        self.nodes[pubkey] = NodeInfo(
+            pubkey=pubkey, name=name, adv_type=adv_type, last_seen=time.time()
+        )
+
+    def lookup_prefix(self, prefix: bytes):
+        """
+        Return (matching_node, num_matches). When num_matches > 1, the
+        hash is too short to disambiguate -- common with 1-byte hashes
+        in a busy regional mesh.
+        """
+        matches = [info for pk, info in self.nodes.items()
+                   if pk.startswith(prefix)]
+        if not matches:
+            return None, 0
+        return matches[0], len(matches)
+
+    def lookup_all_prefix(self, prefix: bytes):
+        """
+        Return every known node whose pubkey starts with this prefix.
+        Works uniformly for 1-, 2-, and 3-byte path hash sizes.
+        """
+        return [info for pk, info in self.nodes.items()
+                if pk.startswith(prefix)]
 
 
 # ---- Dedup cache ---------------------------------------------------------------
@@ -327,6 +375,34 @@ def render_path(path: bytes, hash_size: int) -> str:
     return " ".join(path[i:i + hash_size].hex() for i in range(0, len(path), hash_size))
 
 
+def render_path_labeled(path: bytes, hash_size: int,
+                        registry: Optional["NodeRegistry"]) -> str:
+    """
+    Compact path render. Each chunk (1-, 2-, or 3-byte hash, per hash_size)
+    is shown as hex; when one or more known nodes share the prefix, their
+    names are appended in parentheses, comma-separated. Chunks are joined
+    with '-' to keep long paths readable on a single line.
+
+    Examples:
+        c7-d4-db-7f                             (no names known)
+        c7(SouthCapHill)-d4-db-7f               (one match)
+        c7(SouthCapHill,Joe,Bridge)-d4(Mike)    (collision shown)
+    """
+    if not path:
+        return "(empty)"
+    parts = []
+    for i in range(0, len(path), hash_size):
+        chunk = path[i:i + hash_size]
+        label = chunk.hex()
+        if registry is not None:
+            matches = registry.lookup_all_prefix(chunk)
+            if matches:
+                names = ",".join(m.name for m in matches)
+                label = f"{chunk.hex()}({names})"
+        parts.append(label)
+    return "-".join(parts)
+
+
 def hexdump(b: bytes, indent: str = "    ") -> str:
     out = []
     for off in range(0, len(b), 16):
@@ -338,7 +414,8 @@ def hexdump(b: bytes, indent: str = "    ") -> str:
 
 
 def render_packet(topic: str, payload: bytes, verbose: bool, debug: bool = False,
-                  dedup: Optional[DedupCache] = None) -> str:
+                  dedup: Optional[DedupCache] = None,
+                  registry: Optional["NodeRegistry"] = None) -> str:
     parts = []
     bridge_id = topic.split("/")[-2] if "/" in topic else topic
 
@@ -423,7 +500,7 @@ def render_packet(topic: str, payload: bytes, verbose: bool, debug: bool = False
         parts.append(hexdump(mesh_bytes))
 
     # Payload-specific decoding
-    if pkt.payload_type == 0x04:  # ADVERT
+    if pkt.payload_type == PAYLOAD_TYPE_ADVERT:
         adv = AdvertInfo.parse(pkt.payload)
         if adv:
             type_name = ADV_TYPE_NAMES.get(adv.adv_type, str(adv.adv_type))
@@ -435,12 +512,21 @@ def render_packet(topic: str, payload: bytes, verbose: bool, debug: bool = False
             if adv.has_latlon and (adv.lat or adv.lon):
                 line2 += f" loc=({adv.lat:.4f}, {adv.lon:.4f})"
             parts.append(line2)
+            # Register the node so future paths can be labeled with its name.
+            if registry is not None:
+                registry.register(adv.pub_key, adv.name, adv.adv_type)
 
-    # Verbose: extra details
+    # Default: show the labeled path on a second line for any non-empty path.
+    if pkt.hop_count > 0:
+        parts.append(
+            f"  path[{pkt.hop_count}@{pkt.path_hash_size}]: "
+            f"{render_path_labeled(pkt.path, pkt.path_hash_size, registry)}"
+        )
+
+    # Verbose: extra details (transport codes, raw bytes, uptime)
     if verbose:
         if pkt.has_transport_codes:
             parts.append(f"  transport_codes: 0x{pkt.transport_codes[0]:04x} 0x{pkt.transport_codes[1]:04x}")
-        parts.append(f"  path[{pkt.hop_count}@{pkt.path_hash_size}]: {render_path(pkt.path, pkt.path_hash_size)}")
         parts.append(f"  payload[{len(pkt.payload)}]: {pkt.payload.hex()}")
         parts.append(f"  uptime: {hdr.uptime_ms} ms")
 
@@ -474,6 +560,7 @@ def on_message(client, userdata, msg):
         msg.topic, msg.payload,
         userdata["verbose"], userdata["debug"],
         dedup=userdata.get("dedup"),
+        registry=userdata.get("registry"),
     )
     print(line)
 
@@ -512,6 +599,7 @@ def main():
     args = ap.parse_args()
 
     dedup = None if args.no_dedup else DedupCache(window_secs=args.dedup_window)
+    registry = NodeRegistry()
 
     userdata = {
         "topic": args.topic,
@@ -519,6 +607,7 @@ def main():
         "debug": args.debug,
         "bridge_filter": args.bridge,
         "dedup": dedup,
+        "registry": registry,
         "msg_count": 0,
         "stats_every": args.stats_every,
     }
