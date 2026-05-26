@@ -78,9 +78,17 @@ void MqttBridge::begin() {
     BRIDGE_DEBUG_PRINTLN("MQTT: disabled in prefs\n");
     return;
   }
-  if (_prefs->mqtt_host[0] == 0 || _prefs->mqtt_port == 0) {
-    BRIDGE_DEBUG_PRINTLN("MQTT: no host/port configured\n");
+  if (_prefs->mqtt_host[0] == 0) {
+    BRIDGE_DEBUG_PRINTLN("MQTT: no host configured\n");
     return;
+  }
+
+  // Port 0 means "use the protocol default for the current TLS setting":
+  //   TLS off -> 1883 (plain MQTT)
+  //   TLS on  -> 8883 (mqtts)
+  uint16_t resolved_port = _prefs->mqtt_port;
+  if (resolved_port == 0) {
+    resolved_port = _prefs->mqtt_tls ? 8883 : 1883;
   }
 
   resolvedClientId(_resolved_client_id, sizeof(_resolved_client_id));
@@ -101,7 +109,7 @@ void MqttBridge::begin() {
   } else {
     _client.setClient(_plain_client);
   }
-  _client.setServer(_prefs->mqtt_host, _prefs->mqtt_port);
+  _client.setServer(_prefs->mqtt_host, resolved_port);
   _client.setKeepAlive(30);
   _client.setSocketTimeout(15);
 
@@ -125,8 +133,14 @@ bool MqttBridge::tryConnect() {
   if (WiFi.status() != WL_CONNECTED) {
     return false;
   }
+  // Re-resolve the port at connect time so a runtime TLS toggle picks the
+  // right default without requiring a fresh begin().
+  uint16_t connect_port = _prefs->mqtt_port;
+  if (connect_port == 0) {
+    connect_port = _prefs->mqtt_tls ? 8883 : 1883;
+  }
   BRIDGE_DEBUG_PRINTLN("MQTT: connecting to %s:%d as '%s'\n",
-                       _prefs->mqtt_host, (int)_prefs->mqtt_port, _resolved_client_id);
+                       _prefs->mqtt_host, (int)connect_port, _resolved_client_id);
 
   const char *user = _prefs->mqtt_user[0] ? _prefs->mqtt_user : nullptr;
   const char *pass = _prefs->mqtt_password[0] ? _prefs->mqtt_password : nullptr;

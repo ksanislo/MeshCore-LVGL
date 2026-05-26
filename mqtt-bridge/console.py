@@ -212,7 +212,7 @@ WiFi station config (ESP32 only):
 MQTT bridge config:
 
   set mqtt.host <hostname-or-ip>   set "" to clear
-  set mqtt.port <port>             1883=plain, 8883=TLS; 0 = clear
+  set mqtt.port <port>             0 = use default (1883 plain / 8883 TLS)
   set mqtt.user <user>           blank = anonymous
   set mqtt.password <pass>
   set mqtt.tls on|off            insecure-mode TLS (no cert verify) for v1
@@ -536,6 +536,11 @@ BLANK_DEFAULT_DESCRIPTIONS = {
     "mqtt.subscribe":   '(default: "<topic_prefix>/rf")',
 }
 
+# Same idea but for numeric fields where "0" means "use default".
+ZERO_DEFAULT_DESCRIPTIONS = {
+    "mqtt.port":        '0  (default: 1883 if mqtt.tls=off, 8883 if mqtt.tls=on)',
+}
+
 
 def run_get_all(ser, settle):
     for cmd in GET_ALL_COMMANDS:
@@ -547,6 +552,8 @@ def run_get_all(ser, settle):
             display = "(not supported on this build)"
         elif value == "" and key in BLANK_DEFAULT_DESCRIPTIONS:
             display = BLANK_DEFAULT_DESCRIPTIONS[key]
+        elif value == "0" and key in ZERO_DEFAULT_DESCRIPTIONS:
+            display = ZERO_DEFAULT_DESCRIPTIONS[key]
         else:
             display = value
 
