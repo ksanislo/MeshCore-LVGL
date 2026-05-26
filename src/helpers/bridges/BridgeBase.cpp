@@ -39,6 +39,10 @@ void BridgeBase::handleReceivedPacket(mesh::Packet *packet) {
     return;
   }
 
+  // Mark this packet as bridge-injected so allowPacketForward() can grant
+  // forwarding selectively in REPEAT_BRIDGE mode.
+  packet->_from_bridge_inject = true;
+
   if (!_seen_packets.hasSeen(packet)) {
     // bridge_delay provides a buffer to prevent immediate processing conflicts in the mesh network.
     _mgr->queueInbound(packet, millis() + _prefs->bridge_delay);

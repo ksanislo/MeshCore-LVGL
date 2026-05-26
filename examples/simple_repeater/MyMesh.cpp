@@ -427,7 +427,11 @@ void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, ui
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
-  if (_prefs.disable_fwd) return false;
+  // REPEAT_OFF blocks everything unconditionally.
+  if (_prefs.disable_fwd == REPEAT_OFF) return false;
+
+  // Forwarding gates that apply to all forward-eligible modes:
+  //   hop count, transport-code region, loop detection.
   if (packet->isRouteFlood() && packet->getPathHashCount() >= _prefs.flood_max) return false;
   if (packet->isRouteFlood() && recv_pkt_region == NULL) {
     MESH_DEBUG_PRINTLN("allowPacketForward: unknown transport code, or wildcard not allowed for FLOOD packet");
@@ -447,6 +451,21 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
       return false;
     }
   }
+
+  // Past every gate: this packet would have been forwarded under REPEAT_ON.
+  // For REPEAT_BRIDGE, only retransmit on RF if the packet came from a
+  // Bridge (MQTT/RS232/ESPNow). For RF-received packets we instead synthesize
+  // a path-stamped /tx publish so cross-subscribers still see a consistent
+  // hop chain -- but the radio stays quiet. Placing this here (after the
+  // mesh seen-table check and the standard gates) means we fire exactly
+  // once per logical packet that would have been a legit forward.
+  if (_prefs.disable_fwd == REPEAT_BRIDGE && !packet->_from_bridge_inject) {
+#ifdef WITH_MQTT_BRIDGE
+    mqtt_bridge.publishStampedFromRx(const_cast<mesh::Packet*>(packet));
+#endif
+    return false;
+  }
+
   return true;
 }
 
@@ -481,6 +500,11 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
   int snr  = (int)(_radio->getLastSNR() * 4);
   mqtt_bridge.setLastSignal((int8_t)rssi, (int8_t)snr);
   mqtt_bridge.publishRx(pkt);
+  // The "phantom /tx" publish for REPEAT_BRIDGE mode is fired from
+  // allowPacketForward() instead of here, so it benefits from the mesh's
+  // seen-table dedup and the standard forwarding gates (flood_max,
+  // transport code, loop detection). logRx runs BEFORE dedup, which
+  // would otherwise multiply-publish multi-path receptions.
 #endif
 
   if (_logging) {

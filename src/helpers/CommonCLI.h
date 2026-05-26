@@ -19,6 +19,15 @@
 #define LOOP_DETECT_MODERATE  2
 #define LOOP_DETECT_STRICT    3
 
+// Repeat / forwarding mode for NodePrefs.disable_fwd. Backward compatible
+// with the old boolean meaning: 0 = forward (repeater), 1 = don't forward.
+// A new value 2 = "bridge mode": forward only packets that arrived via a
+// Bridge (MQTT/RS232/ESPNow), not packets we heard on RF. Lets a node be
+// a quiet RF observer while still injecting cross-bridge traffic.
+#define REPEAT_ON     0   // forward everything (full repeater; legacy "on")
+#define REPEAT_OFF    1   // forward nothing (legacy "off")
+#define REPEAT_BRIDGE 2   // forward only bridge-injected packets
+
 struct NodePrefs { // persisted to file
   float airtime_factor;
   char node_name[32];

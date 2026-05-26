@@ -196,8 +196,10 @@ Radio configuration:
     "routing": """\
 Routing / flood tuning:
 
-  get repeat               whether this node forwards (on/off)
-  set repeat on|off
+  get repeat               forwarding mode (on / off / bridge)
+  set repeat on|off|bridge   on = full repeater; off = no forwarding;
+                             bridge = forward only bridge-injected packets
+                             (quiet RF observer + active MQTT->RF gateway)
   get flood.max            max hop count for flood packets (default 64)
   set flood.max <N>
   get advert.interval      zero-hop advert interval in minutes

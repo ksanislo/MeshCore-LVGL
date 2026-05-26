@@ -32,6 +32,8 @@ MqttBridge::MqttBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   _topic_status[0] = 0;
   _topic_subscribe[0] = 0;
   _pubkey_short_hex[0] = 0;
+  memset(_pubkey_bytes, 0, sizeof(_pubkey_bytes));
+  _pubkey_bytes_len = 0;
   _client.setCallback(mqtt_cb);
   _client.setBufferSize(MQTT_BUFFER_SIZE);
 }
@@ -40,8 +42,10 @@ void MqttBridge::setLocalPubkey(const uint8_t *pubkey, size_t len) {
   size_t to_copy = (len < 4) ? len : 4;
   for (size_t i = 0; i < to_copy; i++) {
     sprintf(&_pubkey_short_hex[i * 2], "%02x", pubkey[i]);
+    _pubkey_bytes[i] = pubkey[i];   // raw bytes for path-stamping
   }
   _pubkey_short_hex[to_copy * 2] = 0;
+  _pubkey_bytes_len = (uint8_t)to_copy;
 }
 
 void MqttBridge::resolvedClientId(char *dest, size_t dest_sz) {
@@ -274,6 +278,61 @@ void MqttBridge::publishTx(mesh::Packet *packet) {
   buildHeader(out, _last_rssi, _last_snr_x4);
   memcpy(out + DOWN_HEADER_LEN, pkt_buf, pkt_len);
   if (_client.publish(_topic_tx, out, DOWN_HEADER_LEN + pkt_len, false)) {
+    _msgs_pub++;
+  }
+}
+
+void MqttBridge::publishStampedFromRx(mesh::Packet *packet) {
+  // "Phantom forward" publish. In REPEAT_BRIDGE mode we don't actually
+  // transmit RF-received packets on the radio (keeps the airwaves quiet)
+  // but downstream peers subscribing to our /tx still expect to see a
+  // packet stamped with our path hash. Synthesize that publish here.
+  if (!_running || !packet || !_client.connected()) return;
+  if (!_prefs->mqtt_publish_tx) return;
+  if (_pubkey_bytes_len == 0) return;  // pubkey not set yet, can't stamp
+
+  // Bail if path is at the protocol max -- can't stamp another hop.
+  uint8_t cur_count = packet->getPathHashCount();
+  uint8_t hash_sz   = packet->getPathHashSize();
+  if (hash_sz > _pubkey_bytes_len) return;  // shouldn't happen; pubkey is short
+  if (((int)(cur_count) + 1) * hash_sz > MAX_PATH_SIZE) return;
+
+  // Serialize the packet first; the wire bytes lay out as header + (optional
+  // transport_codes) + path_len + path + payload. We need to insert our hash
+  // bytes between the end of the current path and the start of the payload,
+  // and bump path_len's count by 1. Easier: serialize via writeTo, then
+  // rewrite the path region in the buffer.
+  uint8_t pkt_buf[MAX_MESH_PACKET];
+  int orig_len = packet->writeTo(pkt_buf);
+  if (orig_len <= 0 || orig_len > (int)MAX_MESH_PACKET) return;
+
+  // Compute byte offsets inside pkt_buf.
+  // [0] header
+  // [1..4 optional] transport_codes
+  // [N] path_len byte
+  // [N+1 .. N+old_path_bytes] path
+  // [N+1+old_path_bytes .. end] payload
+  int path_len_off = 1 + (packet->hasTransportCodes() ? 4 : 0);
+  int old_path_bytes = cur_count * hash_sz;
+  int payload_off = path_len_off + 1 + old_path_bytes;
+  int payload_bytes = orig_len - payload_off;
+  if (payload_bytes < 0) return;  // malformed
+  int new_len = orig_len + hash_sz;
+  if (new_len > (int)MAX_MESH_PACKET) return;
+
+  // Shift the payload right by hash_sz bytes to make room for our hash.
+  memmove(&pkt_buf[payload_off + hash_sz], &pkt_buf[payload_off], payload_bytes);
+  // Insert our hash at the end of the existing path.
+  memcpy(&pkt_buf[payload_off], _pubkey_bytes, hash_sz);
+  // Bump path_len's hop count by 1 (keeps hash_size bits intact).
+  uint8_t new_path_len_byte = (pkt_buf[path_len_off] & 0xC0) | ((cur_count + 1) & 0x3F);
+  pkt_buf[path_len_off] = new_path_len_byte;
+
+  // Now wrap in the same header/publish path that publishTx uses.
+  uint8_t out[DOWN_HEADER_LEN + MAX_MESH_PACKET];
+  buildHeader(out, _last_rssi, _last_snr_x4);
+  memcpy(out + DOWN_HEADER_LEN, pkt_buf, new_len);
+  if (_client.publish(_topic_tx, out, DOWN_HEADER_LEN + new_len, false)) {
     _msgs_pub++;
   }
 }

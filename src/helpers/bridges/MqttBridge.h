@@ -145,6 +145,19 @@ private:
 
   // Local node pubkey hex (first 8 hex chars) used as fallback client id
   char      _pubkey_short_hex[9];
+  // Raw pubkey bytes (first 4) used to append our path hash when synthesizing
+  // a phantom /tx publish in REPEAT_BRIDGE mode -- matches the firmware's
+  // path-stamping convention where the on-wire hash is just a prefix of the
+  // pubkey (see src/Identity.h::copyHashTo).
+  uint8_t   _pubkey_bytes[4];
+  uint8_t   _pubkey_bytes_len;
+
+public:
+  // Publish a path-stamped copy of an RF-received packet to /tx, without
+  // actually transmitting on RF. Used by MyMesh::logRx in REPEAT_BRIDGE mode
+  // so cross-subscribers see a consistent path chain (Cascadia hops + our
+  // hash) even though we're a quiet RF observer.
+  void publishStampedFromRx(mesh::Packet *packet);
 };
 
 #endif // WITH_MQTT_BRIDGE

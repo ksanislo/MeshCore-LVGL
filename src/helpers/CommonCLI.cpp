@@ -632,9 +632,22 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "Error, bad chars");
     }
   } else if (memcmp(config, "repeat ", 7) == 0) {
-    _prefs->disable_fwd = memcmp(&config[7], "off", 3) == 0;
-    savePrefs();
-    strcpy(reply, _prefs->disable_fwd ? "OK - repeat is now OFF" : "OK - repeat is now ON");
+    const char *val = &config[7];
+    if (memcmp(val, "bridge", 6) == 0) {
+      _prefs->disable_fwd = REPEAT_BRIDGE;
+      savePrefs();
+      strcpy(reply, "OK - repeat is now BRIDGE (forward only bridge-injected)");
+    } else if (memcmp(val, "off", 3) == 0) {
+      _prefs->disable_fwd = REPEAT_OFF;
+      savePrefs();
+      strcpy(reply, "OK - repeat is now OFF");
+    } else if (memcmp(val, "on", 2) == 0) {
+      _prefs->disable_fwd = REPEAT_ON;
+      savePrefs();
+      strcpy(reply, "OK - repeat is now ON");
+    } else {
+      strcpy(reply, "Error: repeat must be on|off|bridge");
+    }
 #if defined(USE_SX1262) || defined(USE_SX1268)
   } else if (memcmp(config, "radio.rxgain ", 13) == 0) {
     _prefs->rx_boosted_gain = memcmp(&config[13], "on", 2) == 0;
@@ -968,7 +981,13 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "name", 4) == 0) {
     sprintf(reply, "> %s", _prefs->node_name);
   } else if (memcmp(config, "repeat", 6) == 0) {
-    sprintf(reply, "> %s", _prefs->disable_fwd ? "off" : "on");
+    const char *mode_str;
+    switch (_prefs->disable_fwd) {
+      case REPEAT_ON:     mode_str = "on";     break;
+      case REPEAT_BRIDGE: mode_str = "bridge"; break;
+      default:            mode_str = "off";    break;  // REPEAT_OFF and any future-unknown
+    }
+    sprintf(reply, "> %s", mode_str);
   } else if (memcmp(config, "lat", 3) == 0) {
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->node_lat));
   } else if (memcmp(config, "lon", 3) == 0) {
