@@ -15,21 +15,42 @@
  * broker on a "down" topic, and injects packets received on an "up" topic back
  * into the local mesh.
  *
- * Topic convention (from the daemon's perspective):
- *   <prefix>/up    - daemon publishes packets here for the firmware to TX on RF
- *   <prefix>/down  - firmware publishes every packet it heard from RF here
+ * Topic convention:
+ *   <prefix>/rx       - firmware publishes RX-flavor packets here (heard from
+ *                       RF, pre-forward) when mqtt.publish_rx = on
+ *   <prefix>/tx       - firmware publishes TX-flavor packets here (post-forward
+ *                       with this bridge's hash appended) when mqtt.publish_tx
+ *                       = on
+ *   <prefix>/rf       - default subscribe target: any packet published here is
+ *                       injected onto our local RF as if heard from the air
+ *   <prefix>/status   - retained "online"/"offline" via LWT
  *
- * Note: "up" / "down" mean "toward the air" / "from the air". This is
- * inverted from the LoRaWAN convention where uplink = device->cloud.
+ * The subscribe target is configurable via mqtt.subscribe (empty = default
+ * <prefix>/rf). Setting it to e.g. "meshcore/some-peer/tx" turns this bridge
+ * into a passive listener that re-broadcasts whatever the peer transmits --
+ * no daemon required for simple symmetric pairing.
  *
- * The "down" publish payload uses a small fixed header:
+ * Loop suppression is delegated to the underlying mesh layer's own
+ * SimpleMeshTables. MeshCore is designed to handle constant RF echoes; an
+ * MQTT-arrived packet that the mesh has already seen (because we originated
+ * it or forwarded it ourselves) is dropped by the mesh's normal hasSeen()
+ * check. No firmware-level dedup needed -- the bandwidth cost of publishing
+ * extra copies on /rx is small and the daemon can dedup if it wants.
+ *
+ * Topic-level self-filter: messages whose topic matches our own /rx or /tx
+ * are silently dropped before parsing. Defends against wildcard subscribe
+ * patterns like "meshcore/+/tx" pulling our own publishes back to us.
+ *
+ * /rx and /tx publish payloads share a fixed header:
  *   [1]  header version (currently 1)
- *   [4]  uptime millis (little-endian) when received
- *   [1]  RSSI (signed dBm)
+ *   [4]  uptime millis (little-endian) when the event was logged
+ *   [1]  RSSI (signed dBm; meaningful for /rx, stale on /tx)
  *   [1]  SNR  (signed, x4 - same convention as KISS RxMeta)
  *   [N]  raw mesh packet bytes (variable)
  *
- * "up" expects only raw mesh packet bytes (no header).
+ * Inbound subscribe payload: if topic ends in "/rx" or "/tx", the header is
+ * stripped before injection. Otherwise (e.g. /rf), bytes are treated as raw
+ * mesh packet bytes.
  */
 class MqttBridge : public BridgeBase {
 public:
@@ -43,10 +64,15 @@ public:
   void begin() override;
   void end() override;
   void loop() override;
+  // sendPacket() routes by direction: rx-flavor publishes go to /rx, tx-flavor
+  // publishes go to /tx. The two are independent (gated by mqtt.publish_rx and
+  // mqtt.publish_tx prefs).
   void sendPacket(mesh::Packet *packet) override;
+  void publishRx(mesh::Packet *packet);
+  void publishTx(mesh::Packet *packet);
   void onPacketReceived(mesh::Packet *packet) override;
 
-  // Record signal stats for the next sendPacket() call (called from logRx)
+  // Record signal stats for the next publishRx() call (called from logRx)
   void setLastSignal(int8_t rssi_dbm, int8_t snr_x4) {
     _last_rssi = rssi_dbm;
     _last_snr_x4 = snr_x4;
@@ -87,9 +113,10 @@ private:
   // Cached resolved values; recomputed on applyMqttConfig()
   char      _resolved_client_id[24];
   char      _resolved_topic_prefix[64];
-  char      _topic_up[80];
-  char      _topic_down[80];
-  char      _topic_status[80];
+  char      _topic_rx[80];        // <prefix>/rx
+  char      _topic_tx[80];        // <prefix>/tx
+  char      _topic_status[80];    // <prefix>/status
+  char      _topic_subscribe[96]; // mqtt.subscribe or "<prefix>/rf"
 
   // Local node pubkey hex (first 8 hex chars) used as fallback client id
   char      _pubkey_short_hex[9];

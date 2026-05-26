@@ -475,15 +475,12 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
   }
 #endif
 #ifdef WITH_MQTT_BRIDGE
-  // mqtt.publish_tx is a mode selector:
-  //   off (default) -> publish on RX: what we heard from RF, pre-forward
-  //   on            -> publish on TX: what we put on the air, post-hop-stamp
-  if (!_prefs.mqtt_publish_tx) {
-    int rssi = (int)_radio->getLastRSSI();
-    int snr  = (int)(_radio->getLastSNR() * 4);
-    mqtt_bridge.setLastSignal((int8_t)rssi, (int8_t)snr);
-    mqtt_bridge.sendPacket(pkt);
-  }
+  // RX-flavor publish: what we heard from RF, pre-forward. Independent of
+  // publish_tx. Trust mesh dedup at recipients to handle echoes.
+  int rssi = (int)_radio->getLastRSSI();
+  int snr  = (int)(_radio->getLastSNR() * 4);
+  mqtt_bridge.setLastSignal((int8_t)rssi, (int8_t)snr);
+  mqtt_bridge.publishRx(pkt);
 #endif
 
   if (_logging) {
@@ -512,9 +509,9 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
   }
 #endif
 #ifdef WITH_MQTT_BRIDGE
-  if (_prefs.mqtt_publish_tx) {
-    mqtt_bridge.sendPacket(pkt);
-  }
+  // TX-flavor publish: what we just put on the air, with our hash already
+  // stamped into the path for forwarded packets. Independent of publish_rx.
+  mqtt_bridge.publishTx(pkt);
 #endif
 
   if (_logging) {
@@ -909,6 +906,11 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.flood_advert_interval = 12; // 12 hours
   _prefs.flood_max = 64;
   _prefs.interference_threshold = 0; // disabled
+
+  // MQTT bridge defaults (publish_rx defaults on so the legacy "publish heard
+  // packets" behaviour is preserved when only mqtt.enabled is toggled on).
+  _prefs.mqtt_publish_rx = 1;
+  _prefs.mqtt_publish_tx = 0;
 
   // bridge defaults
   _prefs.bridge_enabled = 1;    // enabled

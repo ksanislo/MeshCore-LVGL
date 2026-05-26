@@ -78,7 +78,9 @@ struct NodePrefs { // persisted to file
   char     mqtt_client_id[24]; // empty = auto-derive from pubkey
   char     mqtt_topic_prefix[48]; // empty = "meshcore/<client_id>"
   uint8_t  mqtt_tls;           // boolean; insecure-mode TLS for v1
-  uint8_t  mqtt_publish_tx;    // boolean; if on, also publish our own TX'd packets
+  uint8_t  mqtt_publish_tx;    // boolean; publish post-forward TX bytes to <prefix>/tx
+  uint8_t  mqtt_publish_rx;    // boolean; publish heard RX bytes to <prefix>/rx
+  char     mqtt_subscribe[80]; // subscribe topic pattern; empty = "<prefix>/rf"
 };
 
 class CommonCLICallbacks {

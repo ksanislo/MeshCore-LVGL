@@ -141,7 +141,9 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)_prefs->mqtt_topic_prefix, sizeof(_prefs->mqtt_topic_prefix));           // 592
     file.read((uint8_t *)&_prefs->mqtt_tls, sizeof(_prefs->mqtt_tls));                            // 640
     file.read((uint8_t *)&_prefs->mqtt_publish_tx, sizeof(_prefs->mqtt_publish_tx));              // 641
-    // next: 642
+    file.read((uint8_t *)&_prefs->mqtt_publish_rx, sizeof(_prefs->mqtt_publish_rx));              // 642
+    file.read((uint8_t *)_prefs->mqtt_subscribe, sizeof(_prefs->mqtt_subscribe));                 // 643
+    // next: 723
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -181,11 +183,13 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->mqtt_enabled = constrain(_prefs->mqtt_enabled, 0, 1);
     _prefs->mqtt_tls = constrain(_prefs->mqtt_tls, 0, 1);
     _prefs->mqtt_publish_tx = constrain(_prefs->mqtt_publish_tx, 0, 1);
+    _prefs->mqtt_publish_rx = constrain(_prefs->mqtt_publish_rx, 0, 1);
     _prefs->mqtt_host[sizeof(_prefs->mqtt_host) - 1] = 0;
     _prefs->mqtt_user[sizeof(_prefs->mqtt_user) - 1] = 0;
     _prefs->mqtt_password[sizeof(_prefs->mqtt_password) - 1] = 0;
     _prefs->mqtt_client_id[sizeof(_prefs->mqtt_client_id) - 1] = 0;
     _prefs->mqtt_topic_prefix[sizeof(_prefs->mqtt_topic_prefix) - 1] = 0;
+    _prefs->mqtt_subscribe[sizeof(_prefs->mqtt_subscribe) - 1] = 0;
 
     file.close();
   }
@@ -263,7 +267,9 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)_prefs->mqtt_topic_prefix, sizeof(_prefs->mqtt_topic_prefix));           // 592
     file.write((uint8_t *)&_prefs->mqtt_tls, sizeof(_prefs->mqtt_tls));                            // 640
     file.write((uint8_t *)&_prefs->mqtt_publish_tx, sizeof(_prefs->mqtt_publish_tx));              // 641
-    // next: 642
+    file.write((uint8_t *)&_prefs->mqtt_publish_rx, sizeof(_prefs->mqtt_publish_rx));              // 642
+    file.write((uint8_t *)_prefs->mqtt_subscribe, sizeof(_prefs->mqtt_subscribe));                 // 643
+    // next: 723
 
     file.close();
   }
@@ -863,13 +869,15 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     strcpy(reply, "OK");
   } else if (memcmp(config, "mqtt.port ", 10) == 0) {
     uint32_t p = _atoi(&config[10]);
-    if (p > 0 && p < 65536) {
+    if (p < 65536) {
+      // 0 means "not configured" -- MqttBridge::begin() already treats port 0
+      // as a signal to skip connecting, matching how empty mqtt.host behaves.
       _prefs->mqtt_port = (uint16_t)p;
       savePrefs();
       _callbacks->applyMqttConfig();
       strcpy(reply, "OK");
     } else {
-      strcpy(reply, "Error: port must be 1-65535");
+      strcpy(reply, "Error: port must be 0-65535 (0 = unset)");
     }
   } else if (memcmp(config, "mqtt.user ", 10) == 0) {
     StrHelper::strncpy(_prefs->mqtt_user, &config[10], sizeof(_prefs->mqtt_user));
@@ -898,6 +906,16 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     strcpy(reply, "OK");
   } else if (memcmp(config, "mqtt.publish_tx ", 16) == 0) {
     _prefs->mqtt_publish_tx = memcmp(&config[16], "on", 2) == 0;
+    savePrefs();
+    _callbacks->applyMqttConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.publish_rx ", 16) == 0) {
+    _prefs->mqtt_publish_rx = memcmp(&config[16], "on", 2) == 0;
+    savePrefs();
+    _callbacks->applyMqttConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.subscribe ", 15) == 0) {
+    StrHelper::strncpy(_prefs->mqtt_subscribe, &config[15], sizeof(_prefs->mqtt_subscribe));
     savePrefs();
     _callbacks->applyMqttConfig();
     strcpy(reply, "OK");
@@ -1067,6 +1085,10 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", _prefs->mqtt_tls ? "on" : "off");
   } else if (memcmp(config, "mqtt.publish_tx", 15) == 0) {
     sprintf(reply, "> %s", _prefs->mqtt_publish_tx ? "on" : "off");
+  } else if (memcmp(config, "mqtt.publish_rx", 15) == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_publish_rx ? "on" : "off");
+  } else if (memcmp(config, "mqtt.subscribe", 14) == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_subscribe);
   } else if (memcmp(config, "mqtt.enabled", 12) == 0) {
     sprintf(reply, "> %s", _prefs->mqtt_enabled ? "on" : "off");
   } else if (memcmp(config, "mqtt.status", 11) == 0) {

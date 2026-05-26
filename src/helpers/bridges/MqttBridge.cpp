@@ -27,9 +27,10 @@ MqttBridge::MqttBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   _instance = this;
   _resolved_client_id[0] = 0;
   _resolved_topic_prefix[0] = 0;
-  _topic_up[0] = 0;
-  _topic_down[0] = 0;
+  _topic_rx[0] = 0;
+  _topic_tx[0] = 0;
   _topic_status[0] = 0;
+  _topic_subscribe[0] = 0;
   _pubkey_short_hex[0] = 0;
   _client.setCallback(mqtt_cb);
   _client.setBufferSize(MQTT_BUFFER_SIZE);
@@ -84,9 +85,15 @@ void MqttBridge::begin() {
 
   resolvedClientId(_resolved_client_id, sizeof(_resolved_client_id));
   resolvedTopicPrefix(_resolved_topic_prefix, sizeof(_resolved_topic_prefix));
-  buildTopic(_topic_up,     sizeof(_topic_up),     "up");
-  buildTopic(_topic_down,   sizeof(_topic_down),   "down");
+  buildTopic(_topic_rx,     sizeof(_topic_rx),     "rx");
+  buildTopic(_topic_tx,     sizeof(_topic_tx),     "tx");
   buildTopic(_topic_status, sizeof(_topic_status), "status");
+  if (_prefs->mqtt_subscribe[0]) {
+    strncpy(_topic_subscribe, _prefs->mqtt_subscribe, sizeof(_topic_subscribe) - 1);
+    _topic_subscribe[sizeof(_topic_subscribe) - 1] = 0;
+  } else {
+    buildTopic(_topic_subscribe, sizeof(_topic_subscribe), "rf");
+  }
 
   if (_prefs->mqtt_tls) {
     _tls_client.setInsecure();  // v1: no cert verification, see TODO
@@ -138,8 +145,8 @@ bool MqttBridge::tryConnect() {
   }
 
   publishStatus("online");
-  _client.subscribe(_topic_up, 0);
-  BRIDGE_DEBUG_PRINTLN("MQTT: connected, subscribed %s\n", _topic_up);
+  _client.subscribe(_topic_subscribe, 0);
+  BRIDGE_DEBUG_PRINTLN("MQTT: connected, subscribed %s\n", _topic_subscribe);
   _reconnect_backoff_ms = 1000;
   return true;
 }
@@ -169,53 +176,95 @@ void MqttBridge::loop() {
   _client.loop();
 }
 
+// Legacy AbstractBridge entrypoint. Not used directly by MyMesh anymore --
+// MyMesh calls publishRx() / publishTx() explicitly per-event. Kept as a
+// no-op so the interface is satisfied if someone wires it up.
 void MqttBridge::sendPacket(mesh::Packet *packet) {
-  if (!_running || !packet || !_client.connected()) {
-    return;
-  }
-  if (_seen_packets.hasSeen(packet)) {
-    // We already injected this from MQTT — don't republish it.
-    return;
-  }
+  (void)packet;
+}
 
-  uint8_t pkt_buf[MAX_MESH_PACKET];
-  int pkt_len = packet->writeTo(pkt_buf);
-  if (pkt_len <= 0 || pkt_len > (int)MAX_MESH_PACKET) {
-    BRIDGE_DEBUG_PRINTLN("MQTT: bad packet len=%d\n", pkt_len);
-    return;
-  }
-
-  uint8_t out[DOWN_HEADER_LEN + MAX_MESH_PACKET];
+static void buildHeader(uint8_t *out, int8_t rssi, int8_t snr_x4) {
   uint32_t up = millis();
-  out[0] = DOWN_HEADER_VER;
+  out[0] = MqttBridge::DOWN_HEADER_VER;
   out[1] = (uint8_t)(up & 0xFF);
   out[2] = (uint8_t)((up >> 8) & 0xFF);
   out[3] = (uint8_t)((up >> 16) & 0xFF);
   out[4] = (uint8_t)((up >> 24) & 0xFF);
-  out[5] = (uint8_t)_last_rssi;
-  out[6] = (uint8_t)_last_snr_x4;
-  memcpy(out + DOWN_HEADER_LEN, pkt_buf, pkt_len);
+  out[5] = (uint8_t)rssi;
+  out[6] = (uint8_t)snr_x4;
+}
 
-  if (_client.publish(_topic_down, out, DOWN_HEADER_LEN + pkt_len, false)) {
+void MqttBridge::publishRx(mesh::Packet *packet) {
+  if (!_running || !packet || !_client.connected()) return;
+  if (!_prefs->mqtt_publish_rx) return;
+
+  uint8_t pkt_buf[MAX_MESH_PACKET];
+  int pkt_len = packet->writeTo(pkt_buf);
+  if (pkt_len <= 0 || pkt_len > (int)MAX_MESH_PACKET) return;
+
+  uint8_t out[DOWN_HEADER_LEN + MAX_MESH_PACKET];
+  buildHeader(out, _last_rssi, _last_snr_x4);
+  memcpy(out + DOWN_HEADER_LEN, pkt_buf, pkt_len);
+  if (_client.publish(_topic_rx, out, DOWN_HEADER_LEN + pkt_len, false)) {
     _msgs_pub++;
-  } else {
-    BRIDGE_DEBUG_PRINTLN("MQTT: publish failed\n");
+  }
+}
+
+void MqttBridge::publishTx(mesh::Packet *packet) {
+  if (!_running || !packet || !_client.connected()) return;
+  if (!_prefs->mqtt_publish_tx) return;
+
+  uint8_t pkt_buf[MAX_MESH_PACKET];
+  int pkt_len = packet->writeTo(pkt_buf);
+  if (pkt_len <= 0 || pkt_len > (int)MAX_MESH_PACKET) return;
+
+  uint8_t out[DOWN_HEADER_LEN + MAX_MESH_PACKET];
+  // TX-flavor publishes carry stale RSSI/SNR (from last RX); the daemon
+  // should treat those fields as informational only for /tx topic.
+  buildHeader(out, _last_rssi, _last_snr_x4);
+  memcpy(out + DOWN_HEADER_LEN, pkt_buf, pkt_len);
+  if (_client.publish(_topic_tx, out, DOWN_HEADER_LEN + pkt_len, false)) {
+    _msgs_pub++;
   }
 }
 
 void MqttBridge::onMqttMessage(const char *topic, const uint8_t *payload, unsigned int length) {
-  if (length == 0 || length > MAX_MESH_PACKET) {
-    BRIDGE_DEBUG_PRINTLN("MQTT: rx invalid len=%u\n", length);
+  // Self-filter: if a wildcard subscribe pattern matches our own /rx or /tx
+  // topic, the broker will route our own publishes back to us. Drop those.
+  if (strcmp(topic, _topic_rx) == 0 || strcmp(topic, _topic_tx) == 0) {
     return;
   }
-  BRIDGE_DEBUG_PRINTLN("MQTT: rx %u bytes on %s\n", length, topic);
 
+  // Topics ending in "/rx" or "/tx" carry the fixed publish header before the
+  // packet bytes. Strip it. Any other topic (e.g. our /rf or whatever the user
+  // pointed mqtt.subscribe at) is treated as raw mesh packet bytes.
+  const uint8_t *pkt_bytes = payload;
+  unsigned int pkt_len = length;
+  size_t topic_len = strlen(topic);
+  bool has_header = (topic_len >= 3 &&
+                     (strcmp(topic + topic_len - 3, "/rx") == 0 ||
+                      strcmp(topic + topic_len - 3, "/tx") == 0));
+  if (has_header) {
+    if (length < DOWN_HEADER_LEN) {
+      BRIDGE_DEBUG_PRINTLN("MQTT: rx short header on %s\n", topic);
+      return;
+    }
+    pkt_bytes += DOWN_HEADER_LEN;
+    pkt_len -= DOWN_HEADER_LEN;
+  }
+
+  if (pkt_len == 0 || pkt_len > MAX_MESH_PACKET) {
+    BRIDGE_DEBUG_PRINTLN("MQTT: rx invalid pkt_len=%u on %s\n", pkt_len, topic);
+    return;
+  }
+
+  BRIDGE_DEBUG_PRINTLN("MQTT: inject %u bytes from %s\n", pkt_len, topic);
   mesh::Packet *pkt = _mgr->allocNew();
   if (!pkt) {
     BRIDGE_DEBUG_PRINTLN("MQTT: alloc failed\n");
     return;
   }
-  if (pkt->readFrom(payload, length)) {
+  if (pkt->readFrom(pkt_bytes, pkt_len)) {
     _msgs_sub++;
     onPacketReceived(pkt);
   } else {
@@ -240,8 +289,11 @@ void MqttBridge::describeStatus(char *reply) {
     return;
   }
   if (_client.connected()) {
-    sprintf(reply, "connected msgs_pub=%u msgs_sub=%u prefix=%s",
-            (unsigned)_msgs_pub, (unsigned)_msgs_sub, _resolved_topic_prefix);
+    sprintf(reply, "connected pub=%u sub=%u rx=%s tx=%s subs=%s",
+            (unsigned)_msgs_pub, (unsigned)_msgs_sub,
+            _prefs->mqtt_publish_rx ? "on" : "off",
+            _prefs->mqtt_publish_tx ? "on" : "off",
+            _topic_subscribe);
   } else {
     int st = _client.state();
     sprintf(reply, "disconnected state=%d (backoff=%ums)",
