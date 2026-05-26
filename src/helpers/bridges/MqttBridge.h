@@ -30,13 +30,18 @@
  * into a passive listener that re-broadcasts whatever the peer transmits --
  * no daemon required for simple symmetric pairing.
  *
- * Placeholder substitution: both mqtt.topic_prefix and mqtt.subscribe
- * accept these tokens which are expanded at connect time:
+ * Placeholder substitution: mqtt.client_id, mqtt.topic_prefix, and
+ * mqtt.subscribe all accept these tokens, expanded at connect time:
  *   {client_id}  -> the resolved client_id (mqtt.client_id, or its
- *                   auto-derived default "meshcore-<8 hex of pubkey>")
- *   {pubkey}     -> the first 8 hex chars of this device's pubkey
- * Example: mqtt.topic_prefix = "meshedup/{client_id}" resolves to
- * "meshedup/meshcore-10db83e6" without you having to look anything up.
+ *                   auto-derived default "meshcore-<8 hex of pubkey>").
+ *                   Only valid in topic_prefix and subscribe -- inside
+ *                   mqtt.client_id itself it's passed through literally
+ *                   to avoid self-referential recursion.
+ *   {pubkey}     -> the first 8 hex chars of this device's pubkey.
+ *                   Valid in all three fields.
+ * Example: mqtt.client_id = "rover-{pubkey}" resolves to
+ * "rover-10db83e6"; mqtt.topic_prefix = "meshedup/{client_id}" then
+ * resolves to "meshedup/rover-10db83e6".
  * The empty default for mqtt.topic_prefix is equivalent to
  * "meshcore/{client_id}".
  *
@@ -104,10 +109,15 @@ private:
   void resolvedClientId(char *dest, size_t dest_sz);
   void resolvedTopicPrefix(char *dest, size_t dest_sz);
 
-  // Expand {client_id} and {pubkey} placeholders in user-supplied topic
-  // strings (mqtt.topic_prefix, mqtt.subscribe). Unknown placeholders
+  // Expand {client_id} and {pubkey} placeholders in user-supplied strings
+  // (mqtt.topic_prefix, mqtt.subscribe, mqtt.client_id). Unknown placeholders
   // pass through literally. Output is always null-terminated.
-  void expandPlaceholders(const char *src, char *dest, size_t dest_sz);
+  //
+  // When resolving mqtt.client_id itself, pass allow_client_id=false to
+  // prevent self-referential recursion ({client_id} inside the client_id
+  // value would otherwise call back into resolvedClientId).
+  void expandPlaceholders(const char *src, char *dest, size_t dest_sz,
+                          bool allow_client_id = true);
 
   WiFiClient       _plain_client;
   WiFiClientSecure _tls_client;

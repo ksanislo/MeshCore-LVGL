@@ -46,8 +46,10 @@ void MqttBridge::setLocalPubkey(const uint8_t *pubkey, size_t len) {
 
 void MqttBridge::resolvedClientId(char *dest, size_t dest_sz) {
   if (_prefs->mqtt_client_id[0]) {
-    strncpy(dest, _prefs->mqtt_client_id, dest_sz - 1);
-    dest[dest_sz - 1] = 0;
+    // User-supplied value -- expand {pubkey} but not {client_id} (would
+    // be self-referential).
+    expandPlaceholders(_prefs->mqtt_client_id, dest, dest_sz,
+                       /*allow_client_id=*/false);
   } else if (_pubkey_short_hex[0]) {
     snprintf(dest, dest_sz, "meshcore-%s", _pubkey_short_hex);
   } else {
@@ -66,7 +68,8 @@ void MqttBridge::resolvedTopicPrefix(char *dest, size_t dest_sz) {
   expandPlaceholders(src, dest, dest_sz);
 }
 
-void MqttBridge::expandPlaceholders(const char *src, char *dest, size_t dest_sz) {
+void MqttBridge::expandPlaceholders(const char *src, char *dest, size_t dest_sz,
+                                    bool allow_client_id) {
   if (dest_sz == 0) return;
   size_t out = 0;
   while (*src && out + 1 < dest_sz) {
@@ -76,7 +79,8 @@ void MqttBridge::expandPlaceholders(const char *src, char *dest, size_t dest_sz)
         size_t name_len = (size_t)(end - src - 1);
         const char *replacement = nullptr;
         char cid_buf[24];
-        if (name_len == 9 && memcmp(src + 1, "client_id", 9) == 0) {
+        if (allow_client_id && name_len == 9 &&
+            memcmp(src + 1, "client_id", 9) == 0) {
           resolvedClientId(cid_buf, sizeof(cid_buf));
           replacement = cid_buf;
         } else if (name_len == 6 && memcmp(src + 1, "pubkey", 6) == 0) {
@@ -89,7 +93,7 @@ void MqttBridge::expandPlaceholders(const char *src, char *dest, size_t dest_sz)
           src = end + 1;
           continue;
         }
-        // Unknown placeholder; pass through literally.
+        // Unknown placeholder (or disallowed in this context); pass through.
       }
     }
     dest[out++] = *src++;

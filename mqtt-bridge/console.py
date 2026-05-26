@@ -241,11 +241,16 @@ MQTT bridge config:
 
   get mqtt.status                connection state + resolved subscribe topic
 
-Placeholders in mqtt.topic_prefix and mqtt.subscribe:
+Placeholders in mqtt.client_id, mqtt.topic_prefix, and mqtt.subscribe:
   {client_id}  -> the resolved client_id (set value, or "meshcore-<8hex>")
+                  Valid in topic_prefix and subscribe.
+                  In mqtt.client_id itself it's passed through literally
+                  to avoid recursion -- use {pubkey} there instead.
   {pubkey}     -> first 8 hex chars of this device's pubkey
+                  Valid everywhere.
 
 Examples:
+  set mqtt.client_id rover-{pubkey}             # -> "rover-10db83e6"
   set mqtt.topic_prefix meshedup/{client_id}    # auto-fills the client id
   set mqtt.topic_prefix mything/{pubkey}        # uses raw 8-hex pubkey prefix
   set mqtt.subscribe meshedup/+/tx              # any peer's TX (no placeholder)
@@ -379,16 +384,32 @@ class Completer:
     def complete(self, text, state):
         if state == 0:
             line = readline.get_line_buffer()
-            tokens = line.split()
-            if not tokens:
+            # Look at what comes before the word we're currently completing.
+            # readline.get_begidx() points at the start of the current word,
+            # so everything before that is fully-typed tokens (with any
+            # trailing space stripped).
+            before_cursor = line[:readline.get_begidx()]
+            prior_tokens = before_cursor.split()
+
+            if not prior_tokens:
                 pool = TOP
-            elif tokens[0] == "get" and len(tokens) <= 2:
+            elif len(prior_tokens) == 1 and prior_tokens[0] == "get":
                 pool = GET_PROPS
-            elif tokens[0] == "set" and len(tokens) <= 2:
+            elif len(prior_tokens) == 1 and prior_tokens[0] == "set":
                 pool = SET_PROPS
             else:
                 pool = TOP
-            self.matches = [w for w in pool if w.startswith(text)]
+
+            matches = [w for w in pool if w.startswith(text)]
+
+            # When the match is unique, append a space so the user can type
+            # the next argument without manually adding it. (Python's readline
+            # binding doesn't always wire up completion_append_character on
+            # every platform, and explicit is more reliable than implicit.)
+            if len(matches) == 1:
+                matches[0] = matches[0] + " "
+
+            self.matches = matches
         return self.matches[state] if state < len(self.matches) else None
 
 
