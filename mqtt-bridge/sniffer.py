@@ -267,7 +267,11 @@ class NodeInfo:
     pubkey: bytes
     name: str
     adv_type: int
-    last_seen: float
+    last_seen: float                          # when WE last observed an advert
+    first_seen: Optional[float] = None        # when we first heard this node
+    advert_timestamp: Optional[int] = None    # ts embedded by the source
+    lat: Optional[float] = None               # decimal degrees, only if has_latlon
+    lon: Optional[float] = None
 
 
 class NodeRegistry:
@@ -294,17 +298,30 @@ class NodeRegistry:
         if persist_path:
             self._load()
 
-    def register(self, pubkey: bytes, name: str, adv_type: int) -> None:
+    def register(self, pubkey: bytes, name: str, adv_type: int,
+                 advert_timestamp: Optional[int] = None,
+                 lat: Optional[float] = None,
+                 lon: Optional[float] = None) -> None:
         existing = self.nodes.get(pubkey)
         now = time.time()
-        if existing and existing.name == name and existing.adv_type == adv_type:
-            # Same data; just refresh last_seen. Still mark dirty so the
-            # timestamp gets persisted, but the autosave throttle keeps
-            # writes bounded.
+        if existing:
+            # Always update mutable observation fields. Preserve first_seen.
             existing.last_seen = now
+            existing.name = name
+            existing.adv_type = adv_type
+            if advert_timestamp is not None:
+                existing.advert_timestamp = advert_timestamp
+            # Update location only if the advert actually carried one -- a node
+            # that briefly drops lat/lon shouldn't lose the previously-known
+            # value in our registry.
+            if lat is not None and lon is not None:
+                existing.lat = lat
+                existing.lon = lon
         else:
             self.nodes[pubkey] = NodeInfo(
-                pubkey=pubkey, name=name, adv_type=adv_type, last_seen=now,
+                pubkey=pubkey, name=name, adv_type=adv_type,
+                last_seen=now, first_seen=now,
+                advert_timestamp=advert_timestamp, lat=lat, lon=lon,
             )
         self._dirty = True
 
@@ -342,18 +359,29 @@ class NodeRegistry:
     def _save(self) -> None:
         tmp_path = self.persist_path + ".tmp"
         try:
+            def _node_dict(info: NodeInfo) -> dict:
+                d = {
+                    "pubkey": info.pubkey.hex(),
+                    "name": info.name,
+                    "adv_type": info.adv_type,
+                    "last_seen": info.last_seen,
+                }
+                # Only emit optional fields when set, to keep the file readable
+                # and avoid littering it with nulls for nodes that never sent
+                # location or whose advert timestamp wasn't captured.
+                if info.first_seen is not None:
+                    d["first_seen"] = info.first_seen
+                if info.advert_timestamp is not None:
+                    d["advert_timestamp"] = info.advert_timestamp
+                if info.lat is not None and info.lon is not None:
+                    d["lat"] = info.lat
+                    d["lon"] = info.lon
+                return d
+
             payload = {
                 "version": self.PERSIST_FORMAT_VERSION,
                 "saved_at": time.time(),
-                "nodes": [
-                    {
-                        "pubkey": info.pubkey.hex(),
-                        "name": info.name,
-                        "adv_type": info.adv_type,
-                        "last_seen": info.last_seen,
-                    }
-                    for info in self.nodes.values()
-                ],
+                "nodes": [_node_dict(info) for info in self.nodes.values()],
             }
             with open(tmp_path, "w") as f:
                 json.dump(payload, f, indent=2)
@@ -385,11 +413,21 @@ class NodeRegistry:
             for entry in data.get("nodes", []):
                 try:
                     pk = bytes.fromhex(entry["pubkey"])
+                    # Optional fields: tolerate missing values from older
+                    # registry files written before these were captured.
+                    fs = entry.get("first_seen")
+                    at = entry.get("advert_timestamp")
+                    lat = entry.get("lat")
+                    lon = entry.get("lon")
                     self.nodes[pk] = NodeInfo(
                         pubkey=pk,
                         name=entry.get("name", ""),
                         adv_type=int(entry.get("adv_type", 0)),
                         last_seen=float(entry.get("last_seen", 0.0)),
+                        first_seen=float(fs) if fs is not None else None,
+                        advert_timestamp=int(at) if at is not None else None,
+                        lat=float(lat) if lat is not None else None,
+                        lon=float(lon) if lon is not None else None,
                     )
                     loaded += 1
                 except (ValueError, KeyError, TypeError):
@@ -808,8 +846,17 @@ def render_packet(topic: str, payload: bytes, verbose: bool, debug: bool = False
                 line2 += f" loc=({adv.lat:.4f}, {adv.lon:.4f})"
             parts.append(line2)
             # Register the node so future paths can be labeled with its name.
+            # lat/lon only passed when the advert actually carried location;
+            # registry.register() preserves any previously-known location if
+            # this advert omitted it.
             if registry is not None:
-                registry.register(adv.pub_key, adv.name, adv.adv_type)
+                lat = adv.lat if adv.has_latlon else None
+                lon = adv.lon if adv.has_latlon else None
+                registry.register(
+                    adv.pub_key, adv.name, adv.adv_type,
+                    advert_timestamp=adv.timestamp,
+                    lat=lat, lon=lon,
+                )
     elif pkt.payload_type == PAYLOAD_TYPE_GRP_TXT and channels is not None:
         decoded = channels.try_decode_grp(pkt.payload)
         if decoded is not None:
