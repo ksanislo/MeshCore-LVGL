@@ -702,36 +702,46 @@ def render_packet(topic: str, payload: bytes, verbose: bool, debug: bool = False
         parts.append(f"[{ts_now()}] {bridge_id} RAW mqtt payload ({len(payload)} bytes):")
         parts.append(hexdump(payload))
 
-    # Bridge header (version byte selects layout: v0 = 5 bytes, v1 = 7 bytes)
-    try:
-        hdr = BridgeHeader.parse(payload)
-    except ValueError as e:
-        parts.append(f"[{ts_now()}] {bridge_id} (bad bridge header: {e})")
-        return "\n".join(parts)
+    # /advert topic carries raw mesh packet bytes (no bridge header) -- it's a
+    # retained snapshot of the bridge's pristine self-advert, used so late
+    # subscribers can discover identities without waiting for an RF advert.
+    is_advert_topic = topic.endswith("/advert")
 
-    if debug:
-        bh = payload[:hdr.header_len]
-        bh_desc = (
-            "  bridge_hdr: "
-            f"ver=0x{bh[0]:02x} "
-            f"uptime=0x{bh[4]:02x}{bh[3]:02x}{bh[2]:02x}{bh[1]:02x}(LE)={hdr.uptime_ms}"
-        )
-        if hdr.version == BRIDGE_HDR_VER_V1:
-            bh_desc += (
-                f" rssi=0x{bh[5]:02x}({hdr.rssi})"
-                f" snr_x4=0x{bh[6]:02x}({hdr.snr_db:.2f}dB)"
+    if is_advert_topic:
+        mesh_bytes = payload
+        sig_str = " [retained]"
+        hdr = None
+    else:
+        # Bridge header (version byte selects layout: v0 = 5 bytes, v1 = 7 bytes)
+        try:
+            hdr = BridgeHeader.parse(payload)
+        except ValueError as e:
+            parts.append(f"[{ts_now()}] {bridge_id} (bad bridge header: {e})")
+            return "\n".join(parts)
+
+        if debug:
+            bh = payload[:hdr.header_len]
+            bh_desc = (
+                "  bridge_hdr: "
+                f"ver=0x{bh[0]:02x} "
+                f"uptime=0x{bh[4]:02x}{bh[3]:02x}{bh[2]:02x}{bh[1]:02x}(LE)={hdr.uptime_ms}"
             )
-        parts.append(bh_desc)
+            if hdr.version == BRIDGE_HDR_VER_V1:
+                bh_desc += (
+                    f" rssi=0x{bh[5]:02x}({hdr.rssi})"
+                    f" snr_x4=0x{bh[6]:02x}({hdr.snr_db:.2f}dB)"
+                )
+            parts.append(bh_desc)
 
-    mesh_bytes = payload[hdr.header_len:]
+        mesh_bytes = payload[hdr.header_len:]
 
-    # rssi/snr only meaningful when present (v1); v0 publishes (e.g. /tx) carry
-    # no signal data, so omit those fields entirely from the rendered line.
-    sig_str = (
-        f" rssi={hdr.rssi} snr={hdr.snr_db:.1f}dB"
-        if hdr.rssi is not None and hdr.snr_db is not None
-        else ""
-    )
+        # rssi/snr only meaningful when present (v1); v0 publishes (e.g. /tx)
+        # carry no signal data, so omit those fields entirely.
+        sig_str = (
+            f" rssi={hdr.rssi} snr={hdr.snr_db:.1f}dB"
+            if hdr.rssi is not None and hdr.snr_db is not None
+            else ""
+        )
 
     try:
         pkt = MeshPacket.parse(mesh_bytes)
@@ -881,8 +891,8 @@ def main():
     ap.add_argument("--port", type=int, default=1883, help="MQTT broker port (default 1883)")
     ap.add_argument("--topic", action="append", default=None,
                     help="topic(s) to subscribe; repeatable. "
-                         "Default: meshcore/+/rx AND meshcore/+/tx "
-                         "(covers any bridge publishing in either flavor).")
+                         "Default: meshcore/+/rx, meshcore/+/tx, meshcore/+/advert "
+                         "(covers any bridge publishing in any of those flavors).")
     ap.add_argument("--user", help="MQTT username")
     ap.add_argument("--password", help="MQTT password")
     ap.add_argument("--tls", action="store_true",
@@ -939,7 +949,9 @@ def main():
             chan_names = sorted({c.name for clist in channels.by_hash.values() for c in clist})
             print(f"[{ts_now()}] channels loaded: {', '.join(chan_names)}")
 
-    topics = args.topic if args.topic else ["meshcore/+/rx", "meshcore/+/tx"]
+    topics = args.topic if args.topic else [
+        "meshcore/+/rx", "meshcore/+/tx", "meshcore/+/advert",
+    ]
 
     userdata = {
         "topics": topics,

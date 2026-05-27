@@ -32,6 +32,8 @@ MqttBridge::MqttBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCCloc
   _topic_status[0] = 0;
   _topic_subscribe[0] = 0;
   _pubkey_short_hex[0] = 0;
+  _topic_advert[0] = 0;
+  _self_advert_len = 0;
   _client.setCallback(mqtt_cb);
   _client.setBufferSize(MQTT_BUFFER_SIZE);
 }
@@ -130,6 +132,7 @@ void MqttBridge::begin() {
   buildTopic(_topic_rx,     sizeof(_topic_rx),     "rx");
   buildTopic(_topic_tx,     sizeof(_topic_tx),     "tx");
   buildTopic(_topic_status, sizeof(_topic_status), "status");
+  buildTopic(_topic_advert, sizeof(_topic_advert), "advert");
   if (_prefs->mqtt_subscribe[0]) {
     // Placeholders ({client_id}, {pubkey}) work here too -- useful if you
     // want e.g. "yourcluster/{client_id}/rf" without hard-coding the id.
@@ -195,6 +198,9 @@ bool MqttBridge::tryConnect() {
   }
 
   publishStatus("online");
+  // Republish the cached self-advert (retained) so a freshly reconnected
+  // broker (or a broker that was just restarted) doesn't lose our identity.
+  republishCachedSelfAdvert();
   _client.subscribe(_topic_subscribe, 0);
   BRIDGE_DEBUG_PRINTLN("MQTT: connected, subscribed %s\n", _topic_subscribe);
   _reconnect_backoff_ms = 1000;
@@ -204,6 +210,22 @@ bool MqttBridge::tryConnect() {
 void MqttBridge::publishStatus(const char *state) {
   if (_client.connected()) {
     _client.publish(_topic_status, (const uint8_t *)state, strlen(state), true);
+  }
+}
+
+void MqttBridge::publishSelfAdvert(const uint8_t *bytes, size_t len) {
+  if (!bytes || len == 0 || len > MAX_MESH_PACKET) return;
+  // Cache so we can republish on reconnect even if no fresh advert is generated.
+  memcpy(_self_advert_buf, bytes, len);
+  _self_advert_len = len;
+  republishCachedSelfAdvert();
+}
+
+void MqttBridge::republishCachedSelfAdvert() {
+  if (_self_advert_len == 0 || !_topic_advert[0]) return;
+  if (!_client.connected()) return;
+  if (_client.publish(_topic_advert, _self_advert_buf, _self_advert_len, true)) {
+    _msgs_pub++;
   }
 }
 

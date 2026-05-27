@@ -524,6 +524,18 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
   // seen-table dedup and the standard forwarding gates (flood_max,
   // transport code, loop detection). logRx runs BEFORE dedup, which
   // would otherwise multiply-publish multi-path receptions.
+  //
+  // Opportunistic self-advert refresh: if a neighbor rebroadcasts our own
+  // advert and we hear the echo, republish the *cached pristine* version to
+  // the retained MQTT /advert topic. Defense against the broker losing
+  // retained state between our scheduled advert intervals. We don't use the
+  // echoed bytes themselves -- they have a populated path (hop_count > 0)
+  // from traversing the mesh, while the canonical source form has empty path.
+  if (pkt->getPayloadType() == PAYLOAD_TYPE_ADVERT
+      && pkt->payload_len >= PUB_KEY_SIZE
+      && self_id.matches(pkt->payload)) {
+    mqtt_bridge.republishCachedSelfAdvert();
+  }
 #endif
 
   if (_logging) {
@@ -1092,6 +1104,21 @@ void MyMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
     } else {
       sendZeroHop(pkt, delay_millis);
     }
+#ifdef WITH_MQTT_BRIDGE
+    // Serialize for the retained MQTT /advert topic AFTER sendFloodScoped/
+    // sendZeroHop. Those functions are what set the packet's route_type
+    // bits, populate transport_codes (for TRANSPORT_* variants), and zero
+    // the path -- before that, route_type bits are 0 (which decodes as
+    // TRANSPORT_FLOOD by coincidence) with uninitialized transport_codes.
+    // Publishing at this point captures the pristine on-air form (empty
+    // path, hop_count = 0, correct route_type) that the radio is about
+    // to transmit.
+    uint8_t adv_buf[256];
+    int adv_len = pkt->writeTo(adv_buf);
+    if (adv_len > 0) {
+      mqtt_bridge.publishSelfAdvert(adv_buf, (size_t)adv_len);
+    }
+#endif
   } else {
     MESH_DEBUG_PRINTLN("ERROR: unable to create advertisement packet!");
   }

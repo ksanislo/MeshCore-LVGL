@@ -103,6 +103,20 @@ public:
   // Set the local pubkey, used for the default client_id when prefs are empty
   void setLocalPubkey(const uint8_t *pubkey, size_t len);
 
+  // Cache + retained-publish a freshly generated self-advert. Called from
+  // MyMesh::sendSelfAdvertisement so the broker always holds the most
+  // current identity for late subscribers (sniffers, daemons) to pick up
+  // without waiting for the next RF advert cycle. Payload is the raw mesh
+  // packet bytes (same wire format as an RF advert), pristine -- empty
+  // path, hop_count = 0.
+  void publishSelfAdvert(const uint8_t *bytes, size_t len);
+
+  // Republish the cached pristine self-advert (retained). Used opportunistically
+  // when we detect a stale retained topic (e.g. we hear our own advert echoed
+  // back on RF, suggesting other nodes' state is fresh -- so refresh MQTT too).
+  // No-op if nothing has been cached yet or MQTT isn't connected.
+  void republishCachedSelfAdvert();
+
   // Populate `reply` with a brief status string
   void describeStatus(char *reply);
 
@@ -148,7 +162,15 @@ private:
   char      _topic_rx[80];        // <prefix>/rx
   char      _topic_tx[80];        // <prefix>/tx
   char      _topic_status[80];    // <prefix>/status
+  char      _topic_advert[80];    // <prefix>/advert (retained self-advert)
   char      _topic_subscribe[96]; // mqtt.subscribe or "<prefix>/rf"
+
+  // Most-recent self-advert bytes, cached so we can republish (retained) on
+  // every (re)connect even when nothing has changed. Set by MyMesh whenever
+  // it generates a fresh self-advert; never cleared. Zero len = no advert
+  // generated yet (e.g. MQTT came up before first sendSelfAdvertisement).
+  uint8_t   _self_advert_buf[MAX_MESH_PACKET];
+  size_t    _self_advert_len;
 
   // Local node pubkey hex (first 8 hex chars) used as fallback client id
   char      _pubkey_short_hex[9];

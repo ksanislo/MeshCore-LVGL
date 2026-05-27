@@ -38,6 +38,11 @@ meshcore/<id>/tx       firmware publishes TX-flavor (post-forward, with
 meshcore/<id>/rf       default subscribe target -- bytes published here are
                        injected onto local RF as if heard from the air
 meshcore/<id>/status   retained "online"/"offline" via LWT
+meshcore/<id>/advert   retained: bridge's pristine self-advert (raw mesh
+                       packet bytes, no bridge header). Late subscribers
+                       pick up identity immediately without waiting for an
+                       RF advert cycle. Refreshed on every advert tx and
+                       on hearing our own advert echoed back over RF.
 ```
 
 `publish_rx` and `publish_tx` are independent — turn on either, both, or
