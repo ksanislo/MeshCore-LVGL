@@ -113,12 +113,22 @@ lv_obj_t* UITask::buildHomeScreen() {
   _tab_channels = lv_tabview_add_tab(_tabview, LV_SYMBOL_WIFI     " Channels");
   _tab_settings = lv_tabview_add_tab(_tabview, LV_SYMBOL_SETTINGS " Settings");
 
+  // Opaque tab-page backgrounds: LVGL's default theme makes tab pages
+  // transparent, which forces a full-screen background recomposite (and thus
+  // repaint of the static header + tab bar) whenever a page's content scrolls.
+  // Making them opaque confines scroll repaints to the page's own area.
+  for (lv_obj_t* page : {_tab_contacts, _tab_channels, _tab_settings}) {
+    lv_obj_set_style_bg_color(page, lv_color_hex(BG_HEX), 0);
+    lv_obj_set_style_bg_opa(page, LV_OPA_COVER, 0);
+  }
+
   // ----- Contacts tab: scrollable list, with an empty-state label when zero -----
   lv_obj_set_style_pad_all(_tab_contacts, 0, 0);
 
   _contacts_list = lv_list_create(_tab_contacts);
   lv_obj_set_size(_contacts_list, LV_PCT(100), LV_PCT(100));
   lv_obj_set_style_bg_color(_contacts_list, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(_contacts_list, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(_contacts_list, 0, 0);
   lv_obj_set_style_pad_row(_contacts_list, 0, 0);
 
