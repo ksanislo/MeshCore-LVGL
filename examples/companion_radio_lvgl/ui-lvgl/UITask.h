@@ -49,6 +49,18 @@ class UITask : public AbstractUITask {
   ContactDispRow  _crows[CONTACTS_MAX_ROWS];
   int             _crow_count;
 
+  // Full-screen contact picker (top layer), virtualized like the Contacts tab.
+  // Used to choose a recipient (share) or a contact to insert into a message.
+  lv_obj_t*       _pick_popup;
+  lv_obj_t*       _pick_table;
+  lv_obj_t*       _pick_search_ta;
+  lv_obj_t*       _pick_kb;
+  lv_obj_t*       _pick_title;
+  char            _pick_filter[40];
+  int             _pick_action;        // 1 = share viewed contact to pick; 2 = insert pick's ref
+  ContactDispRow  _prows[CONTACTS_MAX_ROWS];
+  int             _prow_count;
+
   // Chat (conversation) screen. Three-band: fixed top bar / scrollable history
   // / fixed compose band (compose added with the keyboard step).
   RamMessageStore<CHAT_HISTORY_CAP> _msgs;
@@ -174,8 +186,16 @@ class UITask : public AbstractUITask {
   void      sendCurrentMessage();
   void      ensureInsertPopup();
   void      showInsertMenu();
-  void      showContactPicker();
-  void      buildContactPicker(lv_obj_t* list, lv_event_cb_t cb, bool styled);
+  void      openContactPicker(int action);
+  void      buildContactPickerScreen();
+  void      rebuildPicker();
+  void      closeContactPicker();
+  static int  prow_cmp(const void* a, const void* b);
+  static void pick_table_cb(lv_event_t* e);
+  static void pick_table_draw_cb(lv_event_t* e);
+  static void pick_search_ta_cb(lv_event_t* e);
+  static void pick_kb_cb(lv_event_t* e);
+  static void pick_close_cb(lv_event_t* e);
   void      closeInsertPopup();
   void      insertContactRef(const uint8_t* pubkey, uint8_t type, const char* name);
   static void chat_back_cb(lv_event_t* e);
@@ -186,7 +206,6 @@ class UITask : public AbstractUITask {
   static void insert_backdrop_cb(lv_event_t* e);
   static void insert_myinfo_cb(lv_event_t* e);
   static void insert_share_cb(lv_event_t* e);
-  static void picker_pick_cb(lv_event_t* e);
   static void add_contact_cb(lv_event_t* e);
   static void buildContactCard(lv_obj_t* bubble, const ChatMessage* m,
                                const uint8_t* pubkey, uint8_t type, const char* name);
@@ -230,9 +249,9 @@ class UITask : public AbstractUITask {
   static void cinfo_ta_event_cb(lv_event_t* e);
   static void cinfo_kb_event_cb(lv_event_t* e);
   static void cinfo_name_clicked_cb(lv_event_t* e);
+  static void cinfo_copykey_cb(lv_event_t* e);
   static void share_sendto_cb(lv_event_t* e);
   static void share_zerohop_cb(lv_event_t* e);
-  static void share_pick_cb(lv_event_t* e);
   static void cinfo_toast_timer_cb(lv_timer_t* t);
 
   // Path Editor sub-page
@@ -291,6 +310,8 @@ public:
       _channels_list(NULL), _status_label(NULL),
       _contacts_dirty(false), _contacts_rebuilt_ms(0),
       _contacts_sig(0), _contacts_check_ms(0), _crow_count(0),
+      _pick_popup(NULL), _pick_table(NULL), _pick_search_ta(NULL), _pick_kb(NULL),
+      _pick_title(NULL), _pick_action(0), _prow_count(0),
       _chat_screen(NULL), _chat_title(NULL), _chat_history(NULL),
       _chat_compose(NULL), _chat_input(NULL), _chat_keyboard(NULL),
       _insert_popup(NULL), _insert_list(NULL),
@@ -316,6 +337,7 @@ public:
         _search_filter[0] = 0;
         _clipboard[0] = 0;
         _contacts_filter[0] = 0;
+        _pick_filter[0] = 0;
         memset(_chat_pubkey, 0, sizeof(_chat_pubkey));
         memset(_cinfo_pubkey, 0, sizeof(_cinfo_pubkey));
       }
