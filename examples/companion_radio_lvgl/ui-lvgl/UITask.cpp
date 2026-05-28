@@ -2315,9 +2315,10 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   // out of this LVGL config, so pad the cell instead.)
   lv_obj_set_style_pad_top(fb, 6, 0);
   lv_obj_set_style_pad_bottom(fb, 10, 0);
+  lv_obj_set_style_pad_right(fb, 8, 0);  // ~half a knob, so the handle at max clears the scroll bar
   _set_bright_slider = lv_slider_create(fb);
   lv_slider_set_range(_set_bright_slider, 10, 100);
-  lv_obj_set_width(_set_bright_slider, LV_PCT(92));  // inset so the knob at max clears the scroll bar
+  lv_obj_set_width(_set_bright_slider, LV_PCT(100));
   lv_obj_add_event_cb(_set_bright_slider, set_bright_cb, LV_EVENT_ALL, NULL);
 
   lv_obj_t* fr = makeField(body, "Screen Rotation (restart to apply)");
