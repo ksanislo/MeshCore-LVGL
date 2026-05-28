@@ -42,6 +42,19 @@ static File openWrite(FILESYSTEM* fs, const char* filename) {
 #endif
 }
 
+// Open an existing file for in-place read/write WITHOUT truncating it.
+static File openUpdate(FILESYSTEM* fs, const char* filename) {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  return fs->open(filename, FILE_O_WRITE);  // O_RDWR|O_CREAT, no truncate, pos 0
+#else
+  return fs->open(filename, "r+");          // read/write, no truncate, must exist
+#endif
+}
+
+// One contact record on disk (see saveContacts layout). Fixed size lets us
+// rewrite a single contact in place instead of the whole file.
+#define CONTACT_RECORD_SIZE  (32 + 32 + 1 + 1 + 1 + 4 + 1 + 4 + 64 + 4 + 4 + 4)  // 152
+
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   static uint32_t _ContactsChannelsTotalBlocks = 0;
 #endif
@@ -336,6 +349,36 @@ void DataStore::saveContacts(DataStoreHost* host) {
     }
     file.close();
   }
+}
+
+// Rewrite a single contact record in place (seek + write 152 bytes), avoiding
+// a full-file rewrite. Crash-safe: never truncates the file, so an interrupted
+// write can corrupt at most this one record, not the whole tail. Returns false
+// if the file is missing/too short -- caller should fall back to saveContacts().
+bool DataStore::updateContact(int idx, const ContactInfo& c) {
+  if (idx < 0) return false;
+  File file = openUpdate(_getContactsChannelsFS(), "/contacts3");
+  if (!file) return false;
+  if ((uint32_t)file.size() < (uint32_t)(idx + 1) * CONTACT_RECORD_SIZE) {
+    file.close();
+    return false;  // record not present yet -> full save resyncs the file
+  }
+  file.seek((uint32_t)idx * CONTACT_RECORD_SIZE);
+  uint8_t unused = 0;
+  bool ok = (file.write(c.id.pub_key, 32) == 32);
+  ok = ok && (file.write((uint8_t *)&c.name, 32) == 32);
+  ok = ok && (file.write(&c.type, 1) == 1);
+  ok = ok && (file.write(&c.flags, 1) == 1);
+  ok = ok && (file.write(&unused, 1) == 1);
+  ok = ok && (file.write((uint8_t *)&c.sync_since, 4) == 4);
+  ok = ok && (file.write((uint8_t *)&c.out_path_len, 1) == 1);
+  ok = ok && (file.write((uint8_t *)&c.last_advert_timestamp, 4) == 4);
+  ok = ok && (file.write(c.out_path, 64) == 64);
+  ok = ok && (file.write((uint8_t *)&c.lastmod, 4) == 4);
+  ok = ok && (file.write((uint8_t *)&c.gps_lat, 4) == 4);
+  ok = ok && (file.write((uint8_t *)&c.gps_lon, 4) == 4);
+  file.close();
+  return ok;
 }
 
 void DataStore::loadChannels(DataStoreHost* host) {

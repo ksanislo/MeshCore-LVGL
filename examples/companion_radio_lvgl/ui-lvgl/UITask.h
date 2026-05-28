@@ -43,10 +43,44 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _chat_compose;        // fixed compose band (textarea + send)
   lv_obj_t*       _chat_input;          // lv_textarea
   lv_obj_t*       _chat_keyboard;       // lv_keyboard, shown on input focus
+  lv_obj_t*       _insert_popup;        // backdrop for the insert (+) menu
+  lv_obj_t*       _insert_list;         // lv_list inside the popup
   char            _chat_peer[CHAT_PEER_NAME_MAX];  // peer whose chat is open ("" = none)
   bool            _chat_is_channel;     // send via sendGroupMessage vs sendMessage
   uint8_t         _chat_pubkey[6];      // recipient prefix for contact sends
   int             _chat_channel_idx;    // channel slot for channel sends
+
+  // Contact Info page (+ Path Editor sub-page). Lazily built, reused.
+  lv_obj_t*       _cinfo_screen;
+  lv_obj_t*       _cinfo_body;          // scrollable form
+  lv_obj_t*       _cinfo_title;
+  lv_obj_t*       _cinfo_key;
+  lv_obj_t*       _cinfo_fav_lbl;
+  lv_obj_t*       _cinfo_name_ta;
+  lv_obj_t*       _cinfo_keyfull;       // read-only full-hex label
+  lv_obj_t*       _cinfo_lat_ta;
+  lv_obj_t*       _cinfo_lon_ta;
+  lv_obj_t*       _cinfo_type_dd;
+  lv_obj_t*       _cinfo_lastheard;
+  lv_obj_t*       _cinfo_hops;
+  lv_obj_t*       _cinfo_hops_x;        // clear-to-flood button
+  lv_obj_t*       _cinfo_outpath;
+  lv_obj_t*       _cinfo_kb;
+  lv_obj_t*       _cinfo_active_ta;     // textarea currently being edited
+  uint8_t         _cinfo_pubkey[32];    // full key of the contact being viewed
+  lv_obj_t*       _cinfo_return_screen; // where back goes
+
+  // Shared top-layer popup (kebab menu / share menu / pickers) + toast.
+  lv_obj_t*       _menu_popup;
+  lv_obj_t*       _menu_list;
+  lv_obj_t*       _toast;
+  lv_obj_t*       _path_return_screen;
+
+  lv_obj_t*       _path_screen;
+  lv_obj_t*       _path_size_dd;
+  lv_obj_t*       _path_ta;
+  lv_obj_t*       _path_kb;
+  lv_obj_t*       _path_err;
 
   // LVGL display + input. Resolution is read from the LGFX device after
   // setRotation, so this UITask doesn't care whether the variant chose
@@ -78,11 +112,68 @@ class UITask : public AbstractUITask {
   void      rebuildChatHistory();
   void      layoutChatBody(bool keyboard_shown);
   void      sendCurrentMessage();
+  void      ensureInsertPopup();
+  void      showInsertMenu();
+  void      showContactPicker();
+  void      closeInsertPopup();
+  void      insertContactRef(const uint8_t* pubkey, uint8_t type, const char* name);
   static void contact_clicked_cb(lv_event_t* e);
   static void chat_back_cb(lv_event_t* e);
   static void chat_input_event_cb(lv_event_t* e);
   static void chat_send_cb(lv_event_t* e);
   static void chat_kb_event_cb(lv_event_t* e);
+  static void chat_plus_cb(lv_event_t* e);
+  static void insert_backdrop_cb(lv_event_t* e);
+  static void insert_myinfo_cb(lv_event_t* e);
+  static void insert_share_cb(lv_event_t* e);
+  static void picker_pick_cb(lv_event_t* e);
+  static void add_contact_cb(lv_event_t* e);
+  static void buildContactCard(lv_obj_t* bubble, const ChatMessage* m,
+                               const uint8_t* pubkey, uint8_t type, const char* name);
+
+  // Contact Info page
+  void      openContactInfo(const uint8_t* pubkey, lv_obj_t* return_screen);
+  void      buildContactInfoScreen();
+  void      populateContactInfo();
+  struct ContactInfo* cinfoContact();   // mutable ptr, or NULL
+  void      showToast(const char* text);
+  void      commitCinfoField(lv_obj_t* ta);
+  // Shared top-layer popup + kebab overflow menu
+  lv_obj_t* ensureMenuPopup();          // returns the (cleaned) list, popup hidden
+  void      showMenuPopup();
+  void      closeMenuPopup();
+  void      showShareMenu();            // uses _cinfo_pubkey as the target
+  static void chat_kebab_cb(lv_event_t* e);
+  static void kebab_details_cb(lv_event_t* e);
+  static void kebab_search_cb(lv_event_t* e);
+  static void kebab_share_cb(lv_event_t* e);
+  static void kebab_setpath_cb(lv_event_t* e);
+  static void kebab_resetpath_cb(lv_event_t* e);
+  static void kebab_clearhistory_cb(lv_event_t* e);
+  static void cinfo_back_cb(lv_event_t* e);
+  static void cinfo_fav_cb(lv_event_t* e);
+  static void cinfo_telemetry_cb(lv_event_t* e);
+  static void cinfo_share_cb(lv_event_t* e);
+  static void cinfo_clearpath_cb(lv_event_t* e);
+  static void cinfo_editpath_cb(lv_event_t* e);
+  static void cinfo_type_cb(lv_event_t* e);
+  static void cinfo_ta_event_cb(lv_event_t* e);
+  static void cinfo_kb_event_cb(lv_event_t* e);
+  static void cinfo_name_clicked_cb(lv_event_t* e);
+  static void share_sendto_cb(lv_event_t* e);
+  static void share_zerohop_cb(lv_event_t* e);
+  static void share_pick_cb(lv_event_t* e);
+  static void cinfo_toast_timer_cb(lv_timer_t* t);
+
+  // Path Editor sub-page
+  void      openPathEditor(lv_obj_t* return_screen);
+  void      buildPathEditorScreen();
+  void      populatePathEditor();
+  bool      savePathEditor();
+  static void path_back_cb(lv_event_t* e);
+  static void path_save_cb(lv_event_t* e);
+  static void path_ta_event_cb(lv_event_t* e);
+  static void path_kb_event_cb(lv_event_t* e);
 
 public:
   UITask(mesh::MainBoard* board, BaseSerialInterface* serial)
@@ -98,9 +189,22 @@ public:
       _contacts_sig(0), _contacts_check_ms(0),
       _chat_screen(NULL), _chat_title(NULL), _chat_history(NULL),
       _chat_compose(NULL), _chat_input(NULL), _chat_keyboard(NULL),
+      _insert_popup(NULL), _insert_list(NULL),
       _chat_is_channel(false), _chat_channel_idx(-1),
+      _cinfo_screen(NULL), _cinfo_body(NULL), _cinfo_title(NULL), _cinfo_key(NULL),
+      _cinfo_fav_lbl(NULL), _cinfo_name_ta(NULL), _cinfo_keyfull(NULL),
+      _cinfo_lat_ta(NULL), _cinfo_lon_ta(NULL), _cinfo_type_dd(NULL),
+      _cinfo_lastheard(NULL), _cinfo_hops(NULL), _cinfo_hops_x(NULL),
+      _cinfo_outpath(NULL), _cinfo_kb(NULL), _cinfo_active_ta(NULL),
+      _cinfo_return_screen(NULL),
+      _menu_popup(NULL), _menu_list(NULL), _toast(NULL), _path_return_screen(NULL),
+      _path_screen(NULL), _path_size_dd(NULL), _path_ta(NULL), _path_kb(NULL), _path_err(NULL),
       _screen_w(0), _screen_h(0),
-      _buf1(NULL), _buf2(NULL) { _chat_peer[0] = 0; memset(_chat_pubkey, 0, sizeof(_chat_pubkey)); }
+      _buf1(NULL), _buf2(NULL) {
+        _chat_peer[0] = 0;
+        memset(_chat_pubkey, 0, sizeof(_chat_pubkey));
+        memset(_cinfo_pubkey, 0, sizeof(_cinfo_pubkey));
+      }
 
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 

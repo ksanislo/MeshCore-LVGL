@@ -33,6 +33,9 @@ public:
   // Fill `out` with pointers to this peer's messages, oldest-first, up to `max`.
   // Returns the number written. Pointers stay valid until the next append.
   virtual int messagesFor(const char* peer, const ChatMessage** out, int max) = 0;
+
+  // Drop all messages for a peer (clear that conversation's history).
+  virtual void clearPeer(const char* peer) = 0;
 };
 
 // Fixed-capacity ring buffer. Oldest message is overwritten when full.
@@ -59,6 +62,14 @@ public:
     copyBounded(m.text, text, CHAT_MSG_TEXT_MAX);
     _head = (_head + 1) % CAP;
     if (_count < CAP) _count++;
+  }
+
+  void clearPeer(const char* peer) override {
+    if (!peer) return;
+    for (int i = 0; i < _count; i++) {
+      ChatMessage& m = _buf[i];
+      if (strncmp(m.peer, peer, CHAT_PEER_NAME_MAX) == 0) m.peer[0] = 0;  // tombstone
+    }
   }
 
   int messagesFor(const char* peer, const ChatMessage** out, int max) override {

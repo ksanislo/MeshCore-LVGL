@@ -1,6 +1,8 @@
 #include "UITask.h"
 #include "meshcore_assets.h"
 #include "MyMesh.h"
+#include <helpers/AdvertDataHelpers.h>  // ADV_TYPE_*
+#include <Utils.h>                      // mesh::Utils::toHex
 #include <esp_heap_caps.h>
 
 // main.cpp owns the_mesh; we read contacts/channels via the base class.
@@ -386,6 +388,120 @@ void UITask::layoutChatBody(bool keyboard_shown) {
   if (was_at_bottom) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
 }
 
+// ---- Insert (+) menu: share contact refs into the compose field ----------
+
+void UITask::ensureInsertPopup() {
+  if (_insert_popup) return;
+  _insert_popup = lv_obj_create(_chat_screen);
+  lv_obj_set_size(_insert_popup, _screen_w, _screen_h);
+  lv_obj_set_pos(_insert_popup, 0, 0);
+  lv_obj_set_style_bg_color(_insert_popup, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(_insert_popup, LV_OPA_50, 0);
+  lv_obj_set_style_border_width(_insert_popup, 0, 0);
+  lv_obj_set_style_radius(_insert_popup, 0, 0);
+  lv_obj_set_style_pad_all(_insert_popup, 0, 0);
+  lv_obj_add_flag(_insert_popup, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(_insert_popup, insert_backdrop_cb, LV_EVENT_CLICKED, NULL);
+
+  _insert_list = lv_list_create(_insert_popup);
+  lv_obj_set_width(_insert_list, LV_PCT(82));
+  lv_obj_set_height(_insert_list, LV_SIZE_CONTENT);
+  lv_obj_set_style_max_height(_insert_list, LV_PCT(72), 0);
+  lv_obj_center(_insert_list);
+  lv_obj_set_style_bg_color(_insert_list, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_border_width(_insert_list, 0, 0);
+
+  lv_obj_add_flag(_insert_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void styleMenuBtn(lv_obj_t* b) {
+  lv_obj_set_style_bg_color(b, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_text_color(b, lv_color_hex(0xF3F4F6), 0);
+  lv_obj_set_style_border_color(b, lv_color_hex(0x374151), 0);
+  lv_obj_set_style_border_side(b, LV_BORDER_SIDE_BOTTOM, 0);
+  lv_obj_set_style_border_width(b, 1, 0);
+}
+
+void UITask::showInsertMenu() {
+  ensureInsertPopup();
+  lv_obj_clean(_insert_list);
+  lv_obj_t* b1 = lv_list_add_btn(_insert_list, LV_SYMBOL_HOME, "My Contact Info");
+  styleMenuBtn(b1);
+  lv_obj_add_event_cb(b1, insert_myinfo_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* b2 = lv_list_add_btn(_insert_list, LV_SYMBOL_UPLOAD, "Share Contact");
+  styleMenuBtn(b2);
+  lv_obj_add_event_cb(b2, insert_share_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_clear_flag(_insert_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::showContactPicker() {
+  ensureInsertPopup();
+  lv_obj_clean(_insert_list);
+  ContactsIterator it;
+  ContactInfo c;
+  while (it.hasNext(&the_mesh, c)) {
+    char nm[CHAT_PEER_NAME_MAX + 4];
+    sanitizeForFont(c.name[0] ? c.name : "(unnamed)", nm, sizeof(nm));
+    lv_obj_t* b = lv_list_add_btn(_insert_list, contactSymbol(c.type), nm);
+    styleMenuBtn(b);
+    uint32_t key = 0;
+    memcpy(&key, c.id.pub_key, 4);
+    lv_obj_set_user_data(b, (void*)(uintptr_t)key);
+    lv_obj_add_event_cb(b, picker_pick_cb, LV_EVENT_CLICKED, NULL);
+  }
+  lv_obj_clear_flag(_insert_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::closeInsertPopup() {
+  if (_insert_popup) lv_obj_add_flag(_insert_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::insertContactRef(const uint8_t* pubkey, uint8_t type, const char* name) {
+  // App-recognized shared-contact format: <pubkey_hex:type_id:name>
+  // (pubkey = 64 hex chars; type per ADV_TYPE_*). The app renders a message
+  // consisting only of this token as a "shared contact" card.
+  char hex[2 * PUB_KEY_SIZE + 1];
+  mesh::Utils::toHex(hex, pubkey, PUB_KEY_SIZE);
+  char ref[2 * PUB_KEY_SIZE + 48];
+  snprintf(ref, sizeof(ref), "<%s:%u:%s>", hex, (unsigned)type, name ? name : "");
+  if (_chat_input) lv_textarea_add_text(_chat_input, ref);
+}
+
+void UITask::chat_plus_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->showInsertMenu();
+}
+
+void UITask::insert_backdrop_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->closeInsertPopup();
+}
+
+void UITask::insert_myinfo_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  const char* nm = (_instance->_node_prefs && _instance->_node_prefs->node_name[0])
+                       ? _instance->_node_prefs->node_name : "Me";
+  _instance->insertContactRef(the_mesh.self_id.pub_key, ADV_TYPE_CHAT, nm);
+  _instance->closeInsertPopup();
+}
+
+void UITask::insert_share_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->showContactPicker();
+}
+
+void UITask::picker_pick_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* btn = lv_event_get_target(e);
+  uint32_t key = (uint32_t)(uintptr_t)lv_obj_get_user_data(btn);
+  uint8_t pfx[4];
+  memcpy(pfx, &key, 4);
+  ContactInfo* c = the_mesh.lookupContactByPubKey(pfx, 4);
+  if (c) _instance->insertContactRef(c->id.pub_key, c->type, c->name);
+  _instance->closeInsertPopup();
+}
+
 // Rewrite "@Name" -> "@[Name]" when Name matches a known contact (longest
 // match, ending at a word boundary), so other clients render it as a mention.
 // Non-matching "@text" and already-bracketed "@[Name]" pass through unchanged.
@@ -520,6 +636,116 @@ static void addMessageText(lv_obj_t* bubble, const char* text) {
   }
 }
 
+// Parse a shared-contact token "<pubkey_hex:type:name>" (whole message body).
+// Requires a full 64-hex-char pubkey. Returns false if not such a token.
+static bool parseContactRef(const char* text, uint8_t* pk_out, uint8_t& type_out,
+                            char* name_out, size_t name_cap) {
+  if (!text || text[0] != '<') return false;
+  size_t len = strlen(text);
+  if (len < 4 || text[len - 1] != '>') return false;
+  const char* c1 = strchr(text + 1, ':');
+  if (!c1) return false;
+  const char* c2 = strchr(c1 + 1, ':');
+  if (!c2) return false;
+  if (c1 - (text + 1) != 2 * PUB_KEY_SIZE) return false;  // need full pubkey
+  int t = 0;
+  bool any = false;
+  for (const char* p = c1 + 1; p < c2; p++) {
+    if (*p < '0' || *p > '9') return false;
+    t = t * 10 + (*p - '0');
+    any = true;
+  }
+  if (!any || t > 255) return false;
+  const char* nend = text + len - 1;  // the '>'
+  if (nend <= c2 + 1) return false;    // empty name
+  char hexbuf[2 * PUB_KEY_SIZE + 1];
+  memcpy(hexbuf, text + 1, 2 * PUB_KEY_SIZE);
+  hexbuf[2 * PUB_KEY_SIZE] = 0;
+  if (!mesh::Utils::fromHex(pk_out, PUB_KEY_SIZE, hexbuf)) return false;
+  type_out = (uint8_t)t;
+  size_t nl = nend - (c2 + 1);
+  if (nl > name_cap - 1) nl = name_cap - 1;
+  memcpy(name_out, c2 + 1, nl);
+  name_out[nl] = 0;
+  return true;
+}
+
+void UITask::buildContactCard(lv_obj_t* bubble, const ChatMessage* m,
+                              const uint8_t* pubkey, uint8_t type, const char* name) {
+  lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(bubble, 3, 0);
+
+  if (m->outgoing) {
+    lv_obj_t* hdr = lv_label_create(bubble);
+    lv_label_set_text(hdr, "You shared this contact");
+    lv_obj_set_style_text_color(hdr, lv_color_hex(0xCBD5E1), 0);
+    lv_obj_set_style_text_font(hdr, &lv_font_montserrat_12, 0);
+  }
+
+  char sname[36];
+  sanitizeForFont(name, sname, sizeof(sname));
+  lv_obj_t* nm = lv_label_create(bubble);
+  lv_label_set_text(nm, sname);
+  lv_obj_set_style_text_color(nm, lv_color_hex(0xF3F4F6), 0);
+
+  char hex[2 * PUB_KEY_SIZE + 1];
+  mesh::Utils::toHex(hex, pubkey, PUB_KEY_SIZE);
+  char keytrunc[24];
+  snprintf(keytrunc, sizeof(keytrunc), "<%.6s...%.6s>", hex, hex + 2 * PUB_KEY_SIZE - 6);
+  lv_obj_t* kl = lv_label_create(bubble);
+  lv_label_set_text(kl, keytrunc);
+  lv_obj_set_style_text_color(kl, lv_color_hex(0x9CA3AF), 0);
+  lv_obj_set_style_text_font(kl, &lv_font_montserrat_12, 0);
+
+  // Tap a card for a known contact (either direction) -> open Contact Info.
+  if (the_mesh.lookupContactByPubKey(pubkey, PUB_KEY_SIZE)) {
+    lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_user_data(bubble, (void*)m);
+    lv_obj_add_event_cb(bubble, [](lv_event_t* ev) {
+      if (!_instance) return;
+      const ChatMessage* mm = (const ChatMessage*)lv_obj_get_user_data(lv_event_get_target(ev));
+      uint8_t pk[PUB_KEY_SIZE], ty; char nm[CHAT_PEER_NAME_MAX];
+      if (mm && parseContactRef(mm->text, pk, ty, nm, sizeof(nm)))
+        _instance->openContactInfo(pk, _instance->_chat_screen);
+    }, LV_EVENT_CLICKED, NULL);
+  }
+
+  if (!m->outgoing) {
+    if (the_mesh.lookupContactByPubKey(pubkey, PUB_KEY_SIZE)) {
+      lv_obj_t* in = lv_label_create(bubble);
+      lv_label_set_text(in, LV_SYMBOL_OK " In contacts (tap to open)");
+      lv_obj_set_style_text_color(in, lv_color_hex(0x34D399), 0);
+      lv_obj_set_style_text_font(in, &lv_font_montserrat_12, 0);
+    } else {
+      lv_obj_t* add = lv_btn_create(bubble);
+      lv_obj_set_user_data(add, (void*)m);  // re-parsed on tap
+      lv_obj_add_event_cb(add, add_contact_cb, LV_EVENT_CLICKED, NULL);
+      lv_obj_t* al = lv_label_create(add);
+      lv_label_set_text(al, LV_SYMBOL_PLUS " Add Contact");
+      lv_obj_center(al);
+    }
+  }
+}
+
+void UITask::add_contact_cb(lv_event_t* e) {
+  if (!_instance) return;
+  const ChatMessage* m = (const ChatMessage*)lv_obj_get_user_data(lv_event_get_target(e));
+  if (!m) return;
+  uint8_t pk[PUB_KEY_SIZE], type;
+  char name[CHAT_PEER_NAME_MAX];
+  if (!parseContactRef(m->text, pk, type, name, sizeof(name))) return;
+
+  ContactInfo c;
+  memset(&c, 0, sizeof(c));
+  memcpy(c.id.pub_key, pk, PUB_KEY_SIZE);
+  c.type = type;
+  strncpy(c.name, name, sizeof(c.name) - 1);
+  c.out_path_len = OUT_PATH_UNKNOWN;
+  c.lastmod = the_mesh.getRTCClock()->getCurrentTime();
+  the_mesh.addContact(c);
+  _instance->rebuildChatHistory();  // re-render: Add button -> "In contacts"
+}
+
 void UITask::rebuildChatHistory() {
   if (!_chat_history) return;
   lv_obj_clean(_chat_history);
@@ -579,7 +805,13 @@ void UITask::rebuildChatHistory() {
     lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, 0);
     lv_obj_align(bubble, m->outgoing ? LV_ALIGN_TOP_RIGHT : LV_ALIGN_TOP_LEFT, 0, 0);
 
-    addMessageText(bubble, m->text);
+    uint8_t cpk[PUB_KEY_SIZE], ctype;
+    char cname[CHAT_PEER_NAME_MAX];
+    if (parseContactRef(m->text, cpk, ctype, cname, sizeof(cname))) {
+      buildContactCard(bubble, m, cpk, ctype, cname);
+    } else {
+      addMessageText(bubble, m->text);
+    }
 
     strncpy(last_sender, m->sender, CHAT_PEER_NAME_MAX - 1);
     last_sender[CHAT_PEER_NAME_MAX - 1] = 0;
@@ -625,6 +857,19 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_set_style_text_color(_chat_title, lv_color_hex(FG_HEX), 0);
     lv_obj_set_style_text_font(_chat_title, &lv_font_montserrat_20, 0);
     lv_obj_align(_chat_title, LV_ALIGN_LEFT_MID, 40, 0);
+    // Tap the contact name to open Contact Info (no-op for channels).
+    lv_obj_add_flag(_chat_title, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_chat_title, cinfo_name_clicked_cb, LV_EVENT_CLICKED, NULL);
+
+    // Overflow (kebab) menu, right-aligned.
+    lv_obj_t* kebab = lv_btn_create(bar);
+    lv_obj_set_style_bg_opa(kebab, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_width(kebab, 0, 0);
+    lv_obj_align(kebab, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_add_event_cb(kebab, chat_kebab_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* kl = lv_label_create(kebab);
+    lv_label_set_text(kl, LV_SYMBOL_LIST);
+    lv_obj_set_style_text_color(kl, lv_color_hex(FG_HEX), 0);
 
     // Scrollable history band (the future hardware-scroll VSA). Geometry set
     // by layoutChatBody() so it adjusts when the keyboard shows/hides.
@@ -649,6 +894,16 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_set_flex_flow(_chat_compose, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(_chat_compose, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    // Insert (+) button: circular, opens a menu to insert contact refs.
+    lv_obj_t* plus = lv_btn_create(_chat_compose);
+    lv_obj_set_size(plus, COMPOSE_H - 14, COMPOSE_H - 14);
+    lv_obj_set_style_radius(plus, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_all(plus, 0, 0);
+    lv_obj_add_event_cb(plus, chat_plus_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* plus_lbl = lv_label_create(plus);
+    lv_label_set_text(plus_lbl, LV_SYMBOL_PLUS);
+    lv_obj_center(plus_lbl);
 
     _chat_input = lv_textarea_create(_chat_compose);
     lv_textarea_set_one_line(_chat_input, true);
@@ -810,6 +1065,718 @@ void UITask::sentMsg(const char* peer, const char* text) {
 
 void UITask::notify(UIEventType t) {
   (void)t;
+}
+
+// ===== Contact Info page =================================================
+
+ContactInfo* UITask::cinfoContact() {
+  return the_mesh.lookupContactByPubKey(_cinfo_pubkey, PUB_KEY_SIZE);
+}
+
+void UITask::cinfo_toast_timer_cb(lv_timer_t* t) {
+  if (_instance && _instance->_toast)
+    lv_obj_add_flag(_instance->_toast, LV_OBJ_FLAG_HIDDEN);
+  lv_timer_del(t);
+}
+
+void UITask::showToast(const char* text) {
+  if (!_toast) {  // lazily build on the top layer so it shows from any screen
+    _toast = lv_label_create(lv_layer_top());
+    lv_obj_set_style_bg_color(_toast, lv_color_hex(0x374151), 0);
+    lv_obj_set_style_bg_opa(_toast, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(_toast, lv_color_hex(0xF3F4F6), 0);
+    lv_obj_set_style_pad_all(_toast, 8, 0);
+    lv_obj_set_style_radius(_toast, 6, 0);
+    lv_obj_align(_toast, LV_ALIGN_BOTTOM_MID, 0, -10);
+  }
+  lv_label_set_text(_toast, text);
+  lv_obj_clear_flag(_toast, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_toast);
+  lv_timer_t* t = lv_timer_create(cinfo_toast_timer_cb, 1500, NULL);
+  lv_timer_set_repeat_count(t, 1);
+}
+
+// caption label + a column container the caller fills with the value widget
+static lv_obj_t* makeField(lv_obj_t* parent, const char* caption) {
+  lv_obj_t* col = lv_obj_create(parent);
+  lv_obj_set_width(col, LV_PCT(100));
+  lv_obj_set_height(col, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(col, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(col, 0, 0);
+  lv_obj_set_style_pad_all(col, 0, 0);
+  lv_obj_set_style_pad_row(col, 2, 0);
+  lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+  lv_obj_t* cap = lv_label_create(col);
+  lv_label_set_text(cap, caption);
+  lv_obj_set_style_text_color(cap, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_font(cap, &lv_font_montserrat_12, 0);
+  return col;
+}
+
+void UITask::buildContactInfoScreen() {
+  if (_cinfo_screen) return;
+  _cinfo_screen = lv_obj_create(NULL);
+  styleAsDarkScreen(_cinfo_screen);
+  lv_obj_set_style_pad_all(_cinfo_screen, 0, 0);
+
+  // fixed top bar
+  lv_obj_t* bar = lv_obj_create(_cinfo_screen);
+  lv_obj_set_size(bar, _screen_w, HEADER_H);
+  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
+  lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(bar, 0, 0);
+  lv_obj_set_style_radius(bar, 0, 0);
+  lv_obj_set_style_pad_all(bar, 6, 0);
+  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t* back = lv_btn_create(bar);
+  lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_shadow_width(back, 0, 0);
+  lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_add_event_cb(back, cinfo_back_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* bl = lv_label_create(back);
+  lv_label_set_text(bl, LV_SYMBOL_LEFT);
+  lv_obj_set_style_text_color(bl, lv_color_hex(FG_HEX), 0);
+  lv_obj_t* bt = lv_label_create(bar);
+  lv_label_set_text(bt, "Contact");
+  lv_obj_set_style_text_color(bt, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(bt, &lv_font_montserrat_20, 0);
+  lv_obj_align(bt, LV_ALIGN_LEFT_MID, 40, 0);
+
+  // scrollable body
+  _cinfo_body = lv_obj_create(_cinfo_screen);
+  lv_obj_set_size(_cinfo_body, _screen_w, _screen_h - HEADER_H);
+  lv_obj_align(_cinfo_body, LV_ALIGN_TOP_MID, 0, HEADER_H);
+  lv_obj_set_style_bg_color(_cinfo_body, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(_cinfo_body, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(_cinfo_body, 0, 0);
+  lv_obj_set_style_radius(_cinfo_body, 0, 0);
+  lv_obj_set_style_pad_all(_cinfo_body, 12, 0);
+  lv_obj_set_style_pad_row(_cinfo_body, 8, 0);
+  lv_obj_set_flex_flow(_cinfo_body, LV_FLEX_FLOW_COLUMN);
+
+  _cinfo_title = lv_label_create(_cinfo_body);
+  lv_obj_set_style_text_color(_cinfo_title, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(_cinfo_title, &lv_font_montserrat_28, 0);
+
+  _cinfo_key = lv_label_create(_cinfo_body);
+  lv_obj_set_style_text_color(_cinfo_key, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_font(_cinfo_key, &lv_font_montserrat_12, 0);
+
+  // action row
+  lv_obj_t* actions = lv_obj_create(_cinfo_body);
+  lv_obj_set_width(actions, LV_PCT(100));
+  lv_obj_set_height(actions, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(actions, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(actions, 0, 0);
+  lv_obj_set_style_pad_all(actions, 0, 0);
+  lv_obj_set_style_pad_column(actions, 6, 0);
+  lv_obj_clear_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
+
+  lv_obj_t* fav = lv_btn_create(actions);
+  lv_obj_add_event_cb(fav, cinfo_fav_cb, LV_EVENT_CLICKED, NULL);
+  _cinfo_fav_lbl = lv_label_create(fav);
+  lv_label_set_text(_cinfo_fav_lbl, LV_SYMBOL_OK " Fav");
+  lv_obj_t* tele = lv_btn_create(actions);
+  lv_obj_add_event_cb(tele, cinfo_telemetry_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* tl = lv_label_create(tele);
+  lv_label_set_text(tl, LV_SYMBOL_DOWNLOAD " Telem");
+  lv_obj_t* shr = lv_btn_create(actions);
+  lv_obj_add_event_cb(shr, cinfo_share_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* sl = lv_label_create(shr);
+  lv_label_set_text(sl, LV_SYMBOL_UPLOAD " Share");
+
+  // edit fields
+  lv_obj_t* fn = makeField(_cinfo_body, "Name");
+  _cinfo_name_ta = lv_textarea_create(fn);
+  lv_textarea_set_one_line(_cinfo_name_ta, true);
+  lv_obj_set_width(_cinfo_name_ta, LV_PCT(100));
+  lv_obj_add_event_cb(_cinfo_name_ta, cinfo_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  lv_obj_t* fk = makeField(_cinfo_body, "Public Key");
+  _cinfo_keyfull = lv_label_create(fk);
+  lv_label_set_long_mode(_cinfo_keyfull, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_cinfo_keyfull, LV_PCT(100));
+  lv_obj_set_style_text_color(_cinfo_keyfull, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(_cinfo_keyfull, &lv_font_montserrat_12, 0);
+
+  lv_obj_t* fp = makeField(_cinfo_body, "Position (lat, lon)");
+  lv_obj_t* prow = lv_obj_create(fp);
+  lv_obj_set_width(prow, LV_PCT(100));
+  lv_obj_set_height(prow, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(prow, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(prow, 0, 0);
+  lv_obj_set_style_pad_all(prow, 0, 0);
+  lv_obj_set_style_pad_column(prow, 6, 0);
+  lv_obj_clear_flag(prow, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(prow, LV_FLEX_FLOW_ROW);
+  _cinfo_lat_ta = lv_textarea_create(prow);
+  lv_textarea_set_one_line(_cinfo_lat_ta, true);
+  lv_obj_set_flex_grow(_cinfo_lat_ta, 1);
+  lv_obj_add_event_cb(_cinfo_lat_ta, cinfo_ta_event_cb, LV_EVENT_ALL, NULL);
+  _cinfo_lon_ta = lv_textarea_create(prow);
+  lv_textarea_set_one_line(_cinfo_lon_ta, true);
+  lv_obj_set_flex_grow(_cinfo_lon_ta, 1);
+  lv_obj_add_event_cb(_cinfo_lon_ta, cinfo_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  lv_obj_t* ft = makeField(_cinfo_body, "Contact Type");
+  _cinfo_type_dd = lv_dropdown_create(ft);
+  lv_dropdown_set_options(_cinfo_type_dd, "Chat\nRepeater\nRoom\nSensor");
+  lv_obj_set_width(_cinfo_type_dd, LV_PCT(100));
+  lv_obj_add_event_cb(_cinfo_type_dd, cinfo_type_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  lv_obj_t* flh = makeField(_cinfo_body, "Last Heard");
+  _cinfo_lastheard = lv_label_create(flh);
+  lv_obj_set_style_text_color(_cinfo_lastheard, lv_color_hex(FG_HEX), 0);
+
+  // path: hops row
+  lv_obj_t* hrow = lv_obj_create(_cinfo_body);
+  lv_obj_set_width(hrow, LV_PCT(100));
+  lv_obj_set_height(hrow, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(hrow, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(hrow, 0, 0);
+  lv_obj_set_style_pad_all(hrow, 0, 0);
+  lv_obj_clear_flag(hrow, LV_OBJ_FLAG_SCROLLABLE);
+  _cinfo_hops = lv_label_create(hrow);
+  lv_obj_set_style_text_color(_cinfo_hops, lv_color_hex(FG_HEX), 0);
+  lv_obj_align(_cinfo_hops, LV_ALIGN_LEFT_MID, 0, 0);
+  _cinfo_hops_x = lv_btn_create(hrow);
+  lv_obj_align(_cinfo_hops_x, LV_ALIGN_RIGHT_MID, 0, 0);
+  lv_obj_add_event_cb(_cinfo_hops_x, cinfo_clearpath_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* xl = lv_label_create(_cinfo_hops_x);
+  lv_label_set_text(xl, LV_SYMBOL_CLOSE);
+
+  // path: out path row
+  lv_obj_t* orow = lv_obj_create(_cinfo_body);
+  lv_obj_set_width(orow, LV_PCT(100));
+  lv_obj_set_height(orow, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(orow, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(orow, 0, 0);
+  lv_obj_set_style_pad_all(orow, 0, 0);
+  lv_obj_clear_flag(orow, LV_OBJ_FLAG_SCROLLABLE);
+  _cinfo_outpath = lv_label_create(orow);
+  lv_label_set_long_mode(_cinfo_outpath, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_cinfo_outpath, LV_PCT(80));
+  lv_obj_set_style_text_color(_cinfo_outpath, lv_color_hex(FG_HEX), 0);
+  lv_obj_align(_cinfo_outpath, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_t* ep = lv_btn_create(orow);
+  lv_obj_align(ep, LV_ALIGN_RIGHT_MID, 0, 0);
+  lv_obj_add_event_cb(ep, cinfo_editpath_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* epl = lv_label_create(ep);
+  lv_label_set_text(epl, LV_SYMBOL_EDIT);
+
+  // keyboard (hidden) + toast
+  _cinfo_kb = lv_keyboard_create(_cinfo_screen);
+  lv_obj_add_event_cb(_cinfo_kb, cinfo_kb_event_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::populateContactInfo() {
+  ContactInfo* c = cinfoContact();
+  if (!c) { lv_scr_load(_cinfo_return_screen ? _cinfo_return_screen : _home_screen); return; }
+
+  char nm[CHAT_PEER_NAME_MAX + 4];
+  sanitizeForFont(c->name[0] ? c->name : "(unnamed)", nm, sizeof(nm));
+  lv_label_set_text(_cinfo_title, nm);
+  lv_textarea_set_text(_cinfo_name_ta, c->name);
+
+  char hex[2 * PUB_KEY_SIZE + 1];
+  mesh::Utils::toHex(hex, c->id.pub_key, PUB_KEY_SIZE);
+  char ktrunc[24];
+  snprintf(ktrunc, sizeof(ktrunc), "<%.6s...%.6s>", hex, hex + 2 * PUB_KEY_SIZE - 6);
+  lv_label_set_text(_cinfo_key, ktrunc);
+  lv_label_set_text(_cinfo_keyfull, hex);
+
+  bool fav = (c->flags & CONTACT_FLAG_FAVOURITE) != 0;
+  lv_label_set_text(_cinfo_fav_lbl, fav ? LV_SYMBOL_OK " Favorited" : "Favorite");
+  lv_obj_set_style_text_color(_cinfo_fav_lbl, lv_color_hex(fav ? FAV_HEX : 0xF3F4F6), 0);
+
+  char latbuf[20] = "", lonbuf[20] = "";
+  if (c->gps_lat || c->gps_lon) {
+    snprintf(latbuf, sizeof(latbuf), "%.6f", c->gps_lat / 1e6);
+    snprintf(lonbuf, sizeof(lonbuf), "%.6f", c->gps_lon / 1e6);
+  }
+  lv_textarea_set_text(_cinfo_lat_ta, latbuf);
+  lv_textarea_set_text(_cinfo_lon_ta, lonbuf);
+
+  uint16_t ti = (c->type >= 1 && c->type <= 4) ? c->type - 1 : 0;
+  lv_dropdown_set_selected(_cinfo_type_dd, ti);
+
+  char lh[16];
+  formatLastSeen(lh, sizeof(lh), c->last_advert_timestamp, the_mesh.getRTCClock()->getCurrentTime());
+  lv_label_set_text(_cinfo_lastheard, lh);
+
+  int hashSize = the_mesh.getNodePrefs()->path_hash_mode + 1;
+  if (hashSize < 1) hashSize = 1;
+  if (c->out_path_len == OUT_PATH_UNKNOWN) {
+    lv_label_set_text(_cinfo_hops, "Hops Away: flood (unknown)");
+    lv_obj_add_flag(_cinfo_hops_x, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(_cinfo_outpath, "Out Path: (flood)");
+  } else {
+    char hb[32];
+    snprintf(hb, sizeof(hb), "Hops Away: %d", c->out_path_len / hashSize);
+    lv_label_set_text(_cinfo_hops, hb);
+    lv_obj_clear_flag(_cinfo_hops_x, LV_OBJ_FLAG_HIDDEN);
+    char op[3 * MAX_PATH_SIZE + 16];
+    int n = snprintf(op, sizeof(op), "Out Path: ");
+    for (int i = 0; i < c->out_path_len && n < (int)sizeof(op) - 3; i++)
+      n += snprintf(op + n, sizeof(op) - n, "%02x%s", c->out_path[i], i + 1 < c->out_path_len ? "," : "");
+    lv_label_set_text(_cinfo_outpath, op);
+  }
+}
+
+void UITask::openContactInfo(const uint8_t* pubkey, lv_obj_t* return_screen) {
+  memcpy(_cinfo_pubkey, pubkey, PUB_KEY_SIZE);
+  _cinfo_return_screen = return_screen;
+  buildContactInfoScreen();
+  _cinfo_active_ta = NULL;
+  lv_obj_add_flag(_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
+  populateContactInfo();
+  lv_obj_scroll_to_y(_cinfo_body, 0, LV_ANIM_OFF);
+  lv_scr_load(_cinfo_screen);
+}
+
+void UITask::commitCinfoField(lv_obj_t* ta) {
+  ContactInfo* c = cinfoContact();
+  if (!c || !ta) return;
+  if (ta == _cinfo_name_ta) {
+    strncpy(c->name, lv_textarea_get_text(ta), sizeof(c->name) - 1);
+    c->name[sizeof(c->name) - 1] = 0;
+    the_mesh.saveContact(*c);
+    char nm[CHAT_PEER_NAME_MAX + 4];
+    sanitizeForFont(c->name[0] ? c->name : "(unnamed)", nm, sizeof(nm));
+    lv_label_set_text(_cinfo_title, nm);
+  } else if (ta == _cinfo_lat_ta || ta == _cinfo_lon_ta) {
+    const char* lats = lv_textarea_get_text(_cinfo_lat_ta);
+    const char* lons = lv_textarea_get_text(_cinfo_lon_ta);
+    if (lats[0] == 0 && lons[0] == 0) { c->gps_lat = 0; c->gps_lon = 0; }
+    else { c->gps_lat = (int32_t)lround(atof(lats) * 1e6); c->gps_lon = (int32_t)lround(atof(lons) * 1e6); }
+    the_mesh.saveContact(*c);
+  }
+}
+
+void UITask::cinfo_back_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  if (_instance->_cinfo_active_ta) { _instance->commitCinfoField(_instance->_cinfo_active_ta); _instance->_cinfo_active_ta = NULL; }
+  lv_obj_add_flag(_instance->_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_scr_load(_instance->_cinfo_return_screen ? _instance->_cinfo_return_screen : _instance->_home_screen);
+}
+
+void UITask::cinfo_fav_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  ContactInfo* c = _instance->cinfoContact();
+  if (!c) return;
+  c->flags ^= CONTACT_FLAG_FAVOURITE;
+  the_mesh.saveContact(*c);
+  _instance->populateContactInfo();
+}
+
+void UITask::cinfo_type_cb(lv_event_t* e) {
+  if (!_instance) return;
+  ContactInfo* c = _instance->cinfoContact();
+  if (!c) return;
+  c->type = (uint8_t)(lv_dropdown_get_selected(lv_event_get_target(e)) + 1);
+  the_mesh.saveContact(*c);
+}
+
+void UITask::cinfo_telemetry_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  ContactInfo* c = _instance->cinfoContact();
+  if (!c) return;
+  uint32_t tag = 0, est = 0;
+  the_mesh.sendRequest(*c, 0x03 /*REQ_TYPE_GET_TELEMETRY_DATA*/, tag, est);
+  _instance->showToast("Telemetry requested");
+}
+
+void UITask::cinfo_clearpath_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  ContactInfo* c = _instance->cinfoContact();
+  if (!c) return;
+  the_mesh.resetPathTo(*c);
+  the_mesh.saveContact(*c);
+  _instance->populateContactInfo();
+}
+
+void UITask::cinfo_editpath_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->openPathEditor(_instance->_cinfo_screen);
+}
+
+// keyboard show/hide for the info-page textareas
+void UITask::cinfo_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    _instance->_cinfo_active_ta = ta;
+    lv_keyboard_set_textarea(_instance->_cinfo_kb, ta);
+    bool num = (ta == _instance->_cinfo_lat_ta || ta == _instance->_cinfo_lon_ta);
+    lv_keyboard_set_mode(_instance->_cinfo_kb, num ? LV_KEYBOARD_MODE_NUMBER : LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_cinfo_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_cinfo_kb);
+    lv_obj_scroll_to_view(ta, LV_ANIM_OFF);
+  } else if (code == LV_EVENT_DEFOCUSED) {
+    _instance->commitCinfoField(ta);
+  }
+}
+
+void UITask::cinfo_kb_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+    if (_instance->_cinfo_active_ta) {
+      _instance->commitCinfoField(_instance->_cinfo_active_ta);
+      _instance->_cinfo_active_ta = NULL;
+    }
+    lv_obj_add_flag(_instance->_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+void UITask::cinfo_name_clicked_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance || _instance->_chat_is_channel) return;
+  ContactInfo* c = the_mesh.lookupContactByPubKey(_instance->_chat_pubkey, 6);
+  if (c) _instance->openContactInfo(c->id.pub_key, _instance->_chat_screen);
+}
+
+// ----- Share sub-menu (popup parented to the cinfo screen) -----
+// Shared top-layer popup (kebab menu / share menu / pickers).
+lv_obj_t* UITask::ensureMenuPopup() {
+  if (!_menu_popup) {
+    _menu_popup = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(_menu_popup, _screen_w, _screen_h);
+    lv_obj_set_pos(_menu_popup, 0, 0);
+    lv_obj_set_style_bg_color(_menu_popup, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(_menu_popup, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(_menu_popup, 0, 0);
+    lv_obj_set_style_pad_all(_menu_popup, 0, 0);
+    lv_obj_add_flag(_menu_popup, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_menu_popup, [](lv_event_t* ev) {
+      (void)ev; if (_instance) _instance->closeMenuPopup();
+    }, LV_EVENT_CLICKED, NULL);
+    _menu_list = lv_list_create(_menu_popup);
+    lv_obj_set_width(_menu_list, LV_PCT(82));
+    lv_obj_set_height(_menu_list, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(_menu_list, LV_PCT(72), 0);
+    lv_obj_center(_menu_list);
+    lv_obj_set_style_bg_color(_menu_list, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_border_width(_menu_list, 0, 0);
+  }
+  lv_obj_clean(_menu_list);
+  return _menu_list;
+}
+
+void UITask::showMenuPopup() {
+  if (_menu_popup) { lv_obj_clear_flag(_menu_popup, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_menu_popup); }
+}
+
+void UITask::closeMenuPopup() {
+  if (_menu_popup) lv_obj_add_flag(_menu_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::showShareMenu() {
+  lv_obj_t* list = ensureMenuPopup();
+  lv_obj_t* b1 = lv_list_add_btn(list, LV_SYMBOL_UPLOAD, "Send to a contact");
+  lv_obj_add_event_cb(b1, share_sendto_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* b2 = lv_list_add_btn(list, LV_SYMBOL_WIFI, "Broadcast (zero-hop)");
+  lv_obj_add_event_cb(b2, share_zerohop_cb, LV_EVENT_CLICKED, NULL);
+  showMenuPopup();
+}
+
+void UITask::cinfo_share_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->showShareMenu();
+}
+
+void UITask::share_sendto_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  lv_obj_t* list = _instance->ensureMenuPopup();
+  ContactsIterator it;
+  ContactInfo c;
+  while (it.hasNext(&the_mesh, c)) {
+    char nm[CHAT_PEER_NAME_MAX + 4];
+    sanitizeForFont(c.name[0] ? c.name : "(unnamed)", nm, sizeof(nm));
+    lv_obj_t* b = lv_list_add_btn(list, contactSymbol(c.type), nm);
+    uint32_t key = 0; memcpy(&key, c.id.pub_key, 4);
+    lv_obj_set_user_data(b, (void*)(uintptr_t)key);
+    lv_obj_add_event_cb(b, share_pick_cb, LV_EVENT_CLICKED, NULL);
+  }
+  _instance->showMenuPopup();
+}
+
+void UITask::share_zerohop_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  ContactInfo* c = _instance->cinfoContact();
+  if (c) the_mesh.shareContactZeroHop(*c);
+  _instance->closeMenuPopup();
+  _instance->showToast("Shared (zero-hop)");
+}
+
+void UITask::share_pick_cb(lv_event_t* e) {
+  if (!_instance) return;
+  UITask* s = _instance;
+  ContactInfo* viewed = s->cinfoContact();
+  uint32_t key = (uint32_t)(uintptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+  uint8_t pfx[4]; memcpy(pfx, &key, 4);
+  ContactInfo* recip = the_mesh.lookupContactByPubKey(pfx, 4);
+  if (viewed && recip) {
+    char hex[2 * PUB_KEY_SIZE + 1];
+    mesh::Utils::toHex(hex, viewed->id.pub_key, PUB_KEY_SIZE);
+    char ref[2 * PUB_KEY_SIZE + 48];
+    snprintf(ref, sizeof(ref), "<%s:%u:%s>", hex, (unsigned)viewed->type, viewed->name);
+    uint32_t now = the_mesh.getRTCClock()->getCurrentTimeUnique();
+    uint32_t ack = 0, to = 0;
+    if (the_mesh.sendMessage(*recip, now, 0, ref, ack, to) != MSG_SEND_FAILED) {
+      const char* me = (s->_node_prefs && s->_node_prefs->node_name[0]) ? s->_node_prefs->node_name : "Me";
+      s->_msgs.append(true, recip->name, me, ref, now);
+    }
+  }
+  s->closeMenuPopup();
+  s->showToast("Contact shared");
+}
+
+// ----- Kebab overflow menu (chat top bar) -----
+void UITask::chat_kebab_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  UITask* s = _instance;
+  lv_obj_t* list = s->ensureMenuPopup();
+  if (!s->_chat_is_channel) {
+    lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_LIST, "Details"), kebab_details_cb, LV_EVENT_CLICKED, NULL);
+  }
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_EYE_OPEN, "Search"), kebab_search_cb, LV_EVENT_CLICKED, NULL);
+  if (!s->_chat_is_channel) {
+    lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_UPLOAD, "Share"), kebab_share_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_EDIT, "Set Path"), kebab_setpath_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_CLOSE, "Reset Path"), kebab_resetpath_cb, LV_EVENT_CLICKED, NULL);
+  }
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_TRASH, "Clear History"), kebab_clearhistory_cb, LV_EVENT_CLICKED, NULL);
+  s->showMenuPopup();
+}
+
+void UITask::kebab_details_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->closeMenuPopup();
+  ContactInfo* c = the_mesh.lookupContactByPubKey(_instance->_chat_pubkey, 6);
+  if (c) _instance->openContactInfo(c->id.pub_key, _instance->_chat_screen);
+}
+
+void UITask::kebab_search_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->closeMenuPopup();
+  _instance->showToast("Search coming soon");
+}
+
+void UITask::kebab_share_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  ContactInfo* c = the_mesh.lookupContactByPubKey(_instance->_chat_pubkey, 6);
+  if (!c) { _instance->closeMenuPopup(); return; }
+  memcpy(_instance->_cinfo_pubkey, c->id.pub_key, PUB_KEY_SIZE);
+  _instance->closeMenuPopup();
+  _instance->showShareMenu();
+}
+
+void UITask::kebab_setpath_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  ContactInfo* c = the_mesh.lookupContactByPubKey(_instance->_chat_pubkey, 6);
+  if (!c) { _instance->closeMenuPopup(); return; }
+  memcpy(_instance->_cinfo_pubkey, c->id.pub_key, PUB_KEY_SIZE);
+  _instance->closeMenuPopup();
+  _instance->openPathEditor(_instance->_chat_screen);
+}
+
+void UITask::kebab_resetpath_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->closeMenuPopup();
+  ContactInfo* c = the_mesh.lookupContactByPubKey(_instance->_chat_pubkey, 6);
+  if (!c) return;
+  the_mesh.resetPathTo(*c);
+  the_mesh.saveContact(*c);
+  _instance->showToast("Path reset to flood");
+}
+
+void UITask::kebab_clearhistory_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->closeMenuPopup();
+  _instance->_msgs.clearPeer(_instance->_chat_peer);
+  _instance->rebuildChatHistory();
+  _instance->showToast("History cleared");
+}
+
+// ===== Path Editor sub-page ==============================================
+
+static int parseHexCsv(const char* in, uint8_t* out, int cap) {
+  int n = 0;
+  const char* p = in;
+  while (*p) {
+    while (*p == ' ' || *p == ',') p++;
+    if (!*p) break;
+    const char* tok = p;
+    while (*p && *p != ',' && *p != ' ') p++;
+    int toklen = (int)(p - tok);
+    if (toklen == 0) continue;
+    if ((toklen % 2) || toklen / 2 > 3) return -1;  // 1-3 bytes per hop
+    if (n + toklen / 2 > cap) return -1;
+    char hb[8];
+    memcpy(hb, tok, toklen); hb[toklen] = 0;
+    if (!mesh::Utils::fromHex(out + n, toklen / 2, hb)) return -1;
+    n += toklen / 2;
+  }
+  return n;
+}
+
+void UITask::buildPathEditorScreen() {
+  if (_path_screen) return;
+  _path_screen = lv_obj_create(NULL);
+  styleAsDarkScreen(_path_screen);
+  lv_obj_set_style_pad_all(_path_screen, 0, 0);
+
+  lv_obj_t* bar = lv_obj_create(_path_screen);
+  lv_obj_set_size(bar, _screen_w, HEADER_H);
+  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
+  lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(bar, 0, 0);
+  lv_obj_set_style_radius(bar, 0, 0);
+  lv_obj_set_style_pad_all(bar, 6, 0);
+  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t* back = lv_btn_create(bar);
+  lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_shadow_width(back, 0, 0);
+  lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_add_event_cb(back, path_back_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* bl = lv_label_create(back);
+  lv_label_set_text(bl, LV_SYMBOL_LEFT);
+  lv_obj_set_style_text_color(bl, lv_color_hex(FG_HEX), 0);
+  lv_obj_t* bt = lv_label_create(bar);
+  lv_label_set_text(bt, "Out Path");
+  lv_obj_set_style_text_color(bt, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(bt, &lv_font_montserrat_20, 0);
+  lv_obj_align(bt, LV_ALIGN_LEFT_MID, 40, 0);
+  lv_obj_t* save = lv_btn_create(bar);
+  lv_obj_align(save, LV_ALIGN_RIGHT_MID, 0, 0);
+  lv_obj_add_event_cb(save, path_save_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* svl = lv_label_create(save);
+  lv_label_set_text(svl, LV_SYMBOL_OK);
+
+  lv_obj_t* body = lv_obj_create(_path_screen);
+  lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
+  lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
+  lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(body, 0, 0);
+  lv_obj_set_style_pad_all(body, 12, 0);
+  lv_obj_set_style_pad_row(body, 8, 0);
+  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+
+  lv_obj_t* fs = makeField(body, "Hash size (bytes per hop)");
+  _path_size_dd = lv_dropdown_create(fs);
+  lv_dropdown_set_options(_path_size_dd, "1 byte\n2 bytes\n3 bytes");
+  lv_obj_set_width(_path_size_dd, LV_PCT(100));
+
+  lv_obj_t* fp = makeField(body, "Path (comma hex, e.g. aa,bb,cc)");
+  _path_ta = lv_textarea_create(fp);
+  lv_textarea_set_one_line(_path_ta, true);
+  lv_obj_set_width(_path_ta, LV_PCT(100));
+  lv_obj_add_event_cb(_path_ta, path_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  _path_err = lv_label_create(body);
+  lv_label_set_text(_path_err, "");
+  lv_obj_set_style_text_color(_path_err, lv_color_hex(0xF87171), 0);
+  lv_obj_add_flag(_path_err, LV_OBJ_FLAG_HIDDEN);
+
+  _path_kb = lv_keyboard_create(_path_screen);
+  lv_obj_add_event_cb(_path_kb, path_kb_event_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_path_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::populatePathEditor() {
+  lv_dropdown_set_selected(_path_size_dd, the_mesh.getNodePrefs()->path_hash_mode);
+  lv_obj_add_flag(_path_err, LV_OBJ_FLAG_HIDDEN);
+  ContactInfo* c = cinfoContact();
+  char buf[3 * MAX_PATH_SIZE + 1] = "";
+  if (c && c->out_path_len != OUT_PATH_UNKNOWN) {
+    int n = 0;
+    for (int i = 0; i < c->out_path_len && n < (int)sizeof(buf) - 3; i++)
+      n += snprintf(buf + n, sizeof(buf) - n, "%02x%s", c->out_path[i], i + 1 < c->out_path_len ? "," : "");
+  }
+  lv_textarea_set_text(_path_ta, buf);
+}
+
+bool UITask::savePathEditor() {
+  ContactInfo* c = cinfoContact();
+  if (!c) return false;
+  const char* txt = lv_textarea_get_text(_path_ta);
+  bool empty = true;
+  for (const char* p = txt; *p; p++) if (*p != ' ' && *p != ',') { empty = false; break; }
+  if (empty) { the_mesh.resetPathTo(*c); the_mesh.saveContact(*c); return true; }
+  uint8_t buf[MAX_PATH_SIZE];
+  int n = parseHexCsv(txt, buf, MAX_PATH_SIZE);
+  if (n < 0) { lv_label_set_text(_path_err, "Bad path (use aa,bb,cc)"); lv_obj_clear_flag(_path_err, LV_OBJ_FLAG_HIDDEN); return false; }
+  memcpy(c->out_path, buf, n);
+  c->out_path_len = (uint8_t)n;
+  the_mesh.saveContact(*c);
+  return true;
+}
+
+void UITask::openPathEditor(lv_obj_t* return_screen) {
+  buildPathEditorScreen();
+  _path_return_screen = return_screen ? return_screen : _cinfo_screen;
+  lv_obj_add_flag(_path_kb, LV_OBJ_FLAG_HIDDEN);
+  populatePathEditor();
+  lv_scr_load(_path_screen);
+}
+
+void UITask::path_back_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  lv_obj_add_flag(_instance->_path_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_scr_load(_instance->_path_return_screen ? _instance->_path_return_screen : _instance->_cinfo_screen);
+}
+
+void UITask::path_save_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  if (_instance->savePathEditor()) {
+    lv_obj_add_flag(_instance->_path_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t* ret = _instance->_path_return_screen ? _instance->_path_return_screen : _instance->_cinfo_screen;
+    lv_scr_load(ret);
+    if (ret == _instance->_cinfo_screen) _instance->populateContactInfo();
+  }
+}
+
+void UITask::path_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    lv_keyboard_set_textarea(_instance->_path_kb, lv_event_get_target(e));
+    lv_obj_clear_flag(_instance->_path_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_path_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_path_kb);
+    lv_obj_scroll_to_view(lv_event_get_target(e), LV_ANIM_OFF);
+  }
+}
+
+void UITask::path_kb_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
+    lv_obj_add_flag(_instance->_path_kb, LV_OBJ_FLAG_HIDDEN);
 }
 
 void UITask::loop() {

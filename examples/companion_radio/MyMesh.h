@@ -165,6 +165,20 @@ protected:
 
 public:
   void savePrefs() { _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon); }
+  void saveContacts() { _store->saveContacts(this); }  // public: on-device UI edits contacts
+  // Persist a single edited contact in place (crash-safe vs the full rewrite).
+  // Use for field edits only (add/remove change indices -> use saveContacts()).
+  bool saveContact(const ContactInfo& c) {
+    for (uint32_t i = 0; i < (uint32_t)getNumContacts(); i++) {
+      ContactInfo tmp;
+      if (getContactByIdx(i, tmp) && memcmp(tmp.id.pub_key, c.id.pub_key, PUB_KEY_SIZE) == 0) {
+        if (_store->updateContact(i, c)) return true;
+        break;  // file short/missing -> fall back below
+      }
+    }
+    saveContacts();  // fallback resyncs the whole file
+    return false;
+  }
 
 #if ENV_INCLUDE_GPS == 1
   void applyGpsPrefs() {
@@ -198,7 +212,6 @@ private:
 
   // helpers, short-cuts
   void saveChannels() { _store->saveChannels(this); }
-  void saveContacts() { _store->saveContacts(this); }
 
   DataStore* _store;
   NodePrefs _prefs;
