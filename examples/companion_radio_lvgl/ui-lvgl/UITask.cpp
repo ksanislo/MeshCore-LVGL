@@ -67,6 +67,7 @@ lv_obj_t* UITask::buildSplashScreen() {
 
 static constexpr int HEADER_H   = 48;
 static constexpr int TABBAR_H   = 56;
+static constexpr int COMPOSE_H  = 50;
 static constexpr uint32_t FG_HEX = 0xD1D5DB;  // tailwind gray-300
 static constexpr uint32_t DIM_HEX = 0x6B7280; // tailwind gray-500
 
@@ -268,7 +269,11 @@ void UITask::channel_clicked_cb(lv_event_t* e) {
   lv_obj_t* btn = lv_event_get_target(e);
   int idx = (int)(intptr_t)lv_obj_get_user_data(btn);
   ChannelDetails ch;
-  if (the_mesh.getChannel(idx, ch) && ch.name[0]) _instance->openChat(ch.name);
+  if (the_mesh.getChannel(idx, ch) && ch.name[0]) {
+    _instance->_chat_is_channel = true;
+    _instance->_chat_channel_idx = idx;
+    _instance->openChat(ch.name);
+  }
 }
 
 void UITask::rebuildChannelsList() {
@@ -313,14 +318,87 @@ void UITask::contact_clicked_cb(lv_event_t* e) {
   uint8_t pfx[4];
   memcpy(pfx, &key, 4);
   ContactInfo* c = the_mesh.lookupContactByPubKey(pfx, 4);
-  if (c) _instance->openChat(c->name);
+  if (c) {
+    _instance->_chat_is_channel = false;
+    memcpy(_instance->_chat_pubkey, c->id.pub_key, 6);  // 6-byte prefix for sendMessage
+    _instance->openChat(c->name);
+  }
 }
 
 void UITask::chat_back_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
+  _instance->layoutChatBody(false);  // hide keyboard
   _instance->_chat_peer[0] = 0;
   lv_scr_load(_instance->_home_screen);  // keep chat screen allocated for reuse
+}
+
+void UITask::chat_input_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  if (lv_event_get_code(e) == LV_EVENT_FOCUSED) _instance->layoutChatBody(true);
+}
+
+void UITask::chat_send_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->sendCurrentMessage();
+}
+
+void UITask::chat_kb_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY)       _instance->sendCurrentMessage();   // checkmark key
+  else if (code == LV_EVENT_CANCEL) _instance->layoutChatBody(false);  // close key
+}
+
+void UITask::layoutChatBody(bool keyboard_shown) {
+  if (!_chat_history || !_chat_compose) return;
+  int kb_h = keyboard_shown ? (_screen_h * 45 / 100) : 0;
+
+  if (_chat_keyboard) {
+    if (keyboard_shown) {
+      lv_obj_clear_flag(_chat_keyboard, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_set_size(_chat_keyboard, _screen_w, kb_h);
+      lv_obj_align(_chat_keyboard, LV_ALIGN_TOP_MID, 0, _screen_h - kb_h);
+    } else {
+      lv_obj_add_flag(_chat_keyboard, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+
+  int compose_y = _screen_h - kb_h - COMPOSE_H;
+  lv_obj_set_size(_chat_compose, _screen_w, COMPOSE_H);
+  lv_obj_align(_chat_compose, LV_ALIGN_TOP_MID, 0, compose_y);
+
+  lv_obj_set_size(_chat_history, _screen_w, compose_y - HEADER_H);
+  lv_obj_align(_chat_history, LV_ALIGN_TOP_MID, 0, HEADER_H);
+}
+
+void UITask::sendCurrentMessage() {
+  if (!_chat_input) return;
+  const char* text = lv_textarea_get_text(_chat_input);
+  if (!text || !text[0]) return;
+
+  const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
+  uint32_t now = the_mesh.getRTCClock()->getCurrentTimeUnique();
+  bool sent = false;
+
+  if (_chat_is_channel) {
+    ChannelDetails ch;
+    if (the_mesh.getChannel(_chat_channel_idx, ch)) {
+      sent = the_mesh.sendGroupMessage(now, ch.channel, me, text, strlen(text));
+    }
+  } else {
+    ContactInfo* c = the_mesh.lookupContactByPubKey(_chat_pubkey, 6);
+    if (c) {
+      uint32_t ack = 0, timeout = 0;
+      sent = the_mesh.sendMessage(*c, now, 0, text, ack, timeout) != MSG_SEND_FAILED;
+    }
+  }
+
+  if (sent) {
+    _msgs.append(true, _chat_peer, me, text, now);
+    lv_textarea_set_text(_chat_input, "");
+    rebuildChatHistory();
+  }
 }
 
 // Map common "smart"/typographic UTF-8 punctuation to ASCII so it renders in
@@ -495,10 +573,9 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_set_style_text_font(_chat_title, &lv_font_montserrat_20, 0);
     lv_obj_align(_chat_title, LV_ALIGN_LEFT_MID, 40, 0);
 
-    // Scrollable history band (the future hardware-scroll VSA).
+    // Scrollable history band (the future hardware-scroll VSA). Geometry set
+    // by layoutChatBody() so it adjusts when the keyboard shows/hides.
     _chat_history = lv_obj_create(_chat_screen);
-    lv_obj_set_size(_chat_history, _screen_w, _screen_h - HEADER_H);
-    lv_obj_align(_chat_history, LV_ALIGN_TOP_MID, 0, HEADER_H);
     lv_obj_set_style_bg_color(_chat_history, lv_color_hex(BG_HEX), 0);
     lv_obj_set_style_bg_opa(_chat_history, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(_chat_history, 0, 0);
@@ -506,7 +583,41 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_set_style_pad_all(_chat_history, 8, 0);
     lv_obj_set_style_pad_row(_chat_history, 6, 0);
     lv_obj_set_flex_flow(_chat_history, LV_FLEX_FLOW_COLUMN);
+
+    // Fixed compose band: textarea (grows) + send button.
+    _chat_compose = lv_obj_create(_chat_screen);
+    lv_obj_set_style_bg_color(_chat_compose, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_bg_opa(_chat_compose, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(_chat_compose, 0, 0);
+    lv_obj_set_style_radius(_chat_compose, 0, 0);
+    lv_obj_set_style_pad_all(_chat_compose, 5, 0);
+    lv_obj_set_style_pad_column(_chat_compose, 5, 0);
+    lv_obj_clear_flag(_chat_compose, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(_chat_compose, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(_chat_compose, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    _chat_input = lv_textarea_create(_chat_compose);
+    lv_textarea_set_one_line(_chat_input, true);
+    lv_textarea_set_placeholder_text(_chat_input, "Message");
+    lv_obj_set_flex_grow(_chat_input, 1);
+    lv_obj_add_event_cb(_chat_input, chat_input_event_cb, LV_EVENT_ALL, NULL);
+
+    lv_obj_t* send = lv_btn_create(_chat_compose);
+    lv_obj_add_event_cb(send, chat_send_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* send_lbl = lv_label_create(send);
+    lv_label_set_text(send_lbl, LV_SYMBOL_OK);
+    lv_obj_center(send_lbl);
+
+    // On-screen keyboard, hidden until the input is focused.
+    _chat_keyboard = lv_keyboard_create(_chat_screen);
+    lv_keyboard_set_textarea(_chat_keyboard, _chat_input);
+    lv_obj_add_event_cb(_chat_keyboard, chat_kb_event_cb, LV_EVENT_ALL, NULL);
+    lv_obj_add_flag(_chat_keyboard, LV_OBJ_FLAG_HIDDEN);
   }
+
+  lv_textarea_set_text(_chat_input, "");
+  layoutChatBody(false);  // keyboard hidden on (re)open
 
   char tname[CHAT_PEER_NAME_MAX + 4];
   sanitizeForFont(_chat_peer, tname, sizeof(tname));

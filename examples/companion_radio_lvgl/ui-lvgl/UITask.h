@@ -40,7 +40,13 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _chat_screen;
   lv_obj_t*       _chat_title;          // contact name in the chat top bar
   lv_obj_t*       _chat_history;        // scrollable message container (the VSA band)
+  lv_obj_t*       _chat_compose;        // fixed compose band (textarea + send)
+  lv_obj_t*       _chat_input;          // lv_textarea
+  lv_obj_t*       _chat_keyboard;       // lv_keyboard, shown on input focus
   char            _chat_peer[CHAT_PEER_NAME_MAX];  // peer whose chat is open ("" = none)
+  bool            _chat_is_channel;     // send via sendGroupMessage vs sendMessage
+  uint8_t         _chat_pubkey[6];      // recipient prefix for contact sends
+  int             _chat_channel_idx;    // channel slot for channel sends
 
   // LVGL display + input. Resolution is read from the LGFX device after
   // setRotation, so this UITask doesn't care whether the variant chose
@@ -70,8 +76,13 @@ class UITask : public AbstractUITask {
 
   void      openChat(const char* peer_name);
   void      rebuildChatHistory();
+  void      layoutChatBody(bool keyboard_shown);
+  void      sendCurrentMessage();
   static void contact_clicked_cb(lv_event_t* e);
   static void chat_back_cb(lv_event_t* e);
+  static void chat_input_event_cb(lv_event_t* e);
+  static void chat_send_cb(lv_event_t* e);
+  static void chat_kb_event_cb(lv_event_t* e);
 
 public:
   UITask(mesh::MainBoard* board, BaseSerialInterface* serial)
@@ -86,8 +97,10 @@ public:
       _contacts_dirty(false), _contacts_rebuilt_ms(0),
       _contacts_sig(0), _contacts_check_ms(0),
       _chat_screen(NULL), _chat_title(NULL), _chat_history(NULL),
+      _chat_compose(NULL), _chat_input(NULL), _chat_keyboard(NULL),
+      _chat_is_channel(false), _chat_channel_idx(-1),
       _screen_w(0), _screen_h(0),
-      _buf1(NULL), _buf2(NULL) { _chat_peer[0] = 0; }
+      _buf1(NULL), _buf2(NULL) { _chat_peer[0] = 0; memset(_chat_pubkey, 0, sizeof(_chat_pubkey)); }
 
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
