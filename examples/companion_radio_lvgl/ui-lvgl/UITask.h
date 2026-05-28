@@ -50,6 +50,12 @@ class UITask : public AbstractUITask {
   uint8_t         _chat_pubkey[6];      // recipient prefix for contact sends
   int             _chat_channel_idx;    // channel slot for channel sends
 
+  // In-conversation search (reveals a bar under the top bar; filters history).
+  lv_obj_t*       _chat_search_bar;
+  lv_obj_t*       _chat_search_ta;
+  bool            _search_active;
+  char            _search_filter[40];
+
   // Contact Info page (+ Path Editor sub-page). Lazily built, reused.
   lv_obj_t*       _cinfo_screen;
   lv_obj_t*       _cinfo_body;          // scrollable form
@@ -81,6 +87,35 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _path_ta;
   lv_obj_t*       _path_kb;
   lv_obj_t*       _path_err;
+
+  // Settings tab widgets (live inside _tab_settings; keyboard overlays _home_screen).
+  lv_obj_t*       _set_name_ta;
+  lv_obj_t*       _set_freq_ta;
+  lv_obj_t*       _set_bw_dd;
+  lv_obj_t*       _set_sf_dd;
+  lv_obj_t*       _set_cr_dd;
+  lv_obj_t*       _set_txp_ta;
+  lv_obj_t*       _set_path_dd;
+  lv_obj_t*       _set_bright_slider;
+  lv_obj_t*       _set_rot_dd;
+  lv_obj_t*       _set_kb;
+  lv_obj_t*       _set_active_ta;       // settings textarea currently being edited
+  lv_obj_t*       _set_key_ta;          // read-only self public key (scrolls horizontally)
+  lv_obj_t*       _set_lat_ta;
+  lv_obj_t*       _set_lon_ta;
+  lv_obj_t*       _set_sharepos;        // "share position" checkbox
+  lv_obj_t*       _confirm_popup;       // share-position warning modal (top layer)
+
+  // Tiny internal clipboard (no OS/LVGL clipboard on-device). Copy fills it;
+  // the chat compose "+" menu can paste it.
+  char            _clipboard[160];
+
+  // Share-as-QR screen (name + truncated key band, QR below). Lazily built.
+  lv_obj_t*       _qr_screen;
+  lv_obj_t*       _qr_code;
+  lv_obj_t*       _qr_name_lbl;
+  lv_obj_t*       _qr_key_lbl;
+  lv_obj_t*       _qr_return_screen;
 
   // LVGL display + input. Resolution is read from the LGFX device after
   // setRotation, so this UITask doesn't care whether the variant chose
@@ -131,6 +166,16 @@ class UITask : public AbstractUITask {
   static void buildContactCard(lv_obj_t* bubble, const ChatMessage* m,
                                const uint8_t* pubkey, uint8_t type, const char* name);
 
+  // Clickable @mentions in message bubbles
+  void      attachMentions(lv_obj_t* bubble, const char* text);
+  static void mention_bubble_cb(lv_event_t* e);
+  static void mention_pick_cb(lv_event_t* e);
+  static void mention_free_cb(lv_event_t* e);
+
+  // In-conversation search
+  static void chat_search_ta_event_cb(lv_event_t* e);
+  static void chat_search_close_cb(lv_event_t* e);
+
   // Contact Info page
   void      openContactInfo(const uint8_t* pubkey, lv_obj_t* return_screen);
   void      buildContactInfoScreen();
@@ -175,6 +220,37 @@ class UITask : public AbstractUITask {
   static void path_ta_event_cb(lv_event_t* e);
   static void path_kb_event_cb(lv_event_t* e);
 
+  // Settings tab
+  void      buildSettingsTab(lv_obj_t* parent);
+  void      populateSettings();
+  void      commitNodeName();
+  void      applyRadioSettings();
+  static void set_name_ta_event_cb(lv_event_t* e);
+  static void set_radio_ta_event_cb(lv_event_t* e);
+  static void set_kb_event_cb(lv_event_t* e);
+  static void set_radio_apply_cb(lv_event_t* e);
+  static void set_pathmode_cb(lv_event_t* e);
+  static void set_bright_cb(lv_event_t* e);
+  static void set_rot_cb(lv_event_t* e);
+  void      copyToClipboard(const char* text);
+  void      applyPreset(int idx);
+  static void radio_preset_cb(lv_event_t* e);
+  static void radio_preset_pick_cb(lv_event_t* e);
+  void      commitPosition();
+  void      showSharePosWarning();
+  static void set_copykey_cb(lv_event_t* e);
+  static void set_pos_ta_event_cb(lv_event_t* e);
+  static void set_sharepos_cb(lv_event_t* e);
+  static void sharepos_confirm_cb(lv_event_t* e);
+  static void sharepos_cancel_cb(lv_event_t* e);
+  static void insert_paste_cb(lv_event_t* e);
+
+  // Share-as-QR screen
+  void      openShareQR(const uint8_t* pubkey, uint8_t type, const char* name, lv_obj_t* return_screen);
+  void      buildShareQRScreen();
+  static void qr_back_cb(lv_event_t* e);
+  static void share_showqr_cb(lv_event_t* e);
+
 public:
   UITask(mesh::MainBoard* board, BaseSerialInterface* serial)
     : AbstractUITask(board, serial),
@@ -191,6 +267,7 @@ public:
       _chat_compose(NULL), _chat_input(NULL), _chat_keyboard(NULL),
       _insert_popup(NULL), _insert_list(NULL),
       _chat_is_channel(false), _chat_channel_idx(-1),
+      _chat_search_bar(NULL), _chat_search_ta(NULL), _search_active(false),
       _cinfo_screen(NULL), _cinfo_body(NULL), _cinfo_title(NULL), _cinfo_key(NULL),
       _cinfo_fav_lbl(NULL), _cinfo_name_ta(NULL), _cinfo_keyfull(NULL),
       _cinfo_lat_ta(NULL), _cinfo_lon_ta(NULL), _cinfo_type_dd(NULL),
@@ -199,9 +276,17 @@ public:
       _cinfo_return_screen(NULL),
       _menu_popup(NULL), _menu_list(NULL), _toast(NULL), _path_return_screen(NULL),
       _path_screen(NULL), _path_size_dd(NULL), _path_ta(NULL), _path_kb(NULL), _path_err(NULL),
+      _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
+      _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
+      _set_rot_dd(NULL), _set_kb(NULL), _set_active_ta(NULL), _set_key_ta(NULL),
+      _set_lat_ta(NULL), _set_lon_ta(NULL), _set_sharepos(NULL), _confirm_popup(NULL),
+      _qr_screen(NULL), _qr_code(NULL), _qr_name_lbl(NULL), _qr_key_lbl(NULL),
+      _qr_return_screen(NULL),
       _screen_w(0), _screen_h(0),
       _buf1(NULL), _buf2(NULL) {
         _chat_peer[0] = 0;
+        _search_filter[0] = 0;
+        _clipboard[0] = 0;
         memset(_chat_pubkey, 0, sizeof(_chat_pubkey));
         memset(_cinfo_pubkey, 0, sizeof(_cinfo_pubkey));
       }

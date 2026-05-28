@@ -34,4 +34,8 @@ struct NodePrefs {  // persisted to file
   uint8_t autoadd_max_hops;  // 0 = no limit, 1 = direct (0 hops), N = up to N-1 hops (max 64)
   char default_scope_name[31];
   uint8_t default_scope_key[16];
+  // Appended UI-only fields (persisted at the tail of /new_prefs). A file written
+  // by older firmware lacks these bytes, so they load as 0 = "unset, use default".
+  uint8_t display_brightness;  // 8-bit LEDC backlight duty (1-255); 0 = board default
+  uint8_t display_rotation;    // rotation index + 1 (1=rot0 .. 4=rot3); 0 = compile default
 };

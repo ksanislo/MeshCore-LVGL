@@ -246,6 +246,12 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.rx_boosted_gain, sizeof(_prefs.rx_boosted_gain));         // 89
     file.read((uint8_t *)_prefs.default_scope_name, sizeof(_prefs.default_scope_name));    // 90
     file.read((uint8_t *)_prefs.default_scope_key, sizeof(_prefs.default_scope_key));     // 121
+    // Appended UI fields: default to 0 so a pre-existing (shorter) file leaves them
+    // unset -- file.read() returns 0 at EOF without touching the destination.
+    _prefs.display_brightness = 0;                                                         // 137
+    _prefs.display_rotation = 0;                                                           // 138
+    file.read((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
+    file.read((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
 
     file.close();
   }

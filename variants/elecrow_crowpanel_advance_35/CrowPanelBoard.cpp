@@ -27,3 +27,9 @@ void CrowPanelBoard::begin() {
   pinMode(PIN_I2S_LRCK, OUTPUT);  digitalWrite(PIN_I2S_LRCK, LOW);
   pinMode(PIN_I2S_DOUT, OUTPUT);  digitalWrite(PIN_I2S_DOUT, LOW);
 }
+
+// Backlight brightness hook used by the LVGL Settings tab (which is variant-
+// agnostic and only knows this weak symbol). Drives the LEDC duty set up above.
+extern "C" void board_set_backlight(uint8_t duty) {
+  ledcWrite(BL_LEDC_CHANNEL, duty);
+}

@@ -4,9 +4,19 @@
 #include <helpers/AdvertDataHelpers.h>  // ADV_TYPE_*
 #include <Utils.h>                      // mesh::Utils::toHex
 #include <esp_heap_caps.h>
+#include <ctype.h>                      // tolower (case-insensitive search)
 
 // main.cpp owns the_mesh; we read contacts/channels via the base class.
 extern MyMesh the_mesh;
+
+// Radio param setters live in the variant's target.cpp (same calls the BLE
+// CMD_SET_RADIO_* handlers use). Forward-declared to avoid pulling target.h.
+void radio_set_params(float freq, float bw, uint8_t sf, uint8_t cr);
+void radio_set_tx_power(int8_t dbm);
+
+// Backlight brightness hook. A variant that supports dimming provides a strong
+// definition (e.g. CrowPanelBoard's LEDC writer); others fall back to this no-op.
+extern "C" __attribute__((weak)) void board_set_backlight(uint8_t duty) { (void)duty; }
 
 static void sanitizeForFont(const char* in, char* out, size_t cap);
 
@@ -67,9 +77,10 @@ lv_obj_t* UITask::buildSplashScreen() {
   return scr;
 }
 
-static constexpr int HEADER_H   = 48;
-static constexpr int TABBAR_H   = 56;
-static constexpr int COMPOSE_H  = 50;
+static constexpr int HEADER_H     = 48;
+static constexpr int TABBAR_H     = 56;
+static constexpr int COMPOSE_H    = 50;
+static constexpr int SEARCH_BAR_H = 44;
 static constexpr uint32_t FG_HEX = 0xD1D5DB;  // tailwind gray-300
 static constexpr uint32_t DIM_HEX = 0x6B7280; // tailwind gray-500
 
@@ -156,11 +167,8 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_set_style_border_width(_channels_list, 0, 0);
   lv_obj_set_style_pad_row(_channels_list, 0, 0);
 
-  // ----- Settings tab placeholder -----
-  lv_obj_t* set_placeholder = lv_label_create(_tab_settings);
-  lv_label_set_text(set_placeholder, "Settings not implemented yet.");
-  lv_obj_set_style_text_color(set_placeholder, lv_color_hex(DIM_HEX), 0);
-  lv_obj_center(set_placeholder);
+  // ----- Settings tab -----
+  buildSettingsTab(scr);
 
   return scr;
 }
@@ -349,8 +357,41 @@ void UITask::chat_send_cb(lv_event_t* e) {
 void UITask::chat_kb_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_event_code_t code = lv_event_get_code(e);
+  if (_instance->_search_active) {
+    // While searching the keyboard drives the search field, not compose: just
+    // dismiss it on done/close and keep the filtered results showing.
+    if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) _instance->layoutChatBody(false);
+    return;
+  }
   if (code == LV_EVENT_READY)       _instance->sendCurrentMessage();   // checkmark key
   else if (code == LV_EVENT_CANCEL) _instance->layoutChatBody(false);  // close key
+}
+
+void UITask::chat_search_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    lv_keyboard_set_textarea(_instance->_chat_keyboard, ta);
+    lv_keyboard_set_mode(_instance->_chat_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+    _instance->layoutChatBody(true);
+  } else if (code == LV_EVENT_VALUE_CHANGED) {
+    const char* s = lv_textarea_get_text(ta);
+    strncpy(_instance->_search_filter, s ? s : "", sizeof(_instance->_search_filter) - 1);
+    _instance->_search_filter[sizeof(_instance->_search_filter) - 1] = 0;
+    _instance->rebuildChatHistory();
+  }
+}
+
+void UITask::chat_search_close_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->_search_active = false;
+  _instance->_search_filter[0] = 0;
+  if (_instance->_chat_search_ta) lv_textarea_set_text(_instance->_chat_search_ta, "");
+  lv_keyboard_set_textarea(_instance->_chat_keyboard, _instance->_chat_input);  // restore compose
+  _instance->layoutChatBody(false);  // hide keyboard + search bar
+  _instance->rebuildChatHistory();
 }
 
 void UITask::layoutChatBody(bool keyboard_shown) {
@@ -377,12 +418,25 @@ void UITask::layoutChatBody(bool keyboard_shown) {
     }
   }
 
+  // The search bar (when active) sits between the top bar and the history.
+  int top = HEADER_H;
+  if (_chat_search_bar) {
+    if (_search_active) {
+      lv_obj_set_size(_chat_search_bar, _screen_w, SEARCH_BAR_H);
+      lv_obj_align(_chat_search_bar, LV_ALIGN_TOP_MID, 0, HEADER_H);
+      lv_obj_clear_flag(_chat_search_bar, LV_OBJ_FLAG_HIDDEN);
+      top = HEADER_H + SEARCH_BAR_H;
+    } else {
+      lv_obj_add_flag(_chat_search_bar, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+
   int compose_y = avail_bottom - COMPOSE_H;
   lv_obj_set_size(_chat_compose, _screen_w, COMPOSE_H);
   lv_obj_align(_chat_compose, LV_ALIGN_TOP_MID, 0, compose_y);
 
-  lv_obj_set_size(_chat_history, _screen_w, compose_y - HEADER_H);
-  lv_obj_align(_chat_history, LV_ALIGN_TOP_MID, 0, HEADER_H);
+  lv_obj_set_size(_chat_history, _screen_w, compose_y - top);
+  lv_obj_align(_chat_history, LV_ALIGN_TOP_MID, 0, top);
 
   lv_obj_update_layout(_chat_history);
   if (was_at_bottom) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
@@ -431,6 +485,11 @@ void UITask::showInsertMenu() {
   lv_obj_t* b2 = lv_list_add_btn(_insert_list, LV_SYMBOL_UPLOAD, "Share Contact");
   styleMenuBtn(b2);
   lv_obj_add_event_cb(b2, insert_share_cb, LV_EVENT_CLICKED, NULL);
+  if (_clipboard[0]) {  // only when something has been copied
+    lv_obj_t* b3 = lv_list_add_btn(_insert_list, LV_SYMBOL_PASTE, "Paste");
+    styleMenuBtn(b3);
+    lv_obj_add_event_cb(b3, insert_paste_cb, LV_EVENT_CLICKED, NULL);
+  }
   lv_obj_clear_flag(_insert_popup, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -636,6 +695,106 @@ static void addMessageText(lv_obj_t* bubble, const char* text) {
   }
 }
 
+// Resolved @mention targets, stashed on a bubble's user_data so a tap can open
+// the contact(s) without re-parsing. Freed on the bubble's LV_EVENT_DELETE.
+static const int MENTION_MAX = 6;
+struct MentionTargets {
+  int     count;
+  uint8_t keys[MENTION_MAX][PUB_KEY_SIZE];
+  char    names[MENTION_MAX][CHAT_PEER_NAME_MAX];
+};
+
+void UITask::attachMentions(lv_obj_t* bubble, const char* text) {
+  MentionTargets t;
+  t.count = 0;
+  const char* p = text;
+  while (*p && t.count < MENTION_MAX) {
+    const char* at = strstr(p, "@[");
+    if (!at) break;
+    const char* close = strchr(at + 2, ']');
+    if (!close) break;
+    int nlen = (int)(close - (at + 2));
+    if (nlen > 0 && nlen < (int)CHAT_PEER_NAME_MAX) {
+      char nm[CHAT_PEER_NAME_MAX];
+      memcpy(nm, at + 2, nlen);
+      nm[nlen] = 0;
+      ContactsIterator it;
+      ContactInfo c;
+      while (it.hasNext(&the_mesh, c)) {
+        if ((int)strlen(c.name) == nlen && strncmp(c.name, nm, nlen) == 0) {
+          bool dup = false;
+          for (int i = 0; i < t.count; i++)
+            if (memcmp(t.keys[i], c.id.pub_key, PUB_KEY_SIZE) == 0) { dup = true; break; }
+          if (!dup) {
+            memcpy(t.keys[t.count], c.id.pub_key, PUB_KEY_SIZE);
+            strncpy(t.names[t.count], c.name, CHAT_PEER_NAME_MAX - 1);
+            t.names[t.count][CHAT_PEER_NAME_MAX - 1] = 0;
+            t.count++;
+          }
+          break;
+        }
+      }
+    }
+    p = close + 1;
+  }
+  if (t.count == 0) return;
+  MentionTargets* heap = (MentionTargets*)lv_mem_alloc(sizeof(MentionTargets));
+  if (!heap) return;
+  *heap = t;
+  lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_user_data(bubble, heap);
+  lv_obj_add_event_cb(bubble, mention_bubble_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(bubble, mention_free_cb, LV_EVENT_DELETE, NULL);
+}
+
+void UITask::mention_free_cb(lv_event_t* e) {
+  MentionTargets* t = (MentionTargets*)lv_obj_get_user_data(lv_event_get_target(e));
+  if (t) lv_mem_free(t);
+}
+
+void UITask::mention_pick_cb(lv_event_t* e) {
+  if (!_instance) return;
+  uint32_t key = (uint32_t)(uintptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+  uint8_t pfx[4];
+  memcpy(pfx, &key, 4);
+  ContactInfo* c = the_mesh.lookupContactByPubKey(pfx, 4);
+  _instance->closeMenuPopup();
+  if (c) _instance->openContactInfo(c->id.pub_key, _instance->_chat_screen);
+}
+
+void UITask::mention_bubble_cb(lv_event_t* e) {
+  if (!_instance) return;
+  MentionTargets* t = (MentionTargets*)lv_obj_get_user_data(lv_event_get_target(e));
+  if (!t || t->count == 0) return;
+  if (t->count == 1) {
+    _instance->openContactInfo(t->keys[0], _instance->_chat_screen);
+    return;
+  }
+  lv_obj_t* list = _instance->ensureMenuPopup();
+  for (int i = 0; i < t->count; i++) {
+    char nm[CHAT_PEER_NAME_MAX + 4];
+    sanitizeForFont(t->names[i], nm, sizeof(nm));
+    lv_obj_t* b = lv_list_add_btn(list, LV_SYMBOL_BELL, nm);
+    uint32_t key = 0;
+    memcpy(&key, t->keys[i], 4);
+    lv_obj_set_user_data(b, (void*)(uintptr_t)key);
+    lv_obj_add_event_cb(b, mention_pick_cb, LV_EVENT_CLICKED, NULL);
+  }
+  _instance->showMenuPopup();
+}
+
+// Case-insensitive substring test (ASCII), for in-conversation search.
+static bool containsCI(const char* hay, const char* needle) {
+  if (!needle || !needle[0]) return true;
+  size_t nl = strlen(needle);
+  for (const char* h = hay; *h; h++) {
+    size_t i = 0;
+    while (i < nl && h[i] && tolower((unsigned char)h[i]) == tolower((unsigned char)needle[i])) i++;
+    if (i == nl) return true;
+  }
+  return false;
+}
+
 // Parse a shared-contact token "<pubkey_hex:type:name>" (whole message body).
 // Requires a full 64-hex-char pubkey. Returns false if not such a token.
 static bool parseContactRef(const char* text, uint8_t* pk_out, uint8_t& type_out,
@@ -764,9 +923,13 @@ void UITask::rebuildChatHistory() {
   char last_sender[CHAT_PEER_NAME_MAX] = "";
   bool last_outgoing = false;
   bool first = true;
+  bool filtering = _search_active && _search_filter[0];
+  int shown = 0;
 
   for (int i = 0; i < n; i++) {
     const ChatMessage* m = msgs[i];
+    if (filtering && !containsCI(m->text, _search_filter)) continue;
+    shown++;
 
     // Incoming bubbles get a sender-name header, but only at the start of a
     // run of consecutive messages from the same sender. Outgoing bubbles
@@ -811,12 +974,21 @@ void UITask::rebuildChatHistory() {
       buildContactCard(bubble, m, cpk, ctype, cname);
     } else {
       addMessageText(bubble, m->text);
+      attachMentions(bubble, m->text);  // tappable if it @-mentions a known contact
     }
 
     strncpy(last_sender, m->sender, CHAT_PEER_NAME_MAX - 1);
     last_sender[CHAT_PEER_NAME_MAX - 1] = 0;
     last_outgoing = m->outgoing;
     first = false;
+  }
+
+  if (filtering && shown == 0) {
+    lv_obj_t* none = lv_label_create(_chat_history);
+    lv_label_set_text(none, "No matches.");
+    lv_obj_set_style_text_color(none, lv_color_hex(DIM_HEX), 0);
+    lv_obj_center(none);
+    return;
   }
 
   // Scroll to newest.
@@ -871,6 +1043,33 @@ void UITask::openChat(const char* peer_name) {
     lv_label_set_text(kl, LV_SYMBOL_LIST);
     lv_obj_set_style_text_color(kl, lv_color_hex(FG_HEX), 0);
 
+    // In-conversation search bar: hidden until the kebab "Search" reveals it.
+    // Geometry (position/height) is applied by layoutChatBody when active.
+    _chat_search_bar = lv_obj_create(_chat_screen);
+    lv_obj_set_style_bg_color(_chat_search_bar, lv_color_hex(0x111827), 0);
+    lv_obj_set_style_bg_opa(_chat_search_bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(_chat_search_bar, 0, 0);
+    lv_obj_set_style_radius(_chat_search_bar, 0, 0);
+    lv_obj_set_style_pad_all(_chat_search_bar, 6, 0);
+    lv_obj_set_style_pad_column(_chat_search_bar, 6, 0);
+    lv_obj_clear_flag(_chat_search_bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(_chat_search_bar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(_chat_search_bar, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_flag(_chat_search_bar, LV_OBJ_FLAG_HIDDEN);
+
+    _chat_search_ta = lv_textarea_create(_chat_search_bar);
+    lv_textarea_set_one_line(_chat_search_ta, true);
+    lv_textarea_set_placeholder_text(_chat_search_ta, "Search messages");
+    lv_obj_set_flex_grow(_chat_search_ta, 1);
+    lv_obj_add_event_cb(_chat_search_ta, chat_search_ta_event_cb, LV_EVENT_ALL, NULL);
+
+    lv_obj_t* sclose = lv_btn_create(_chat_search_bar);
+    lv_obj_add_event_cb(sclose, chat_search_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* scl = lv_label_create(sclose);
+    lv_label_set_text(scl, LV_SYMBOL_CLOSE);
+    lv_obj_center(scl);
+
     // Scrollable history band (the future hardware-scroll VSA). Geometry set
     // by layoutChatBody() so it adjusts when the keyboard shows/hides.
     _chat_history = lv_obj_create(_chat_screen);
@@ -924,6 +1123,12 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_add_flag(_chat_keyboard, LV_OBJ_FLAG_HIDDEN);
   }
 
+  // Reset any search state from a previously open conversation.
+  _search_active = false;
+  _search_filter[0] = 0;
+  if (_chat_search_ta) lv_textarea_set_text(_chat_search_ta, "");
+  if (_chat_keyboard && _chat_input) lv_keyboard_set_textarea(_chat_keyboard, _chat_input);
+
   lv_textarea_set_text(_chat_input, "");
   layoutChatBody(false);  // keyboard hidden on (re)open
 
@@ -952,11 +1157,19 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   // preserve that across the re-init. Color depth must be 16-bit to match
   // LVGL's RGB565 framebuffer -- the LGFXDisplay base configures the panel
   // for 8-bit packed mode, which causes pixel interleaving under LVGL.
+  // The variant chose a default rotation in DISPLAY_CLASS::begin(); a user-set
+  // rotation in prefs (1-based; 0 = unset) overrides it and survives reboots.
   uint_fast8_t saved_rotation = _lgfx->getRotation();
+  if (_node_prefs && _node_prefs->display_rotation)
+    saved_rotation = (_node_prefs->display_rotation - 1) & 0x03;
   _lgfx->init();
   _lgfx->setColorDepth(16);
   _lgfx->setRotation(saved_rotation);
   _lgfx->fillScreen(0x0000);
+
+  // Apply a persisted backlight level (0 = keep the board's boot default).
+  if (_node_prefs && _node_prefs->display_brightness)
+    board_set_backlight(_node_prefs->display_brightness);
 
   _screen_w = _lgfx->width();
   _screen_h = _lgfx->height();
@@ -1487,6 +1700,8 @@ void UITask::showShareMenu() {
   lv_obj_add_event_cb(b1, share_sendto_cb, LV_EVENT_CLICKED, NULL);
   lv_obj_t* b2 = lv_list_add_btn(list, LV_SYMBOL_WIFI, "Broadcast (zero-hop)");
   lv_obj_add_event_cb(b2, share_zerohop_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* b3 = lv_list_add_btn(list, LV_SYMBOL_IMAGE, "Show QR code");
+  lv_obj_add_event_cb(b3, share_showqr_cb, LV_EVENT_CLICKED, NULL);
   showMenuPopup();
 }
 
@@ -1544,6 +1759,134 @@ void UITask::share_pick_cb(lv_event_t* e) {
   s->showToast("Contact shared");
 }
 
+// ----- Share as QR code -----------------------------------------------------
+
+// Percent-encode a contact name for the meshcore:// URI (RFC 3986 unreserved
+// pass through; space -> '+'; everything else -> %XX).
+static void urlEncode(const char* in, char* out, size_t cap) {
+  static const char* hexd = "0123456789ABCDEF";
+  size_t o = 0;
+  for (const unsigned char* p = (const unsigned char*)(in ? in : ""); *p && o + 1 < cap; p++) {
+    unsigned char c = *p;
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+      out[o++] = c;
+    } else if (c == ' ') {
+      out[o++] = '+';
+    } else if (o + 3 < cap) {
+      out[o++] = '%'; out[o++] = hexd[c >> 4]; out[o++] = hexd[c & 0xF];
+    } else break;
+  }
+  out[o] = 0;
+}
+
+void UITask::buildShareQRScreen() {
+  if (_qr_screen) return;
+  _qr_screen = lv_obj_create(NULL);
+  styleAsDarkScreen(_qr_screen);
+  lv_obj_set_style_pad_all(_qr_screen, 0, 0);
+
+  // fixed top bar (back + title)
+  lv_obj_t* bar = lv_obj_create(_qr_screen);
+  lv_obj_set_size(bar, _screen_w, HEADER_H);
+  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
+  lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(bar, 0, 0);
+  lv_obj_set_style_radius(bar, 0, 0);
+  lv_obj_set_style_pad_all(bar, 6, 0);
+  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t* back = lv_btn_create(bar);
+  lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_shadow_width(back, 0, 0);
+  lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_add_event_cb(back, qr_back_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* bl = lv_label_create(back);
+  lv_label_set_text(bl, LV_SYMBOL_LEFT);
+  lv_obj_set_style_text_color(bl, lv_color_hex(FG_HEX), 0);
+  lv_obj_t* bt = lv_label_create(bar);
+  lv_label_set_text(bt, "Share QR");
+  lv_obj_set_style_text_color(bt, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(bt, &lv_font_montserrat_20, 0);
+  lv_obj_align(bt, LV_ALIGN_LEFT_MID, 40, 0);
+
+  // body: name + truncated key (top band), QR centered below
+  lv_obj_t* body = lv_obj_create(_qr_screen);
+  lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
+  lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
+  lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(body, 0, 0);
+  lv_obj_set_style_radius(body, 0, 0);
+  lv_obj_set_style_pad_all(body, 12, 0);
+  lv_obj_set_style_pad_row(body, 10, 0);
+  lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+  _qr_name_lbl = lv_label_create(body);
+  lv_obj_set_style_text_color(_qr_name_lbl, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(_qr_name_lbl, &lv_font_montserrat_28, 0);
+
+  _qr_key_lbl = lv_label_create(body);
+  lv_obj_set_style_text_color(_qr_key_lbl, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_font(_qr_key_lbl, &lv_font_montserrat_12, 0);
+
+  // White-framed QR so scanners get the required light quiet-zone.
+  lv_obj_t* frame = lv_obj_create(body);
+  lv_obj_set_style_bg_color(frame, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_bg_opa(frame, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(frame, 0, 0);
+  lv_obj_set_style_radius(frame, 6, 0);
+  lv_obj_set_style_pad_all(frame, 10, 0);
+  lv_obj_set_size(frame, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_clear_flag(frame, LV_OBJ_FLAG_SCROLLABLE);
+
+  int qsize = (_screen_w < _screen_h ? _screen_w : _screen_h) - 96;
+  if (qsize < 120) qsize = 120;
+  _qr_code = lv_qrcode_create(frame, qsize, lv_color_hex(0x000000), lv_color_hex(0xFFFFFF));
+}
+
+void UITask::openShareQR(const uint8_t* pubkey, uint8_t type, const char* name, lv_obj_t* return_screen) {
+  buildShareQRScreen();
+  _qr_return_screen = return_screen ? return_screen : _home_screen;
+
+  char sname[36];
+  sanitizeForFont(name && name[0] ? name : "(unnamed)", sname, sizeof(sname));
+  lv_label_set_text(_qr_name_lbl, sname);
+
+  char hex[2 * PUB_KEY_SIZE + 1];
+  mesh::Utils::toHex(hex, pubkey, PUB_KEY_SIZE);
+  char ktrunc[24];
+  snprintf(ktrunc, sizeof(ktrunc), "<%.6s...%.6s>", hex, hex + 2 * PUB_KEY_SIZE - 6);
+  lv_label_set_text(_qr_key_lbl, ktrunc);
+
+  // App-recognized contact import URI (see docs/qr_codes.md).
+  char ename[3 * 32 + 1];
+  urlEncode(name, ename, sizeof(ename));
+  char uri[96 + 2 * PUB_KEY_SIZE + sizeof(ename)];
+  snprintf(uri, sizeof(uri), "meshcore://contact/add?name=%s&public_key=%s&type=%u",
+           ename, hex, (unsigned)type);
+  lv_qrcode_update(_qr_code, uri, strlen(uri));
+
+  lv_scr_load(_qr_screen);
+}
+
+void UITask::qr_back_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  lv_scr_load(_instance->_qr_return_screen ? _instance->_qr_return_screen : _instance->_home_screen);
+}
+
+void UITask::share_showqr_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  ContactInfo* c = _instance->cinfoContact();  // target is _cinfo_pubkey
+  lv_obj_t* ret = lv_scr_act();
+  _instance->closeMenuPopup();
+  if (c) _instance->openShareQR(c->id.pub_key, c->type, c->name, ret);
+}
+
 // ----- Kebab overflow menu (chat top bar) -----
 void UITask::chat_kebab_cb(lv_event_t* e) {
   (void)e;
@@ -1575,7 +1918,14 @@ void UITask::kebab_search_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   _instance->closeMenuPopup();
-  _instance->showToast("Search coming soon");
+  if (!_instance->_chat_screen) return;
+  _instance->_search_active = true;
+  _instance->_search_filter[0] = 0;
+  if (_instance->_chat_search_ta) lv_textarea_set_text(_instance->_chat_search_ta, "");
+  lv_keyboard_set_textarea(_instance->_chat_keyboard, _instance->_chat_search_ta);
+  lv_keyboard_set_mode(_instance->_chat_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+  _instance->layoutChatBody(true);   // reveal search bar + keyboard
+  _instance->rebuildChatHistory();
 }
 
 void UITask::kebab_share_cb(lv_event_t* e) {
@@ -1777,6 +2127,546 @@ void UITask::path_kb_event_cb(lv_event_t* e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
     lv_obj_add_flag(_instance->_path_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+// ===== Settings tab ======================================================
+
+// A section heading (accent label with an underline divider) in the settings list.
+static void addSettingsSection(lv_obj_t* body, const char* title) {
+  lv_obj_t* h = lv_label_create(body);
+  lv_label_set_text(h, title);
+  lv_obj_set_width(h, LV_PCT(100));
+  lv_obj_set_style_text_color(h, lv_color_hex(0x60A5FA), 0);  // blue-400 accent
+  lv_obj_set_style_text_font(h, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_pad_top(h, 8, 0);
+  lv_obj_set_style_pad_bottom(h, 4, 0);
+  lv_obj_set_style_border_color(h, lv_color_hex(0x374151), 0);  // gray-700 underline
+  lv_obj_set_style_border_side(h, LV_BORDER_SIDE_BOTTOM, 0);
+  lv_obj_set_style_border_width(h, 1, 0);
+}
+
+// Official MeshCore region presets, embedded from https://api.meshcore.nz/api/v1/config
+// (suggested_radio_settings). Refresh from that endpoint if the list changes upstream.
+struct RadioPreset { const char* title; float freq; float bw; uint8_t sf; uint8_t cr; };
+static const RadioPreset RADIO_PRESETS[] = {
+  {"Australia",               915.800f, 250.0f, 10, 5},
+  {"Australia (Narrow)",      916.575f,  62.5f,  7, 8},
+  {"Australia (Mid)",         915.075f, 125.0f,  9, 5},
+  {"Australia: SA, WA",       923.125f,  62.5f,  8, 8},
+  {"Australia: QLD",          923.125f,  62.5f,  8, 5},
+  {"EU/UK (Narrow)",          869.618f,  62.5f,  8, 8},
+  {"EU/UK (Deprecated)",      869.525f, 250.0f, 11, 5},
+  {"Czech Republic (Narrow)", 869.432f,  62.5f,  7, 5},
+  {"EU 433MHz (Long Range)",  433.650f, 250.0f, 11, 5},
+  {"EU 433MHz (Narrow)",      433.650f,  62.5f,  8, 8},
+  {"New Zealand",             917.375f, 250.0f, 11, 5},
+  {"New Zealand (Narrow)",    917.375f,  62.5f,  7, 5},
+  {"Portugal 433",            433.375f,  62.5f,  9, 6},
+  {"Portugal 868",            869.618f,  62.5f,  7, 6},
+  {"Switzerland",             869.618f,  62.5f,  8, 8},
+  {"USA/Canada (Recommended)",910.525f,  62.5f,  7, 5},
+  {"Vietnam (Narrow)",        920.250f,  62.5f,  8, 5},
+  {"Vietnam (Deprecated)",    920.250f, 250.0f, 11, 5},
+};
+static const int RADIO_PRESETS_N = sizeof(RADIO_PRESETS) / sizeof(RADIO_PRESETS[0]);
+
+// Valid LoRa bandwidths (kHz); index maps 1:1 to the bandwidth dropdown options.
+static const float BW_OPTS[] = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125.0f, 250.0f, 500.0f};
+static const char* BW_OPTS_STR = "7.8\n10.4\n15.6\n20.8\n31.25\n41.7\n62.5\n125\n250\n500";
+static const int BW_OPTS_N = sizeof(BW_OPTS) / sizeof(BW_OPTS[0]);
+
+// caption + a 100%-wide dropdown with the given newline-separated options.
+static lv_obj_t* makeDropdownField(lv_obj_t* body, const char* cap, const char* opts) {
+  lv_obj_t* f = makeField(body, cap);
+  lv_obj_t* dd = lv_dropdown_create(f);
+  lv_dropdown_set_options(dd, opts);
+  lv_obj_set_width(dd, LV_PCT(100));
+  return dd;
+}
+
+// caption + a 100%-wide numeric textarea wired to the radio-edit handler.
+static lv_obj_t* makeNumberField(lv_obj_t* body, const char* cap, lv_event_cb_t cb) {
+  lv_obj_t* f = makeField(body, cap);
+  lv_obj_t* ta = lv_textarea_create(f);
+  lv_textarea_set_one_line(ta, true);
+  lv_textarea_set_accepted_chars(ta, "0123456789.-");
+  lv_obj_set_width(ta, LV_PCT(100));
+  lv_obj_add_event_cb(ta, cb, LV_EVENT_ALL, NULL);
+  return ta;
+}
+
+void UITask::buildSettingsTab(lv_obj_t* parent) {
+  lv_obj_t* body = _tab_settings;
+  lv_obj_set_style_pad_all(body, 12, 0);
+  lv_obj_set_style_pad_row(body, 8, 0);
+  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);  // tab page scrolls by default
+
+  // ===== Public Info =====
+  addSettingsSection(body, "Public Info");
+
+  lv_obj_t* fn = makeField(body, "Name");
+  _set_name_ta = lv_textarea_create(fn);
+  lv_textarea_set_one_line(_set_name_ta, true);
+  lv_obj_set_width(_set_name_ta, LV_PCT(100));
+  lv_obj_add_event_cb(_set_name_ta, set_name_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  // Public key: read-only one-line field (scrolls horizontally) + copy button.
+  lv_obj_t* fk = makeField(body, "Public Key");
+  lv_obj_t* krow = lv_obj_create(fk);
+  lv_obj_set_width(krow, LV_PCT(100));
+  lv_obj_set_height(krow, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(krow, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(krow, 0, 0);
+  lv_obj_set_style_pad_all(krow, 0, 0);
+  lv_obj_set_style_pad_column(krow, 6, 0);
+  lv_obj_clear_flag(krow, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(krow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(krow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  _set_key_ta = lv_textarea_create(krow);
+  lv_textarea_set_one_line(_set_key_ta, true);   // no wrap; swipe to scroll the hex
+  lv_obj_set_flex_grow(_set_key_ta, 1);
+  lv_obj_set_style_text_font(_set_key_ta, &lv_font_montserrat_12, 0);
+  // No keyboard is ever bound to this field, so it's effectively read-only.
+  lv_obj_t* copyk = lv_btn_create(krow);
+  lv_obj_add_event_cb(copyk, set_copykey_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* ck = lv_label_create(copyk);
+  lv_label_set_text(ck, LV_SYMBOL_COPY);
+  lv_obj_center(ck);
+
+  // Position: editable lat/lon (degrees). Affects adverts only when sharing is on.
+  lv_obj_t* fpos = makeField(body, "Position (lat, lon)");
+  lv_obj_t* prow = lv_obj_create(fpos);
+  lv_obj_set_width(prow, LV_PCT(100));
+  lv_obj_set_height(prow, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(prow, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(prow, 0, 0);
+  lv_obj_set_style_pad_all(prow, 0, 0);
+  lv_obj_set_style_pad_column(prow, 6, 0);
+  lv_obj_clear_flag(prow, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(prow, LV_FLEX_FLOW_ROW);
+  _set_lat_ta = lv_textarea_create(prow);
+  lv_textarea_set_one_line(_set_lat_ta, true);
+  lv_textarea_set_accepted_chars(_set_lat_ta, "0123456789.-");
+  lv_obj_set_flex_grow(_set_lat_ta, 1);
+  lv_obj_add_event_cb(_set_lat_ta, set_pos_ta_event_cb, LV_EVENT_ALL, NULL);
+  _set_lon_ta = lv_textarea_create(prow);
+  lv_textarea_set_one_line(_set_lon_ta, true);
+  lv_textarea_set_accepted_chars(_set_lon_ta, "0123456789.-");
+  lv_obj_set_flex_grow(_set_lon_ta, 1);
+  lv_obj_add_event_cb(_set_lon_ta, set_pos_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  _set_sharepos = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_sharepos, "Share position in adverts");
+  lv_obj_set_style_text_color(_set_sharepos, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_sharepos, set_sharepos_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  // ===== Radio (edit fields, then a single Apply) =====
+  // Header row: "Radio" title on the left, a "Preset" button on the right.
+  lv_obj_t* rhdr = lv_obj_create(body);
+  lv_obj_set_width(rhdr, LV_PCT(100));
+  lv_obj_set_height(rhdr, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(rhdr, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_radius(rhdr, 0, 0);
+  lv_obj_set_style_pad_all(rhdr, 0, 0);
+  lv_obj_set_style_pad_top(rhdr, 8, 0);
+  lv_obj_set_style_pad_bottom(rhdr, 4, 0);
+  lv_obj_set_style_border_color(rhdr, lv_color_hex(0x374151), 0);
+  lv_obj_set_style_border_side(rhdr, LV_BORDER_SIDE_BOTTOM, 0);
+  lv_obj_set_style_border_width(rhdr, 1, 0);
+  lv_obj_clear_flag(rhdr, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(rhdr, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(rhdr, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_t* rtitle = lv_label_create(rhdr);
+  lv_label_set_text(rtitle, "Radio");
+  lv_obj_set_style_text_color(rtitle, lv_color_hex(0x60A5FA), 0);
+  lv_obj_set_style_text_font(rtitle, &lv_font_montserrat_16, 0);
+  lv_obj_t* preset = lv_btn_create(rhdr);
+  lv_obj_set_style_pad_hor(preset, 10, 0);
+  lv_obj_set_style_pad_ver(preset, 4, 0);
+  lv_obj_add_event_cb(preset, radio_preset_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* pl = lv_label_create(preset);
+  lv_label_set_text(pl, LV_SYMBOL_LIST " Preset");
+  lv_obj_center(pl);
+
+  _set_freq_ta = makeNumberField(body, "Frequency (MHz)", set_radio_ta_event_cb);
+  _set_bw_dd   = makeDropdownField(body, "Bandwidth (kHz)", BW_OPTS_STR);
+  _set_sf_dd   = makeDropdownField(body, "Spreading Factor", "5\n6\n7\n8\n9\n10\n11\n12");
+  _set_cr_dd   = makeDropdownField(body, "Coding Rate", "5\n6\n7\n8");
+  _set_txp_ta  = makeNumberField(body, "TX Power (dBm)", set_radio_ta_event_cb);
+
+  lv_obj_t* apply = lv_btn_create(body);
+  lv_obj_add_event_cb(apply, set_radio_apply_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* al = lv_label_create(apply);
+  lv_label_set_text(al, LV_SYMBOL_OK " Apply Radio");
+
+  // ===== Routing =====
+  addSettingsSection(body, "Routing");
+  lv_obj_t* fp = makeField(body, "Path Hash Mode");
+  _set_path_dd = lv_dropdown_create(fp);
+  lv_dropdown_set_options(_set_path_dd, "1 byte\n2 bytes\n3 bytes");
+  lv_obj_set_width(_set_path_dd, LV_PCT(100));
+  lv_obj_add_event_cb(_set_path_dd, set_pathmode_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  // ===== Display =====
+  addSettingsSection(body, "Display");
+  lv_obj_t* fb = makeField(body, "Brightness");
+  // The slider knob is taller than its track and would be clipped by the field
+  // cell; vertical padding reserves room for it. (margin styles are compiled
+  // out of this LVGL config, so pad the cell instead.)
+  lv_obj_set_style_pad_top(fb, 6, 0);
+  lv_obj_set_style_pad_bottom(fb, 10, 0);
+  _set_bright_slider = lv_slider_create(fb);
+  lv_slider_set_range(_set_bright_slider, 10, 100);
+  lv_obj_set_width(_set_bright_slider, LV_PCT(92));  // inset so the knob at max clears the scroll bar
+  lv_obj_add_event_cb(_set_bright_slider, set_bright_cb, LV_EVENT_ALL, NULL);
+
+  lv_obj_t* fr = makeField(body, "Screen Rotation (restart to apply)");
+  _set_rot_dd = lv_dropdown_create(fr);
+  lv_dropdown_set_options(_set_rot_dd, "0\n90\n180\n270");
+  lv_obj_set_width(_set_rot_dd, LV_PCT(100));
+  lv_obj_add_event_cb(_set_rot_dd, set_rot_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  // Shared on-screen keyboard for the settings textareas. Parented to the home
+  // screen so it overlays the tabview; hidden until a field is focused.
+  _set_kb = lv_keyboard_create(parent);
+  lv_obj_add_event_cb(_set_kb, set_kb_event_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_set_kb, LV_OBJ_FLAG_HIDDEN);
+
+  populateSettings();
+}
+
+void UITask::populateSettings() {
+  if (!_node_prefs) return;
+  lv_textarea_set_text(_set_name_ta, _node_prefs->node_name);
+
+  if (_set_key_ta) {
+    char hex[2 * PUB_KEY_SIZE + 1];
+    mesh::Utils::toHex(hex, the_mesh.self_id.pub_key, PUB_KEY_SIZE);
+    lv_textarea_set_text(_set_key_ta, hex);
+    lv_textarea_set_cursor_pos(_set_key_ta, 0);  // show the start, not the tail
+  }
+
+  if (_set_lat_ta && _set_lon_ta && _sensors) {
+    char latb[20] = "", lonb[20] = "";
+    if (_sensors->node_lat != 0.0 || _sensors->node_lon != 0.0) {
+      snprintf(latb, sizeof(latb), "%.6f", _sensors->node_lat);
+      snprintf(lonb, sizeof(lonb), "%.6f", _sensors->node_lon);
+    }
+    lv_textarea_set_text(_set_lat_ta, latb);
+    lv_textarea_set_text(_set_lon_ta, lonb);
+  }
+  if (_set_sharepos) {
+    if (_node_prefs->advert_loc_policy == ADVERT_LOC_SHARE)
+      lv_obj_add_state(_set_sharepos, LV_STATE_CHECKED);
+    else
+      lv_obj_clear_state(_set_sharepos, LV_STATE_CHECKED);
+  }
+  char b[24];
+  snprintf(b, sizeof(b), "%g", _node_prefs->freq);         lv_textarea_set_text(_set_freq_ta, b);
+  snprintf(b, sizeof(b), "%d", _node_prefs->tx_power_dbm); lv_textarea_set_text(_set_txp_ta, b);
+
+  int bwi = 0;
+  for (int i = 0; i < BW_OPTS_N; i++)
+    if (fabs(BW_OPTS[i] - _node_prefs->bw) < 0.05) { bwi = i; break; }
+  lv_dropdown_set_selected(_set_bw_dd, bwi);
+  lv_dropdown_set_selected(_set_sf_dd, (_node_prefs->sf >= 5 && _node_prefs->sf <= 12) ? _node_prefs->sf - 5 : 0);
+  lv_dropdown_set_selected(_set_cr_dd, (_node_prefs->cr >= 5 && _node_prefs->cr <= 8) ? _node_prefs->cr - 5 : 0);
+
+  lv_dropdown_set_selected(_set_path_dd, _node_prefs->path_hash_mode <= 2 ? _node_prefs->path_hash_mode : 0);
+
+  uint8_t duty = _node_prefs->display_brightness;
+  int pct = duty ? (duty * 100 + 127) / 255 : 50;
+  if (pct < 10) pct = 10;
+  if (pct > 100) pct = 100;
+  lv_slider_set_value(_set_bright_slider, pct, LV_ANIM_OFF);
+
+  lv_dropdown_set_selected(_set_rot_dd, _lgfx ? (_lgfx->getRotation() & 3) : 0);
+}
+
+void UITask::commitNodeName() {
+  if (!_set_name_ta || !_node_prefs) return;
+  const char* nm = lv_textarea_get_text(_set_name_ta);
+  if (!nm || !nm[0]) return;
+  if (strncmp(nm, _node_prefs->node_name, sizeof(_node_prefs->node_name)) == 0) return;  // unchanged
+  strncpy(_node_prefs->node_name, nm, sizeof(_node_prefs->node_name) - 1);
+  _node_prefs->node_name[sizeof(_node_prefs->node_name) - 1] = 0;
+  the_mesh.savePrefs();
+  the_mesh.advert();  // re-broadcast identity with the new name
+  showToast("Name saved & advertised");
+}
+
+void UITask::applyRadioSettings() {
+  if (!_node_prefs) return;
+  float freq = atof(lv_textarea_get_text(_set_freq_ta));
+  int   txp  = atoi(lv_textarea_get_text(_set_txp_ta));
+  int   bwi  = lv_dropdown_get_selected(_set_bw_dd);
+  float bw   = BW_OPTS[(bwi >= 0 && bwi < BW_OPTS_N) ? bwi : 0];
+  int   sf   = (int)lv_dropdown_get_selected(_set_sf_dd) + 5;   // dropdown index 0 -> SF5
+  int   cr   = (int)lv_dropdown_get_selected(_set_cr_dd) + 5;   // dropdown index 0 -> CR5
+  // sf/cr/bw come from fixed dropdowns, so only the free-entry fields need range checks.
+  if (freq < 150.0f || freq > 2500.0f) { showToast("Freq must be 150-2500 MHz"); return; }
+  if (txp < -9 || txp > MAX_LORA_TX_POWER) { showToast("TX power out of range"); return; }
+  _node_prefs->freq = freq;
+  _node_prefs->bw = bw;
+  _node_prefs->sf = (uint8_t)sf;
+  _node_prefs->cr = (uint8_t)cr;
+  _node_prefs->tx_power_dbm = (int8_t)txp;
+  the_mesh.savePrefs();
+  radio_set_params(_node_prefs->freq, _node_prefs->bw, _node_prefs->sf, _node_prefs->cr);
+  radio_set_tx_power(_node_prefs->tx_power_dbm);
+  showToast("Radio settings applied");
+}
+
+void UITask::applyPreset(int idx) {
+  if (idx < 0 || idx >= RADIO_PRESETS_N) return;
+  const RadioPreset& p = RADIO_PRESETS[idx];
+  char b[24];
+  snprintf(b, sizeof(b), "%g", p.freq);
+  lv_textarea_set_text(_set_freq_ta, b);
+  int bwi = 0;
+  for (int i = 0; i < BW_OPTS_N; i++) if (fabs(BW_OPTS[i] - p.bw) < 0.05) { bwi = i; break; }
+  lv_dropdown_set_selected(_set_bw_dd, bwi);
+  lv_dropdown_set_selected(_set_sf_dd, (p.sf >= 5 && p.sf <= 12) ? p.sf - 5 : 0);
+  lv_dropdown_set_selected(_set_cr_dd, (p.cr >= 5 && p.cr <= 8) ? p.cr - 5 : 0);
+  applyRadioSettings();  // validate + persist + push to the radio
+}
+
+void UITask::radio_preset_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  lv_obj_t* list = _instance->ensureMenuPopup();
+  for (int i = 0; i < RADIO_PRESETS_N; i++) {
+    lv_obj_t* b = lv_list_add_btn(list, NULL, RADIO_PRESETS[i].title);
+    lv_obj_set_user_data(b, (void*)(intptr_t)i);
+    lv_obj_add_event_cb(b, radio_preset_pick_cb, LV_EVENT_CLICKED, NULL);
+  }
+  _instance->showMenuPopup();
+}
+
+void UITask::radio_preset_pick_cb(lv_event_t* e) {
+  if (!_instance) return;
+  int idx = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+  _instance->closeMenuPopup();
+  _instance->applyPreset(idx);
+}
+
+void UITask::set_name_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    _instance->_set_active_ta = ta;
+    lv_keyboard_set_textarea(_instance->_set_kb, ta);
+    lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_set_kb);
+    lv_obj_scroll_to_view(ta, LV_ANIM_OFF);
+  } else if (code == LV_EVENT_DEFOCUSED) {
+    _instance->commitNodeName();
+  }
+}
+
+void UITask::set_radio_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    _instance->_set_active_ta = ta;
+    lv_keyboard_set_textarea(_instance->_set_kb, ta);
+    lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
+    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_set_kb);
+    lv_obj_scroll_to_view(ta, LV_ANIM_OFF);
+  }
+}
+
+void UITask::set_kb_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+    if (_instance->_set_active_ta == _instance->_set_name_ta) _instance->commitNodeName();
+    else if (_instance->_set_active_ta == _instance->_set_lat_ta ||
+             _instance->_set_active_ta == _instance->_set_lon_ta) _instance->commitPosition();
+    _instance->_set_active_ta = NULL;
+    lv_obj_add_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+void UITask::set_radio_apply_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->applyRadioSettings();
+}
+
+void UITask::set_pathmode_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  _instance->_node_prefs->path_hash_mode = (uint8_t)lv_dropdown_get_selected(lv_event_get_target(e));
+  the_mesh.savePrefs();
+  _instance->showToast("Path hash mode saved");
+}
+
+void UITask::set_bright_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  int pct = (int)lv_slider_get_value(lv_event_get_target(e));
+  uint8_t duty = (uint8_t)((pct * 255 + 50) / 100);
+  if (duty < 1) duty = 1;
+  if (code == LV_EVENT_VALUE_CHANGED) {
+    board_set_backlight(duty);  // live preview while dragging
+  } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+    if (_instance->_node_prefs) {
+      _instance->_node_prefs->display_brightness = duty;
+      the_mesh.savePrefs();
+    }
+  }
+}
+
+void UITask::set_rot_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  uint16_t sel = lv_dropdown_get_selected(lv_event_get_target(e));  // 0..3
+  _instance->_node_prefs->display_rotation = (uint8_t)(sel + 1);    // 1-based; 0 = unset
+  the_mesh.savePrefs();
+  _instance->showToast("Rotation saved (restart to apply)");
+}
+
+void UITask::copyToClipboard(const char* text) {
+  if (!text) return;
+  strncpy(_clipboard, text, sizeof(_clipboard) - 1);
+  _clipboard[sizeof(_clipboard) - 1] = 0;
+}
+
+void UITask::set_copykey_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  char hex[2 * PUB_KEY_SIZE + 1];
+  mesh::Utils::toHex(hex, the_mesh.self_id.pub_key, PUB_KEY_SIZE);
+  _instance->copyToClipboard(hex);
+  _instance->showToast("Public key copied");
+}
+
+void UITask::insert_paste_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  if (_instance->_clipboard[0] && _instance->_chat_input)
+    lv_textarea_add_text(_instance->_chat_input, _instance->_clipboard);
+  _instance->closeInsertPopup();
+}
+
+void UITask::commitPosition() {
+  if (!_sensors || !_set_lat_ta || !_set_lon_ta) return;
+  _sensors->node_lat = atof(lv_textarea_get_text(_set_lat_ta));
+  _sensors->node_lon = atof(lv_textarea_get_text(_set_lon_ta));
+  the_mesh.savePrefs();
+}
+
+void UITask::set_pos_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    _instance->_set_active_ta = ta;
+    lv_keyboard_set_textarea(_instance->_set_kb, ta);
+    lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
+    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_set_kb);
+    lv_obj_scroll_to_view(ta, LV_ANIM_OFF);
+  } else if (code == LV_EVENT_DEFOCUSED) {
+    _instance->commitPosition();
+  }
+}
+
+void UITask::set_sharepos_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  bool checked = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  if (checked) {
+    _instance->showSharePosWarning();   // confirm before broadcasting location
+  } else {
+    _instance->_node_prefs->advert_loc_policy = ADVERT_LOC_NONE;
+    the_mesh.savePrefs();
+    the_mesh.advert();
+    _instance->showToast("Position sharing off");
+  }
+}
+
+void UITask::showSharePosWarning() {
+  if (!_confirm_popup) {
+    _confirm_popup = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(_confirm_popup, _screen_w, _screen_h);
+    lv_obj_set_pos(_confirm_popup, 0, 0);
+    lv_obj_set_style_bg_color(_confirm_popup, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(_confirm_popup, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(_confirm_popup, 0, 0);
+    lv_obj_set_style_pad_all(_confirm_popup, 0, 0);
+    lv_obj_clear_flag(_confirm_popup, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(_confirm_popup, LV_OBJ_FLAG_CLICKABLE);  // swallow taps behind the modal
+
+    lv_obj_t* card = lv_obj_create(_confirm_popup);
+    lv_obj_set_width(card, LV_PCT(88));
+    lv_obj_set_height(card, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(card, LV_PCT(86), 0);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_pad_all(card, 14, 0);
+    lv_obj_set_style_pad_row(card, 12, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+
+    lv_obj_t* warn = lv_label_create(card);
+    lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(warn, LV_PCT(100));
+    lv_obj_set_style_text_color(warn, lv_color_hex(0xF3F4F6), 0);
+    lv_label_set_text(warn,
+      "When enabled, your exact latitude and longitude will be broadcast "
+      "publically in your adverts.\n\n"
+      "Anyone that receives your advert could share your positon with external "
+      "parties, including the internet.\n\n"
+      "This must be enabled if you want to upload your node to the internet map.");
+
+    lv_obj_t* btns = lv_obj_create(card);
+    lv_obj_set_width(btns, LV_PCT(100));
+    lv_obj_set_height(btns, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(btns, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btns, 0, 0);
+    lv_obj_set_style_pad_all(btns, 0, 0);
+    lv_obj_set_style_pad_column(btns, 8, 0);
+    lv_obj_clear_flag(btns, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t* cancel = lv_btn_create(btns);
+    lv_obj_add_event_cb(cancel, sharepos_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* cl = lv_label_create(cancel);
+    lv_label_set_text(cl, "Cancel");
+
+    lv_obj_t* ok = lv_btn_create(btns);
+    lv_obj_set_style_bg_color(ok, lv_color_hex(0x2563EB), 0);
+    lv_obj_add_event_cb(ok, sharepos_confirm_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* okl = lv_label_create(ok);
+    lv_label_set_text(okl, "Enable");
+  }
+  lv_obj_clear_flag(_confirm_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_confirm_popup);
+}
+
+void UITask::sharepos_cancel_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  if (_instance->_set_sharepos) lv_obj_clear_state(_instance->_set_sharepos, LV_STATE_CHECKED);
+  if (_instance->_confirm_popup) lv_obj_add_flag(_instance->_confirm_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::sharepos_confirm_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance || !_instance->_node_prefs) return;
+  _instance->_node_prefs->advert_loc_policy = ADVERT_LOC_SHARE;
+  the_mesh.savePrefs();
+  the_mesh.advert();
+  if (_instance->_confirm_popup) lv_obj_add_flag(_instance->_confirm_popup, LV_OBJ_FLAG_HIDDEN);
+  _instance->showToast("Position sharing on");
 }
 
 void UITask::loop() {
