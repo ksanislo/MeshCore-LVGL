@@ -6,6 +6,8 @@
 // main.cpp owns the_mesh; we read contacts/channels via the base class.
 extern MyMesh the_mesh;
 
+static void sanitizeForFont(const char* in, char* out, size_t cap);
+
 UITask* UITask::_instance = NULL;
 
 void UITask::disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
@@ -185,8 +187,9 @@ static constexpr uint32_t FAV_HEX = 0xFBBF24;            // amber-400 accent
 void UITask::addContactRow(const ContactInfo& c, uint32_t now_secs) {
   bool fav = (c.flags & CONTACT_FLAG_FAVOURITE) != 0;
 
-  lv_obj_t* btn = lv_list_add_btn(_contacts_list, contactSymbol(c.type),
-                                  c.name[0] ? c.name : "(unnamed)");
+  char cname[CHAT_PEER_NAME_MAX + 4];
+  sanitizeForFont(c.name[0] ? c.name : "(unnamed)", cname, sizeof(cname));
+  lv_obj_t* btn = lv_list_add_btn(_contacts_list, contactSymbol(c.type), cname);
   lv_obj_set_style_bg_color(btn, lv_color_hex(BG_HEX), 0);
   lv_obj_set_style_text_color(btn, lv_color_hex(fav ? FAV_HEX : FG_HEX), 0);
   lv_obj_set_style_border_color(btn, lv_color_hex(0x374151), 0);  // gray-700
@@ -278,8 +281,10 @@ void UITask::rebuildChannelsList() {
     ChannelDetails ch;
     if (!the_mesh.getChannel(idx, ch) || ch.name[0] == 0) continue;
 
-    char label[40];
-    snprintf(label, sizeof(label), "# %s", ch.name);
+    char cname[CHAT_PEER_NAME_MAX + 4];
+    sanitizeForFont(ch.name, cname, sizeof(cname));
+    char label[48];
+    snprintf(label, sizeof(label), "# %s", cname);
     lv_obj_t* btn = lv_list_add_btn(_channels_list, NULL, label);
     lv_obj_set_style_bg_color(btn, lv_color_hex(BG_HEX), 0);
     lv_obj_set_style_text_color(btn, lv_color_hex(FG_HEX), 0);
@@ -318,6 +323,33 @@ void UITask::chat_back_cb(lv_event_t* e) {
   lv_scr_load(_instance->_home_screen);  // keep chat screen allocated for reuse
 }
 
+// Map common "smart"/typographic UTF-8 punctuation to ASCII so it renders in
+// the Montserrat glyph set (which lacks U+2018/19/1C/1D, dashes, ellipsis,
+// nbsp). Everything else passes through byte-for-byte, so glyphs the font does
+// have still show. Output is always null-terminated.
+static void sanitizeForFont(const char* in, char* out, size_t cap) {
+  const uint8_t* p = (const uint8_t*)(in ? in : "");
+  size_t o = 0;
+  auto emit = [&](const char* s) { while (*s && o + 1 < cap) out[o++] = *s++; };
+  while (*p && o + 1 < cap) {
+    if (p[0] == 0xE2 && p[1] == 0x80) {              // U+2000..U+203F block
+      const char* rep = nullptr;
+      switch (p[2]) {
+        case 0x98: case 0x99: rep = "'";   break;    // ‘ ’
+        case 0x9C: case 0x9D: rep = "\"";  break;    // “ ”
+        case 0x93: case 0x94: rep = "-";   break;    // – —
+        case 0xA6:            rep = "...";  break;   // …
+        default: break;
+      }
+      if (rep) { emit(rep); p += 3; continue; }
+    } else if (p[0] == 0xC2 && p[1] == 0xA0) {       // nbsp
+      out[o++] = ' '; p += 2; continue;
+    }
+    out[o++] = *p++;  // copy byte (multi-byte UTF-8 passes through intact)
+  }
+  out[o] = 0;
+}
+
 // Render message text into a bubble, turning "@[username]" mentions into
 // "@username" with the name highlighted. Brackets hidden, @ kept. The stored
 // text keeps the raw @[username] form so compose can round-trip it later.
@@ -342,7 +374,10 @@ static void addMessageText(lv_obj_t* bubble, const char* text) {
     lv_style_set_text_color(&span->style, lv_color_hex(color));
   };
 
-  const char* p = text ? text : "";
+  char clean[CHAT_MSG_TEXT_MAX + 8];
+  sanitizeForFont(text, clean, sizeof(clean));
+
+  const char* p = clean;
   while (*p) {
     const char* at = strstr(p, "@[");
     if (!at) { addSpan(p, strlen(p), FG_TEXT, false); break; }
@@ -384,7 +419,9 @@ void UITask::rebuildChatHistory() {
                       strncmp(last_sender, m->sender, CHAT_PEER_NAME_MAX) != 0);
     if (show_name) {
       lv_obj_t* name = lv_label_create(_chat_history);  // flex child, left by default
-      lv_label_set_text(name, m->sender[0] ? m->sender : "?");
+      char sname[CHAT_PEER_NAME_MAX + 4];
+      sanitizeForFont(m->sender[0] ? m->sender : "?", sname, sizeof(sname));
+      lv_label_set_text(name, sname);
       lv_obj_set_style_text_color(name, lv_color_hex(0x9CA3AF), 0);  // gray-400
       lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
     }
@@ -471,7 +508,9 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_set_flex_flow(_chat_history, LV_FLEX_FLOW_COLUMN);
   }
 
-  lv_label_set_text(_chat_title, _chat_peer);
+  char tname[CHAT_PEER_NAME_MAX + 4];
+  sanitizeForFont(_chat_peer, tname, sizeof(tname));
+  lv_label_set_text(_chat_title, tname);
   rebuildChatHistory();
   lv_scr_load(_chat_screen);
 }
