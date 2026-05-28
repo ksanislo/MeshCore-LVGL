@@ -150,6 +150,7 @@ class UITask : public AbstractUITask {
   void      ensureInsertPopup();
   void      showInsertMenu();
   void      showContactPicker();
+  void      buildContactPicker(lv_obj_t* list, lv_event_cb_t cb, bool styled);
   void      closeInsertPopup();
   void      insertContactRef(const uint8_t* pubkey, uint8_t type, const char* name);
   static void contact_clicked_cb(lv_event_t* e);

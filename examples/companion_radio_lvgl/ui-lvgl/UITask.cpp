@@ -493,21 +493,35 @@ void UITask::showInsertMenu() {
   lv_obj_clear_flag(_insert_popup, LV_OBJ_FLAG_HIDDEN);
 }
 
+// Fill `list` with contact buttons (favourites first), each wired to `cb` with
+// the 4-byte pubkey prefix in user_data. Capped so a large contact list can't
+// exhaust the LVGL heap (allocating a widget per contact across ~350 OOMs).
+void UITask::buildContactPicker(lv_obj_t* list, lv_event_cb_t cb, bool styled) {
+  const int MAX_PICK = 100;
+  int n = 0;
+  for (int fav_pass = 1; fav_pass >= 0 && n < MAX_PICK; fav_pass--) {
+    ContactsIterator it;
+    ContactInfo c;
+    while (it.hasNext(&the_mesh, c) && n < MAX_PICK) {
+      bool fav = (c.flags & CONTACT_FLAG_FAVOURITE) != 0;
+      if (fav != (fav_pass == 1)) continue;  // favourites pass first
+      char nm[CHAT_PEER_NAME_MAX + 4];
+      sanitizeForFont(c.name[0] ? c.name : "(unnamed)", nm, sizeof(nm));
+      lv_obj_t* b = lv_list_add_btn(list, contactSymbol(c.type), nm);
+      if (styled) styleMenuBtn(b);
+      uint32_t key = 0;
+      memcpy(&key, c.id.pub_key, 4);
+      lv_obj_set_user_data(b, (void*)(uintptr_t)key);
+      lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+      n++;
+    }
+  }
+}
+
 void UITask::showContactPicker() {
   ensureInsertPopup();
   lv_obj_clean(_insert_list);
-  ContactsIterator it;
-  ContactInfo c;
-  while (it.hasNext(&the_mesh, c)) {
-    char nm[CHAT_PEER_NAME_MAX + 4];
-    sanitizeForFont(c.name[0] ? c.name : "(unnamed)", nm, sizeof(nm));
-    lv_obj_t* b = lv_list_add_btn(_insert_list, contactSymbol(c.type), nm);
-    styleMenuBtn(b);
-    uint32_t key = 0;
-    memcpy(&key, c.id.pub_key, 4);
-    lv_obj_set_user_data(b, (void*)(uintptr_t)key);
-    lv_obj_add_event_cb(b, picker_pick_cb, LV_EVENT_CLICKED, NULL);
-  }
+  buildContactPicker(_insert_list, picker_pick_cb, true);
   lv_obj_clear_flag(_insert_popup, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -547,7 +561,8 @@ void UITask::insert_myinfo_cb(lv_event_t* e) {
 
 void UITask::insert_share_cb(lv_event_t* e) {
   (void)e;
-  if (_instance) _instance->showContactPicker();
+  // showContactPicker cleans _insert_list (deleting this button); defer it.
+  lv_async_call([](void*) { if (_instance) _instance->showContactPicker(); }, NULL);
 }
 
 void UITask::picker_pick_cb(lv_event_t* e) {
@@ -1712,19 +1727,14 @@ void UITask::cinfo_share_cb(lv_event_t* e) {
 
 void UITask::share_sendto_cb(lv_event_t* e) {
   (void)e;
-  if (!_instance) return;
-  lv_obj_t* list = _instance->ensureMenuPopup();
-  ContactsIterator it;
-  ContactInfo c;
-  while (it.hasNext(&the_mesh, c)) {
-    char nm[CHAT_PEER_NAME_MAX + 4];
-    sanitizeForFont(c.name[0] ? c.name : "(unnamed)", nm, sizeof(nm));
-    lv_obj_t* b = lv_list_add_btn(list, contactSymbol(c.type), nm);
-    uint32_t key = 0; memcpy(&key, c.id.pub_key, 4);
-    lv_obj_set_user_data(b, (void*)(uintptr_t)key);
-    lv_obj_add_event_cb(b, share_pick_cb, LV_EVENT_CLICKED, NULL);
-  }
-  _instance->showMenuPopup();
+  // Defer: this rebuilds _menu_list (deleting the button whose event we're in)
+  // and could allocate many widgets -- both unsafe inside the click event.
+  lv_async_call([](void*) {
+    if (!_instance) return;
+    lv_obj_t* list = _instance->ensureMenuPopup();
+    _instance->buildContactPicker(list, share_pick_cb, false);
+    _instance->showMenuPopup();
+  }, NULL);
 }
 
 void UITask::share_zerohop_cb(lv_event_t* e) {
@@ -1935,7 +1945,8 @@ void UITask::kebab_share_cb(lv_event_t* e) {
   if (!c) { _instance->closeMenuPopup(); return; }
   memcpy(_instance->_cinfo_pubkey, c->id.pub_key, PUB_KEY_SIZE);
   _instance->closeMenuPopup();
-  _instance->showShareMenu();
+  // showShareMenu rebuilds _menu_list (deleting this kebab button); defer it.
+  lv_async_call([](void*) { if (_instance) _instance->showShareMenu(); }, NULL);
 }
 
 void UITask::kebab_setpath_cb(lv_event_t* e) {
