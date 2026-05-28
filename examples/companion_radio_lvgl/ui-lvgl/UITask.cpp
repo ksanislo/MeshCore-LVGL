@@ -208,10 +208,28 @@ void UITask::addContactRow(const ContactInfo& c, uint32_t now_secs) {
   lv_obj_align(age, LV_ALIGN_RIGHT_MID, -4, 0);
 }
 
+// Cheap change-detect over the contact set. Captures add/remove (count),
+// favourite toggles + edits (flags), renames (name) and identity (pubkey).
+// Deliberately excludes lastmod so routine RF adverts don't trigger rebuilds.
+uint32_t UITask::contactsSignature() {
+  uint32_t sig = 2166136261u;  // FNV-ish
+  ContactsIterator it;
+  ContactInfo c;
+  int n = 0;
+  while (it.hasNext(&the_mesh, c)) {
+    n++;
+    sig = (sig ^ c.flags) * 16777619u;
+    for (int i = 0; i < 4; i++) sig = (sig ^ c.id.pub_key[i]) * 16777619u;
+    for (const char* p = c.name; *p; p++) sig = (sig ^ (uint8_t)*p) * 16777619u;
+  }
+  return sig ^ (uint32_t)(n << 1);
+}
+
 void UITask::rebuildContactsList() {
   if (!_contacts_list) return;
   _contacts_dirty = false;
   _contacts_rebuilt_ms = millis();
+  _contacts_sig = contactsSignature();  // keep poll baseline in sync
   lv_obj_clean(_contacts_list);
 
   uint32_t now_secs = the_mesh.getRTCClock()->getCurrentTime();
@@ -578,6 +596,15 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   _contacts_dirty = true;
 }
 
+void UITask::sentMsg(const char* peer, const char* text) {
+  const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
+  _msgs.append(true, peer, me, text, the_mesh.getRTCClock()->getCurrentTime());
+
+  if (_chat_screen && peer && strncmp(peer, _chat_peer, CHAT_PEER_NAME_MAX) == 0) {
+    rebuildChatHistory();
+  }
+}
+
 void UITask::notify(UIEventType t) {
   (void)t;
 }
@@ -594,6 +621,13 @@ void UITask::loop() {
   // Throttled contacts refresh (set dirty by newMsg).
   if (_contacts_dirty && now - _contacts_rebuilt_ms >= 3000) {
     rebuildContactsList();
+  }
+
+  // Poll for contact-set changes made over BLE/serial (add/remove/favourite/
+  // rename) -- the companion frame handler doesn't notify the UI.
+  if (now - _contacts_check_ms >= 1500) {
+    _contacts_check_ms = now;
+    if (contactsSignature() != _contacts_sig) rebuildContactsList();
   }
 
   lv_timer_handler();

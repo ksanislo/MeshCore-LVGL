@@ -41,6 +41,10 @@ public:
   void disableSerial() { _serial->disable(); }
   virtual void msgRead(int msgcount) = 0;
   virtual void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) = 0;
+  // Called when a plain-text message is sent (e.g. composed on a connected
+  // companion client), so an on-device UI can reflect it. peer = recipient
+  // contact name or channel name. Default no-op for UIs that don't track it.
+  virtual void sentMsg(const char* peer, const char* text) { (void)peer; (void)text; }
   virtual void notify(UIEventType t = UIEventType::none) = 0;
   virtual void loop() = 0;
 };

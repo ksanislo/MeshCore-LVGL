@@ -1077,6 +1077,9 @@ void MyMesh::handleCmdFrame(size_t len) {
         expected_ack = 0; // no Ack expected
       } else {
         result = sendMessage(*recipient, msg_timestamp, attempt, text, expected_ack, est_timeout);
+#ifdef DISPLAY_CLASS
+        if (_ui && result != MSG_SEND_FAILED) _ui->sentMsg(recipient->name, text);
+#endif
       }
       // TODO: add expected ACK to table
       if (result == MSG_SEND_FAILED) {
@@ -1115,6 +1118,9 @@ void MyMesh::handleCmdFrame(size_t len) {
       ChannelDetails channel;
       bool success = getChannel(channel_idx, channel);
       if (success && sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, len - i)) {
+#ifdef DISPLAY_CLASS
+        if (_ui) _ui->sentMsg(channel.name, text);
+#endif
         writeOKFrame();
       } else {
         writeErrFrame(ERR_CODE_NOT_FOUND); // bad channel_idx
