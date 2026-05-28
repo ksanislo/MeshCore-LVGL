@@ -13,6 +13,8 @@ class UITask : public AbstractUITask {
   bool            _started;
   uint32_t        _last_tick_ms;
   int             _msgcount;
+  lv_obj_t*       _splash_screen;
+  lv_obj_t*       _home_screen;
   lv_obj_t*       _status_label;
 
   // LVGL display + input. Resolution is read from the LGFX device after
@@ -31,15 +33,17 @@ class UITask : public AbstractUITask {
   static UITask* _instance;
   static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p);
   static void touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data);
+  static void splash_dismiss_cb(lv_timer_t* t);
 
-  void buildHomeScreen();
+  lv_obj_t* buildSplashScreen();
+  lv_obj_t* buildHomeScreen();
 
 public:
   UITask(mesh::MainBoard* board, BaseSerialInterface* serial)
     : AbstractUITask(board, serial),
       _lgfx(NULL), _node_prefs(NULL), _sensors(NULL),
       _started(false), _last_tick_ms(0), _msgcount(0),
-      _status_label(NULL),
+      _splash_screen(NULL), _home_screen(NULL), _status_label(NULL),
       _screen_w(0), _screen_h(0),
       _buf1(NULL), _buf2(NULL) {}
 
