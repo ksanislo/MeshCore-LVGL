@@ -20,7 +20,9 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _tab_contacts;
   lv_obj_t*       _tab_channels;
   lv_obj_t*       _tab_settings;
-  lv_obj_t*       _status_label;  // lives inside _tab_contacts for now
+  lv_obj_t*       _contacts_list;       // lv_list inside _tab_contacts
+  lv_obj_t*       _contacts_empty;      // "no contacts yet" label, shown when list is empty
+  lv_obj_t*       _status_label;        // header status (bottom of contacts tab)
 
   // LVGL display + input. Resolution is read from the LGFX device after
   // setRotation, so this UITask doesn't care whether the variant chose
@@ -42,6 +44,8 @@ class UITask : public AbstractUITask {
 
   lv_obj_t* buildSplashScreen();
   lv_obj_t* buildHomeScreen();
+  void      rebuildContactsList();
+  void      addContactRow(const struct ContactInfo& c, uint32_t now_secs);
 
 public:
   UITask(mesh::MainBoard* board, BaseSerialInterface* serial)
@@ -52,7 +56,7 @@ public:
       _header_label(NULL),
       _tabview(NULL),
       _tab_contacts(NULL), _tab_channels(NULL), _tab_settings(NULL),
-      _status_label(NULL),
+      _contacts_list(NULL), _contacts_empty(NULL), _status_label(NULL),
       _screen_w(0), _screen_h(0),
       _buf1(NULL), _buf2(NULL) {}
 

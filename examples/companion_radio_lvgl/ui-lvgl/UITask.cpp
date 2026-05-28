@@ -1,6 +1,10 @@
 #include "UITask.h"
 #include "meshcore_assets.h"
+#include "MyMesh.h"
 #include <esp_heap_caps.h>
+
+// main.cpp owns the_mesh; we read contacts/channels via the base class.
+extern MyMesh the_mesh;
 
 UITask* UITask::_instance = NULL;
 
@@ -103,14 +107,24 @@ lv_obj_t* UITask::buildHomeScreen() {
   _tab_channels = lv_tabview_add_tab(_tabview, LV_SYMBOL_WIFI     " Channels");
   _tab_settings = lv_tabview_add_tab(_tabview, LV_SYMBOL_SETTINGS " Settings");
 
-  // ----- Contacts tab placeholder (will become the contacts list) -----
-  _status_label = lv_label_create(_tab_contacts);
-  lv_label_set_text(_status_label, "No contacts yet.\nWaiting for first packet...");
-  lv_label_set_long_mode(_status_label, LV_LABEL_LONG_WRAP);
-  lv_obj_set_width(_status_label, _screen_w - 24);
-  lv_obj_set_style_text_color(_status_label, lv_color_hex(DIM_HEX), 0);
-  lv_obj_set_style_text_align(_status_label, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_align(_status_label, LV_ALIGN_CENTER, 0, 0);
+  // ----- Contacts tab: scrollable list, with an empty-state label when zero -----
+  lv_obj_set_style_pad_all(_tab_contacts, 0, 0);
+
+  _contacts_list = lv_list_create(_tab_contacts);
+  lv_obj_set_size(_contacts_list, LV_PCT(100), LV_PCT(100));
+  lv_obj_set_style_bg_color(_contacts_list, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_border_width(_contacts_list, 0, 0);
+  lv_obj_set_style_pad_row(_contacts_list, 0, 0);
+
+  _contacts_empty = lv_label_create(_tab_contacts);
+  lv_label_set_text(_contacts_empty, "No contacts yet.\nWaiting for first advert...");
+  lv_label_set_long_mode(_contacts_empty, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_contacts_empty, _screen_w - 24);
+  lv_obj_set_style_text_color(_contacts_empty, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_align(_contacts_empty, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_align(_contacts_empty, LV_ALIGN_CENTER, 0, 0);
+
+  _status_label = NULL;  // not used here yet; reserved for future status bar
 
   // ----- Channels tab placeholder -----
   lv_obj_t* ch_placeholder = lv_label_create(_tab_channels);
@@ -125,6 +139,79 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_center(set_placeholder);
 
   return scr;
+}
+
+static const char* contactSymbol(uint8_t type) {
+  // ADV_TYPE_NONE=0, _CHAT=1, _REPEATER=2, _ROOM=3, _SENSOR=4
+  switch (type) {
+    case 2: return LV_SYMBOL_WIFI;         // repeater
+    case 3: return LV_SYMBOL_AUDIO;        // room
+    case 4: return LV_SYMBOL_GPS;          // sensor (no better glyph in built-in set)
+    default: return LV_SYMBOL_BELL;        // chat node
+  }
+}
+
+static void formatLastSeen(char* out, size_t cap, uint32_t lastmod_secs, uint32_t now_secs) {
+  if (lastmod_secs == 0) { snprintf(out, cap, "never"); return; }
+  uint32_t age = now_secs >= lastmod_secs ? (now_secs - lastmod_secs) : 0;
+  if (age < 60)         snprintf(out, cap, "%us",   (unsigned)age);
+  else if (age < 3600)  snprintf(out, cap, "%um",   (unsigned)(age / 60));
+  else if (age < 86400) snprintf(out, cap, "%uh",   (unsigned)(age / 3600));
+  else                  snprintf(out, cap, "%ud",   (unsigned)(age / 86400));
+}
+
+static constexpr uint8_t CONTACT_FLAG_FAVOURITE = 0x01;  // matches firmware
+static constexpr uint32_t FAV_HEX = 0xFBBF24;            // amber-400 accent
+
+void UITask::addContactRow(const ContactInfo& c, uint32_t now_secs) {
+  bool fav = (c.flags & CONTACT_FLAG_FAVOURITE) != 0;
+
+  lv_obj_t* btn = lv_list_add_btn(_contacts_list, contactSymbol(c.type),
+                                  c.name[0] ? c.name : "(unnamed)");
+  lv_obj_set_style_bg_color(btn, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_text_color(btn, lv_color_hex(fav ? FAV_HEX : FG_HEX), 0);
+  lv_obj_set_style_border_color(btn, lv_color_hex(0x374151), 0);  // gray-700
+  lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, 0);
+  lv_obj_set_style_border_width(btn, 1, 0);
+
+  char ago[16];
+  formatLastSeen(ago, sizeof(ago), c.lastmod, now_secs);
+  lv_obj_t* age = lv_label_create(btn);
+  lv_label_set_text(age, ago);
+  lv_obj_set_style_text_color(age, lv_color_hex(DIM_HEX), 0);
+  lv_obj_align(age, LV_ALIGN_RIGHT_MID, -4, 0);
+}
+
+void UITask::rebuildContactsList() {
+  if (!_contacts_list) return;
+  lv_obj_clean(_contacts_list);
+
+  uint32_t now_secs = the_mesh.getRTCClock()->getCurrentTime();
+  int count = 0;
+
+  // Pass 1: favourites first, always shown (user-curated, few).
+  {
+    ContactsIterator it;
+    ContactInfo c;
+    while (it.hasNext(&the_mesh, c)) {
+      if (c.flags & CONTACT_FLAG_FAVOURITE) { addContactRow(c, now_secs); ++count; }
+    }
+  }
+
+  // Pass 2: fill remaining slots with non-favourites, in storage order.
+  // Widget allocs now come from PSRAM, so this cap is just a sanity bound
+  // on rebuild time, not a memory limit. Favourites above are uncapped.
+  const int MAX_RENDER = 200;
+  {
+    ContactsIterator it;
+    ContactInfo c;
+    while (it.hasNext(&the_mesh, c) && count < MAX_RENDER) {
+      if (!(c.flags & CONTACT_FLAG_FAVOURITE)) { addContactRow(c, now_secs); ++count; }
+    }
+  }
+
+  if (count == 0) lv_obj_clear_flag(_contacts_empty, LV_OBJ_FLAG_HIDDEN);
+  else            lv_obj_add_flag(_contacts_empty,  LV_OBJ_FLAG_HIDDEN);
 }
 
 void UITask::splash_dismiss_cb(lv_timer_t* t) {
@@ -185,6 +272,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 
   _splash_screen = buildSplashScreen();
   _home_screen   = buildHomeScreen();
+  rebuildContactsList();
   lv_scr_load(_splash_screen);
 
   // Auto-dismiss splash after a brief dwell. Single-shot via lv_timer_del.
@@ -200,13 +288,11 @@ void UITask::msgRead(int msgcount) {
 }
 
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
+  (void)path_len; (void)from_name; (void)text;
   _msgcount = msgcount;
-  if (_status_label) {
-    char buf[128];
-    snprintf(buf, sizeof(buf), "[%u] %s: %s", (unsigned)msgcount,
-             from_name ? from_name : "?", text ? text : "");
-    lv_label_set_text(_status_label, buf);
-  }
+  // Cheap and correct: full rebuild on any message. Optimize later when
+  // we have selective per-row updates.
+  rebuildContactsList();
 }
 
 void UITask::notify(UIEventType t) {
