@@ -300,6 +300,42 @@ void UITask::chat_back_cb(lv_event_t* e) {
   lv_scr_load(_instance->_home_screen);  // keep chat screen allocated for reuse
 }
 
+// Render message text into a bubble, turning "@[username]" mentions into
+// "@username" with the name highlighted. Brackets hidden, @ kept. The stored
+// text keeps the raw @[username] form so compose can round-trip it later.
+static void addMessageText(lv_obj_t* bubble, const char* text) {
+  static const uint32_t FG_TEXT = 0xF3F4F6;
+  static const uint32_t MENTION = 0x34D399;  // emerald-400; reads on gray + blue bubbles
+
+  lv_obj_t* sg = lv_spangroup_create(bubble);
+  lv_obj_set_width(sg, LV_PCT(100));
+  lv_spangroup_set_mode(sg, LV_SPAN_MODE_BREAK);  // wrap on width
+
+  auto addSpan = [&](const char* s, size_t len, uint32_t color, bool mention) {
+    if (len == 0) return;
+    char buf[CHAT_MSG_TEXT_MAX + 2];
+    size_t off = 0;
+    if (mention) buf[off++] = '@';
+    if (len > sizeof(buf) - 2 - off) len = sizeof(buf) - 2 - off;
+    memcpy(buf + off, s, len);
+    buf[off + len] = 0;
+    lv_span_t* span = lv_spangroup_new_span(sg);
+    lv_span_set_text(span, buf);
+    lv_style_set_text_color(&span->style, lv_color_hex(color));
+  };
+
+  const char* p = text ? text : "";
+  while (*p) {
+    const char* at = strstr(p, "@[");
+    if (!at) { addSpan(p, strlen(p), FG_TEXT, false); break; }
+    addSpan(p, at - p, FG_TEXT, false);          // plain run before mention
+    const char* close = strchr(at + 2, ']');
+    if (!close) { addSpan(at, strlen(at), FG_TEXT, false); break; }  // malformed
+    addSpan(at + 2, close - (at + 2), MENTION, true);  // "@" + username, highlighted
+    p = close + 1;
+  }
+}
+
 void UITask::rebuildChatHistory() {
   if (!_chat_history) return;
   lv_obj_clean(_chat_history);
@@ -357,11 +393,7 @@ void UITask::rebuildChatHistory() {
     lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, 0);
     lv_obj_align(bubble, m->outgoing ? LV_ALIGN_TOP_RIGHT : LV_ALIGN_TOP_LEFT, 0, 0);
 
-    lv_obj_t* lbl = lv_label_create(bubble);
-    lv_label_set_text(lbl, m->text);
-    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(lbl, LV_PCT(100));
-    lv_obj_set_style_text_color(lbl, lv_color_hex(0xF3F4F6), 0);
+    addMessageText(bubble, m->text);
 
     strncpy(last_sender, m->sender, CHAT_PEER_NAME_MAX - 1);
     last_sender[CHAT_PEER_NAME_MAX - 1] = 0;
