@@ -6,8 +6,11 @@ void CrowPanelBoard::begin() {
   pinMode(PIN_LORA_MIC_MUX, OUTPUT);
   digitalWrite(PIN_LORA_MIC_MUX, LOW);
 
-  pinMode(PIN_TFT_BL, OUTPUT);
-  digitalWrite(PIN_TFT_BL, HIGH);
+  // Backlight at ~60% via high-frequency (inaudible) PWM instead of full-on.
+  // A low PWM frequency would whine; 30 kHz is well above hearing.
+  ledcSetup(BL_LEDC_CHANNEL, 30000, 8);          // 30 kHz, 8-bit
+  ledcAttachPin(PIN_TFT_BL, BL_LEDC_CHANNEL);
+  ledcWrite(BL_LEDC_CHANNEL, BL_DEFAULT_DUTY);   // ~60%
 
   // Quiet the audio path so it doesn't click on touch/SPI EMI. Matches the
   // factory firmware's idle state: buzzer low, GPIO14 low, speaker-amp muted

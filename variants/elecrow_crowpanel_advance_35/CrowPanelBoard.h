@@ -10,9 +10,15 @@
   #define PIN_LORA_MIC_MUX 45
 #endif
 
-// Backlight is active-high.
+// Backlight is active-high, driven by PWM (LEDC) for brightness control.
 #ifndef PIN_TFT_BL
   #define PIN_TFT_BL 38
+#endif
+#ifndef BL_LEDC_CHANNEL
+  #define BL_LEDC_CHANNEL 7
+#endif
+#ifndef BL_DEFAULT_DUTY
+  #define BL_DEFAULT_DUTY 128   // ~50% of 255
 #endif
 
 // Audio path: buzzer on GPIO8, speaker-amp mute on GPIO21. Left floating, the
