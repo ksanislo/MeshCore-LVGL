@@ -2,12 +2,12 @@
 
 #include <Arduino.h>
 #include <lvgl.h>
+#include <helpers/ui/LGFXDisplay.h>
 #include "../../companion_radio/AbstractUITask.h"
 #include "../../companion_radio/NodePrefs.h"
-#include "../../../variants/elecrow_crowpanel_advance_35/CrowPanelLGFX.h"
 
 class UITask : public AbstractUITask {
-  CrowPanelLGFX*  _lgfx;
+  LGFX_Device*    _lgfx;
   NodePrefs*      _node_prefs;
   SensorManager*  _sensors;
   bool            _started;
@@ -15,9 +15,11 @@ class UITask : public AbstractUITask {
   int             _msgcount;
   lv_obj_t*       _status_label;
 
-  // LVGL display + input
-  static constexpr uint16_t kScreenW = 480;
-  static constexpr uint16_t kScreenH = 320;
+  // LVGL display + input. Resolution is read from the LGFX device after
+  // setRotation, so this UITask doesn't care whether the variant chose
+  // portrait or landscape.
+  uint16_t _screen_w;
+  uint16_t _screen_h;
   static constexpr uint16_t kBufferLines = 40;
 
   lv_disp_draw_buf_t _draw_buf;
@@ -38,6 +40,7 @@ public:
       _lgfx(NULL), _node_prefs(NULL), _sensors(NULL),
       _started(false), _last_tick_ms(0), _msgcount(0),
       _status_label(NULL),
+      _screen_w(0), _screen_h(0),
       _buf1(NULL), _buf2(NULL) {}
 
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);

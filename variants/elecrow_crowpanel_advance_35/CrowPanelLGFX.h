@@ -11,8 +11,13 @@
 // GPIO2 is shared with SX1262 RST; we leave panel reset to LoRa's pulse and
 // init LGFX lazily from UITask::begin() after radio_init() has fired.
 
+// 0 = native portrait (320x480, USB at bottom)
+// 1 = 90 deg CW   landscape (480x320, USB on left)
+// 2 = 180 portrait        (320x480, USB at top)
+// 3 = 90 deg CCW landscape (480x320, USB on right)
+// Override per-env in platformio.ini with -D CROWPANEL_TFT_ROTATION=N.
 #ifndef CROWPANEL_TFT_ROTATION
-  #define CROWPANEL_TFT_ROTATION 3  // 90 deg CCW (landscape, USB on the right)
+  #define CROWPANEL_TFT_ROTATION 0
 #endif
 
 class CrowPanelLGFX : public lgfx::LGFX_Device {
@@ -51,7 +56,7 @@ public:
       cfg.panel_height     = native_h;
       cfg.offset_x         = 0;
       cfg.offset_y         = 0;
-      cfg.offset_rotation  = CROWPANEL_TFT_ROTATION;
+      cfg.offset_rotation  = 0;  // rotation set explicitly in CrowPanelDisplay::begin()
       cfg.dummy_read_pixel = 8;
       cfg.dummy_read_bits  = 1;
       cfg.readable         = false;
@@ -87,19 +92,21 @@ public:
 
 // LGFXDisplay wrapper.
 //
-// We defer the real LGFX init to UITask::begin() because GPIO2 is tied to the
-// SX1262 RST, and radio_init() (which pulses it low) runs after the early
-// "Loading..." path in companion_radio/main.cpp. Doing display init now would
-// leave the panel in an undefined state after the radio's reset pulse.
-//
-// begin() therefore just returns false so main.cpp's early splash is skipped.
-// UITask::begin() owns the real init via getLgfx().init() and the LVGL setup.
+// Note on GPIO2: TFT RST is tied to SX1262 RST. When radio_init() runs later
+// in setup() it pulses GPIO2 low, which also resets the panel and wipes any
+// init state we pushed here. The "Loading..." splash drawn between display
+// init and radio init is therefore visible only briefly. UITask::begin() must
+// re-init the panel (lgfx.init() again) after the radio is up before
+// rendering LVGL content. pin_rst is set to -1 in the panel config so this
+// class never pulses GPIO2 itself.
 class CrowPanelDisplay : public LGFXDisplay {
   CrowPanelLGFX _disp;
 public:
   CrowPanelDisplay() : LGFXDisplay(CrowPanelLGFX::native_h, CrowPanelLGFX::native_w, _disp) {}
 
-  bool begin() { return false; }  // see comment above
-
-  CrowPanelLGFX& getLgfx() { return _disp; }
+  bool begin() {
+    bool ok = LGFXDisplay::begin();
+    if (ok) _disp.setRotation(CROWPANEL_TFT_ROTATION);
+    return ok;
+  }
 };

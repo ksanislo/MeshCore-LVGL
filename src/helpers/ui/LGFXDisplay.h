@@ -36,4 +36,9 @@ public:
   uint16_t getTextWidth(const char* str) override;
   void endFrame() override;
   virtual bool getTouch(int *x, int *y);
+
+  // Generic accessor so variant-agnostic UI code (e.g. an LVGL UITask)
+  // can reach the underlying LovyanGFX device without knowing which
+  // panel/touch subclass is in use.
+  LGFX_Device& getLgfx() { return *display; }
 };

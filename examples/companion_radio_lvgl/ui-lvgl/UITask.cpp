@@ -10,7 +10,7 @@ void UITask::disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t
   }
   uint32_t w = area->x2 - area->x1 + 1;
   uint32_t h = area->y2 - area->y1 + 1;
-  CrowPanelLGFX& lcd = *_instance->_lgfx;
+  LGFX_Device& lcd = *_instance->_lgfx;
   lcd.startWrite();
   lcd.setAddrWindow(area->x1, area->y1, w, h);
   lcd.writePixels((lgfx::rgb565_t*)color_p, w * h);
@@ -57,19 +57,35 @@ void UITask::buildHomeScreen() {
 }
 
 void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs) {
-  (void)display;  // DisplayDriver bypassed; LVGL draws directly to LGFX
   _sensors = sensors;
   _node_prefs = node_prefs;
   _instance = this;
 
-  _lgfx = &((CrowPanelDisplay*)display)->getLgfx();
-  if (!_lgfx->init()) return;
-  _lgfx->setBrightness(255);
+  // Every variant that uses this LVGL UITask must derive its DISPLAY_CLASS
+  // from LGFXDisplay so we can reach the underlying LovyanGFX device.
+  LGFXDisplay* lgfx_disp = static_cast<LGFXDisplay*>(display);
+  if (!lgfx_disp) return;
+  _lgfx = &lgfx_disp->getLgfx();
+
+  // Re-init the panel. On some boards (e.g. CrowPanel Advance 3.5) the TFT
+  // RST line is shared with another peripheral that may have pulsed it
+  // between display.begin() and now. init() is safe to call again.
+  // The variant chose its preferred rotation in DISPLAY_CLASS::begin();
+  // preserve that across the re-init. Color depth must be 16-bit to match
+  // LVGL's RGB565 framebuffer -- the LGFXDisplay base configures the panel
+  // for 8-bit packed mode, which causes pixel interleaving under LVGL.
+  uint_fast8_t saved_rotation = _lgfx->getRotation();
+  _lgfx->init();
+  _lgfx->setColorDepth(16);
+  _lgfx->setRotation(saved_rotation);
   _lgfx->fillScreen(0x0000);
+
+  _screen_w = _lgfx->width();
+  _screen_h = _lgfx->height();
 
   lv_init();
 
-  const size_t buf_pixels = kScreenW * kBufferLines;
+  const size_t buf_pixels = (size_t)_screen_w * kBufferLines;
   _buf1 = (lv_color_t*)heap_caps_malloc(buf_pixels * sizeof(lv_color_t),
                                         MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
   _buf2 = (lv_color_t*)heap_caps_malloc(buf_pixels * sizeof(lv_color_t),
@@ -77,8 +93,8 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   lv_disp_draw_buf_init(&_draw_buf, _buf1, _buf2, buf_pixels);
 
   lv_disp_drv_init(&_disp_drv);
-  _disp_drv.hor_res  = kScreenW;
-  _disp_drv.ver_res  = kScreenH;
+  _disp_drv.hor_res  = _screen_w;
+  _disp_drv.ver_res  = _screen_h;
   _disp_drv.flush_cb = disp_flush_cb;
   _disp_drv.draw_buf = &_draw_buf;
   lv_disp_drv_register(&_disp_drv);
