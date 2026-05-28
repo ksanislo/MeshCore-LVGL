@@ -265,6 +265,14 @@ uint32_t UITask::contactsSignature() {
   return sig ^ (uint32_t)(n << 1);
 }
 
+// Local nickname if one is set for this contact, else the advert name.
+const char* UITask::displayName(const uint8_t* pubkey, const char* realname, char* buf, size_t cap) {
+  if (pubkey && the_mesh.getNameOverride(pubkey, buf, cap) && buf[0]) return buf;
+  strncpy(buf, realname ? realname : "", cap - 1);
+  buf[cap - 1] = 0;
+  return buf;
+}
+
 // Filter predicate: the pop-out's filter choice + the name search box.
 // _contacts_filt: 0=All,1=Favorites,2=Users,3=Repeaters,4=Room Servers,5=Sensors.
 bool UITask::contactPasses(const ContactInfo& c) {
@@ -276,7 +284,11 @@ bool UITask::contactPasses(const ContactInfo& c) {
     case 5: if (c.type != ADV_TYPE_SENSOR)   return false; break;
     default: break;  // All
   }
-  if (_contacts_filter[0] && !containsCI(c.name, _contacts_filter)) return false;
+  if (_contacts_filter[0]) {
+    char dn[CHAT_PEER_NAME_MAX];
+    displayName(c.id.pub_key, c.name, dn, sizeof(dn));
+    if (!containsCI(dn, _contacts_filter) && !containsCI(c.name, _contacts_filter)) return false;
+  }
   return true;
 }
 
@@ -354,8 +366,10 @@ void UITask::rebuildContactsList() {
   for (int r = 0; r < _crow_count; r++) {
     ContactInfo c;
     if (!the_mesh.getContactByIdx(_crows[r].idx, c)) continue;
+    char dn[CHAT_PEER_NAME_MAX];
+    displayName(c.id.pub_key, c.name, dn, sizeof(dn));
     char clean[CHAT_PEER_NAME_MAX + 4];
-    sanitizeForFont(c.name[0] ? c.name : "(unnamed)", clean, sizeof(clean));
+    sanitizeForFont(dn[0] ? dn : "(unnamed)", clean, sizeof(clean));
     char cell[CHAT_PEER_NAME_MAX + 12];
     snprintf(cell, sizeof(cell), "%s %s", contactSymbol(c.type), clean);
     lv_table_set_cell_value(_contacts_table, r, 0, cell);
@@ -878,8 +892,10 @@ void UITask::rebuildPicker() {
   for (int r = 0; r < _prow_count; r++) {
     ContactInfo c;
     if (!the_mesh.getContactByIdx(_prows[r].idx, c)) continue;
+    char dn[CHAT_PEER_NAME_MAX];
+    displayName(c.id.pub_key, c.name, dn, sizeof(dn));
     char clean[CHAT_PEER_NAME_MAX + 4];
-    sanitizeForFont(c.name[0] ? c.name : "(unnamed)", clean, sizeof(clean));
+    sanitizeForFont(dn[0] ? dn : "(unnamed)", clean, sizeof(clean));
     char cell[CHAT_PEER_NAME_MAX + 12];
     snprintf(cell, sizeof(cell), "%s %s", contactSymbol(c.type), clean);
     lv_table_set_cell_value(_pick_table, r, 0, cell);
@@ -1587,8 +1603,11 @@ void UITask::openChat(const char* peer_name) {
   lv_textarea_set_text(_chat_input, "");
   layoutChatBody(false);  // keyboard hidden on (re)open
 
+  char dn[CHAT_PEER_NAME_MAX];
+  const char* shown = _chat_is_channel ? _chat_peer
+                                       : displayName(_chat_pubkey, _chat_peer, dn, sizeof(dn));
   char tname[CHAT_PEER_NAME_MAX + 4];
-  sanitizeForFont(_chat_peer, tname, sizeof(tname));
+  sanitizeForFont(shown, tname, sizeof(tname));
   lv_label_set_text(_chat_title, tname);
   rebuildChatHistory();
   lv_scr_load(_chat_screen);
@@ -1863,7 +1882,34 @@ void UITask::buildContactInfoScreen() {
   lv_label_set_text(sl, LV_SYMBOL_UPLOAD " Share");
 
   // edit fields
-  lv_obj_t* fn = makeField(_cinfo_body, "Name");
+  // Name field: caption row shows "Name" + the real advert name (right-justified,
+  // only when a local nickname override is set). The textarea edits the override.
+  lv_obj_t* fn = lv_obj_create(_cinfo_body);
+  lv_obj_set_width(fn, LV_PCT(100));
+  lv_obj_set_height(fn, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(fn, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(fn, 0, 0);
+  lv_obj_set_style_pad_all(fn, 0, 0);
+  lv_obj_set_style_pad_row(fn, 2, 0);
+  lv_obj_clear_flag(fn, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(fn, LV_FLEX_FLOW_COLUMN);
+  lv_obj_t* ncap = lv_obj_create(fn);
+  lv_obj_set_width(ncap, LV_PCT(100));
+  lv_obj_set_height(ncap, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(ncap, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(ncap, 0, 0);
+  lv_obj_set_style_pad_all(ncap, 0, 0);
+  lv_obj_clear_flag(ncap, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(ncap, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(ncap, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_t* ncaplbl = lv_label_create(ncap);
+  lv_label_set_text(ncaplbl, "Name");
+  lv_obj_set_style_text_color(ncaplbl, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_font(ncaplbl, &lv_font_montserrat_12, 0);
+  _cinfo_realname = lv_label_create(ncap);
+  lv_label_set_text(_cinfo_realname, "");
+  lv_obj_set_style_text_color(_cinfo_realname, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_font(_cinfo_realname, &lv_font_montserrat_12, 0);
   _cinfo_name_ta = lv_textarea_create(fn);
   lv_textarea_set_one_line(_cinfo_name_ta, true);
   lv_obj_set_width(_cinfo_name_ta, LV_PCT(100));
@@ -1912,14 +1958,19 @@ void UITask::buildContactInfoScreen() {
   lv_obj_add_event_cb(_cinfo_lon_ta, cinfo_ta_event_cb, LV_EVENT_ALL, NULL);
 
   lv_obj_t* ft = makeField(_cinfo_body, "Contact Type");
-  _cinfo_type_dd = lv_dropdown_create(ft);
-  lv_dropdown_set_options(_cinfo_type_dd, "Chat\nRepeater\nRoom\nSensor");
-  lv_obj_set_width(_cinfo_type_dd, LV_PCT(100));
-  lv_obj_add_event_cb(_cinfo_type_dd, cinfo_type_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  _cinfo_type_lbl = lv_label_create(ft);  // read-only: type comes from their advert
+  lv_obj_set_style_text_color(_cinfo_type_lbl, lv_color_hex(FG_HEX), 0);
 
   lv_obj_t* flh = makeField(_cinfo_body, "Last Heard");
   _cinfo_lastheard = lv_label_create(flh);
   lv_obj_set_style_text_color(_cinfo_lastheard, lv_color_hex(FG_HEX), 0);
+
+  lv_obj_t* ftel = makeField(_cinfo_body, "Telemetry");
+  _cinfo_telem = lv_label_create(ftel);
+  lv_label_set_long_mode(_cinfo_telem, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_cinfo_telem, LV_PCT(100));
+  lv_obj_set_style_text_color(_cinfo_telem, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(_cinfo_telem, &lv_font_montserrat_14, 0);
 
   // path: hops row
   lv_obj_t* hrow = lv_obj_create(_cinfo_body);
@@ -1967,10 +2018,23 @@ void UITask::populateContactInfo() {
   ContactInfo* c = cinfoContact();
   if (!c) { lv_scr_load(_cinfo_return_screen ? _cinfo_return_screen : _home_screen); return; }
 
+  char ov[CHAT_PEER_NAME_MAX];
+  bool overridden = the_mesh.getNameOverride(c->id.pub_key, ov, sizeof(ov)) && ov[0];
+  const char* shown = overridden ? ov : c->name;
   char nm[CHAT_PEER_NAME_MAX + 4];
-  sanitizeForFont(c->name[0] ? c->name : "(unnamed)", nm, sizeof(nm));
+  sanitizeForFont(shown[0] ? shown : "(unnamed)", nm, sizeof(nm));
   lv_label_set_text(_cinfo_title, nm);
-  lv_textarea_set_text(_cinfo_name_ta, c->name);
+  lv_textarea_set_text(_cinfo_name_ta, shown);
+  if (_cinfo_realname) {
+    if (overridden) {
+      char rc[CHAT_PEER_NAME_MAX + 4], rn[CHAT_PEER_NAME_MAX + 8];
+      sanitizeForFont(c->name, rc, sizeof(rc));
+      snprintf(rn, sizeof(rn), "(%s)", rc);
+      lv_label_set_text(_cinfo_realname, rn);
+    } else {
+      lv_label_set_text(_cinfo_realname, "");
+    }
+  }
 
   char hex[2 * PUB_KEY_SIZE + 1];
   mesh::Utils::toHex(hex, c->id.pub_key, PUB_KEY_SIZE);
@@ -1992,19 +2056,33 @@ void UITask::populateContactInfo() {
   lv_textarea_set_text(_cinfo_lat_ta, latbuf);
   lv_textarea_set_text(_cinfo_lon_ta, lonbuf);
 
-  uint16_t ti = (c->type >= 1 && c->type <= 4) ? c->type - 1 : 0;
-  lv_dropdown_set_selected(_cinfo_type_dd, ti);
+  static const char* TYPE_NAMES[] = {"Unknown", "Chat", "Repeater", "Room Server", "Sensor"};
+  lv_label_set_text(_cinfo_type_lbl, c->type <= 4 ? TYPE_NAMES[c->type] : "Unknown");
 
   char lh[16];
   formatLastSeen(lh, sizeof(lh), c->last_advert_timestamp, the_mesh.getRTCClock()->getCurrentTime());
   lv_label_set_text(_cinfo_lastheard, lh);
 
+  if (_cinfo_telem) {
+    bool have = _telem_text[0] && memcmp(_telem_pubkey, c->id.pub_key, 6) == 0;
+    lv_label_set_text(_cinfo_telem, have ? _telem_text : "(tap Telem to request)");
+  }
+
   int hashSize = the_mesh.getNodePrefs()->path_hash_mode + 1;
   if (hashSize < 1) hashSize = 1;
+  // A zero/empty out_path is a direct (0-hop) route -- the phone app stores a
+  // full zero-filled path for "direct", which we'd otherwise show as N zero hops.
+  bool allzero = (c->out_path_len != OUT_PATH_UNKNOWN);
+  for (int i = 0; i < c->out_path_len && c->out_path_len != OUT_PATH_UNKNOWN; i++)
+    if (c->out_path[i]) { allzero = false; break; }
   if (c->out_path_len == OUT_PATH_UNKNOWN) {
     lv_label_set_text(_cinfo_hops, "Hops Away: flood (unknown)");
     lv_obj_add_flag(_cinfo_hops_x, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(_cinfo_outpath, "Out Path: (flood)");
+  } else if (c->out_path_len == 0 || allzero) {
+    lv_label_set_text(_cinfo_hops, "Hops Away: direct");
+    lv_obj_clear_flag(_cinfo_hops_x, LV_OBJ_FLAG_HIDDEN);  // allow reset to flood
+    lv_label_set_text(_cinfo_outpath, "Out Path: (direct)");
   } else {
     char hb[32];
     snprintf(hb, sizeof(hb), "Hops Away: %d", c->out_path_len / hashSize);
@@ -2012,8 +2090,12 @@ void UITask::populateContactInfo() {
     lv_obj_clear_flag(_cinfo_hops_x, LV_OBJ_FLAG_HIDDEN);
     char op[3 * MAX_PATH_SIZE + 16];
     int n = snprintf(op, sizeof(op), "Out Path: ");
-    for (int i = 0; i < c->out_path_len && n < (int)sizeof(op) - 3; i++)
-      n += snprintf(op + n, sizeof(op) - n, "%02x%s", c->out_path[i], i + 1 < c->out_path_len ? "," : "");
+    for (int i = 0; i < c->out_path_len && n < (int)sizeof(op) - 4; i++) {
+      n += snprintf(op + n, sizeof(op) - n, "%02x", c->out_path[i]);
+      // comma only on hop boundaries (hashSize bytes per hop): e.g. "0000,0000"
+      if ((i % hashSize) == (hashSize - 1) && i + 1 < c->out_path_len)
+        n += snprintf(op + n, sizeof(op) - n, ",");
+    }
     lv_label_set_text(_cinfo_outpath, op);
   }
 }
@@ -2033,12 +2115,13 @@ void UITask::commitCinfoField(lv_obj_t* ta) {
   ContactInfo* c = cinfoContact();
   if (!c || !ta) return;
   if (ta == _cinfo_name_ta) {
-    strncpy(c->name, lv_textarea_get_text(ta), sizeof(c->name) - 1);
-    c->name[sizeof(c->name) - 1] = 0;
-    the_mesh.saveContact(*c);
-    char nm[CHAT_PEER_NAME_MAX + 4];
-    sanitizeForFont(c->name[0] ? c->name : "(unnamed)", nm, sizeof(nm));
-    lv_label_set_text(_cinfo_title, nm);
+    // Edit a local nickname override (not the contact's advert name). Blank or
+    // a value equal to the advert name clears the override.
+    const char* entered = lv_textarea_get_text(ta);
+    if (!entered[0] || strcmp(entered, c->name) == 0) the_mesh.setNameOverride(c->id.pub_key, "");
+    else the_mesh.setNameOverride(c->id.pub_key, entered);
+    populateContactInfo();   // refresh title + real-name hint
+    rebuildContactsList();   // reflect the new display name in the list
   } else if (ta == _cinfo_lat_ta || ta == _cinfo_lon_ta) {
     const char* lats = lv_textarea_get_text(_cinfo_lat_ta);
     const char* lons = lv_textarea_get_text(_cinfo_lon_ta);
@@ -2064,14 +2147,6 @@ void UITask::cinfo_fav_cb(lv_event_t* e) {
   c->flags ^= CONTACT_FLAG_FAVOURITE;
   the_mesh.saveContact(*c);
   _instance->populateContactInfo();
-}
-
-void UITask::cinfo_type_cb(lv_event_t* e) {
-  if (!_instance) return;
-  ContactInfo* c = _instance->cinfoContact();
-  if (!c) return;
-  c->type = (uint8_t)(lv_dropdown_get_selected(lv_event_get_target(e)) + 1);
-  the_mesh.saveContact(*c);
 }
 
 void UITask::cinfo_telemetry_cb(lv_event_t* e) {
@@ -3226,11 +3301,15 @@ enum {
   LPP_T_CURRENT = 117, LPP_T_PERCENTAGE = 120, LPP_T_GPS = 136
 };
 
-void UITask::telemetryResponse(const char* from_name, const uint8_t* lpp, uint8_t lpp_len) {
-  char body[320];
+void UITask::telemetryResponse(const uint8_t* pubkey, const char* from_name,
+                               const uint8_t* lpp, uint8_t lpp_len) {
+  (void)from_name;
+  char text[160];
   size_t o = 0;
+  bool have_gps = false;
+  int32_t glat6 = 0, glon6 = 0;
   int i = 0;
-  while (i + 2 <= lpp_len && o + 1 < sizeof(body)) {
+  while (i + 2 <= lpp_len && o + 1 < sizeof(text)) {
     uint8_t ch = lpp[i++];
     uint8_t type = lpp[i++];
     char line[48];
@@ -3270,26 +3349,40 @@ void UITask::telemetryResponse(const char* from_name, const uint8_t* lpp, uint8_
         if (i + 1 > lpp_len) { i = lpp_len; break; }
         snprintf(line, sizeof(line), "Level: %u%%", lpp[i]);
         i += 1; break;
-      case LPP_T_GPS: {
+      case LPP_T_GPS: {  // applied to the contact's position, not the readings line
         if (i + 9 > lpp_len) { i = lpp_len; break; }
         int32_t lat = (lpp[i] << 16) | (lpp[i + 1] << 8) | lpp[i + 2];
         int32_t lon = (lpp[i + 3] << 16) | (lpp[i + 4] << 8) | lpp[i + 5];
         if (lat & 0x800000) lat |= 0xFF000000;
         if (lon & 0x800000) lon |= 0xFF000000;
-        snprintf(line, sizeof(line), "GPS: %.4f, %.4f", lat / 10000.0, lon / 10000.0);
+        glat6 = lat * 100;  // LPP 1e-4 deg -> contact stores 1e-6 deg
+        glon6 = lon * 100;
+        have_gps = true;
         i += 9; break; }
       default:
         i = lpp_len;  // unknown type: size unknown, stop decoding
         break;
     }
-    if (line[0]) o += snprintf(body + o, sizeof(body) - o, "%s%s", o ? "\n" : "", line);
+    if (line[0]) o += snprintf(text + o, sizeof(text) - o, "%s%s", o ? ", " : "", line);
   }
-  if (o == 0) snprintf(body, sizeof(body), "(no readable telemetry)");
-  char nm[CHAT_PEER_NAME_MAX + 4];
-  sanitizeForFont(from_name && from_name[0] ? from_name : "?", nm, sizeof(nm));
-  char title[CHAT_PEER_NAME_MAX + 16];
-  snprintf(title, sizeof(title), "Telemetry: %s", nm);
-  showInfoPopup(title, body);
+
+  // GPS telemetry updates the contact's stored position.
+  ContactInfo* c = the_mesh.lookupContactByPubKey(pubkey, PUB_KEY_SIZE);
+  if (c && have_gps && (glat6 || glon6)) {
+    c->gps_lat = glat6;
+    c->gps_lon = glon6;
+    the_mesh.saveContact(*c);
+  }
+
+  // Stash the readings for the Contact Info page (no auto-popup).
+  memcpy(_telem_pubkey, pubkey, 6);
+  strncpy(_telem_text, o ? text : "(no readings)", sizeof(_telem_text) - 1);
+  _telem_text[sizeof(_telem_text) - 1] = 0;
+
+  // Live-refresh the info page if it's open for this contact.
+  if (_cinfo_screen && lv_scr_act() == _cinfo_screen && memcmp(_cinfo_pubkey, pubkey, 6) == 0)
+    populateContactInfo();
+  showToast("Telemetry received");
 }
 
 void UITask::loop() {

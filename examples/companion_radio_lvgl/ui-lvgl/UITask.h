@@ -89,14 +89,16 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _cinfo_screen;
   lv_obj_t*       _cinfo_body;          // scrollable form
   lv_obj_t*       _cinfo_title;
+  lv_obj_t*       _cinfo_realname;       // "(advert name)" hint, shown only when overridden
   lv_obj_t*       _cinfo_key;
   lv_obj_t*       _cinfo_fav_lbl;
   lv_obj_t*       _cinfo_name_ta;
   lv_obj_t*       _cinfo_keyfull;       // read-only full-hex label
   lv_obj_t*       _cinfo_lat_ta;
   lv_obj_t*       _cinfo_lon_ta;
-  lv_obj_t*       _cinfo_type_dd;
+  lv_obj_t*       _cinfo_type_lbl;      // read-only contact type (set from their advert)
   lv_obj_t*       _cinfo_lastheard;
+  lv_obj_t*       _cinfo_telem;          // latest telemetry readings line
   lv_obj_t*       _cinfo_hops;
   lv_obj_t*       _cinfo_hops_x;        // clear-to-flood button
   lv_obj_t*       _cinfo_outpath;
@@ -104,6 +106,11 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _cinfo_active_ta;     // textarea currently being edited
   uint8_t         _cinfo_pubkey[32];    // full key of the contact being viewed
   lv_obj_t*       _cinfo_return_screen; // where back goes
+
+  // Latest telemetry readings, stashed for the Contact Info page (one contact's
+  // worth -- the most recent response). GPS is applied to the contact position.
+  uint8_t         _telem_pubkey[6];
+  char            _telem_text[160];
 
   // Shared top-layer popup (kebab menu / share menu / pickers) + toast.
   lv_obj_t*       _menu_popup;
@@ -173,6 +180,8 @@ class UITask : public AbstractUITask {
   lv_obj_t* buildSplashScreen();
   lv_obj_t* buildHomeScreen();
   void      rebuildContactsList();
+  // Display name = local override if set, else the contact's advert name.
+  const char* displayName(const uint8_t* pubkey, const char* realname, char* buf, size_t cap);
   bool      contactPasses(const struct ContactInfo& c);
   uint32_t  contactsSignature();
   void      rebuildChannelsList();
@@ -253,7 +262,6 @@ class UITask : public AbstractUITask {
   static void cinfo_share_cb(lv_event_t* e);
   static void cinfo_clearpath_cb(lv_event_t* e);
   static void cinfo_editpath_cb(lv_event_t* e);
-  static void cinfo_type_cb(lv_event_t* e);
   static void cinfo_ta_event_cb(lv_event_t* e);
   static void cinfo_kb_event_cb(lv_event_t* e);
   static void cinfo_name_clicked_cb(lv_event_t* e);
@@ -329,10 +337,10 @@ public:
       _insert_popup(NULL), _insert_list(NULL),
       _chat_is_channel(false), _chat_channel_idx(-1),
       _chat_search_bar(NULL), _chat_search_ta(NULL), _search_active(false),
-      _cinfo_screen(NULL), _cinfo_body(NULL), _cinfo_title(NULL), _cinfo_key(NULL),
+      _cinfo_screen(NULL), _cinfo_body(NULL), _cinfo_title(NULL), _cinfo_realname(NULL), _cinfo_key(NULL),
       _cinfo_fav_lbl(NULL), _cinfo_name_ta(NULL), _cinfo_keyfull(NULL),
-      _cinfo_lat_ta(NULL), _cinfo_lon_ta(NULL), _cinfo_type_dd(NULL),
-      _cinfo_lastheard(NULL), _cinfo_hops(NULL), _cinfo_hops_x(NULL),
+      _cinfo_lat_ta(NULL), _cinfo_lon_ta(NULL), _cinfo_type_lbl(NULL),
+      _cinfo_lastheard(NULL), _cinfo_telem(NULL), _cinfo_hops(NULL), _cinfo_hops_x(NULL),
       _cinfo_outpath(NULL), _cinfo_kb(NULL), _cinfo_active_ta(NULL),
       _cinfo_return_screen(NULL),
       _menu_popup(NULL), _menu_list(NULL), _toast(NULL), _path_return_screen(NULL),
@@ -351,6 +359,8 @@ public:
         _clipboard[0] = 0;
         _contacts_filter[0] = 0;
         _pick_filter[0] = 0;
+        _telem_text[0] = 0;
+        memset(_telem_pubkey, 0, sizeof(_telem_pubkey));
         memset(_chat_pubkey, 0, sizeof(_chat_pubkey));
         memset(_cinfo_pubkey, 0, sizeof(_cinfo_pubkey));
       }
@@ -365,7 +375,7 @@ public:
   void msgRead(int msgcount) override;
   void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) override;
   void sentMsg(const char* peer, const char* text) override;
-  void telemetryResponse(const char* from_name, const uint8_t* lpp, uint8_t lpp_len) override;
+  void telemetryResponse(const uint8_t* pubkey, const char* from_name, const uint8_t* lpp, uint8_t lpp_len) override;
   void notify(UIEventType t = UIEventType::none) override;
   void loop() override;
 };

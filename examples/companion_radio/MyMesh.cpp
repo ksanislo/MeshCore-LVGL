@@ -717,7 +717,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     i += (len - 4);
     _serial->writeFrame(out_frame, i);
 #ifdef DISPLAY_CLASS
-    if (_ui) _ui->telemetryResponse(contact.name, &data[4], len - 4);
+    if (_ui) _ui->telemetryResponse(contact.id.pub_key, contact.name, &data[4], len - 4);
 #endif
   } else if (len > 4 && tag == pending_req) {  // check for matching response tag
     pending_req = 0;
@@ -953,6 +953,7 @@ void MyMesh::begin(bool has_display) {
   bootstrapRTCfromContacts();
   addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
   _store->loadChannels(this);
+  loadNameOverrides();
 
   radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_set_tx_power(_prefs.tx_power_dbm);

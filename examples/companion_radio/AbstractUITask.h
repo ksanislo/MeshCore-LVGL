@@ -47,8 +47,9 @@ public:
   virtual void sentMsg(const char* peer, const char* text) { (void)peer; (void)text; }
   // Called when a telemetry response arrives from a contact, so an on-device UI
   // can display it. `lpp` is the raw CayenneLPP payload. Default no-op.
-  virtual void telemetryResponse(const char* from_name, const uint8_t* lpp, uint8_t lpp_len) {
-    (void)from_name; (void)lpp; (void)lpp_len;
+  virtual void telemetryResponse(const uint8_t* pubkey, const char* from_name,
+                                 const uint8_t* lpp, uint8_t lpp_len) {
+    (void)pubkey; (void)from_name; (void)lpp; (void)lpp_len;
   }
   virtual void notify(UIEventType t = UIEventType::none) = 0;
   virtual void loop() = 0;

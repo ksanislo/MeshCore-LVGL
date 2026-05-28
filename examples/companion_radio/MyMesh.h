@@ -189,6 +189,61 @@ public:
     return false;
   }
 
+  // Local display-name overrides, stored OUTSIDE the contact record (a small
+  // RAM table persisted to /disp_names) so they survive advert name overwrites.
+  // Presentation-only: identity, routing and chat keys still use the advert name.
+  // Kept in RAM so the on-device UI can look them up per-contact without flash.
+  void loadNameOverrides() {
+    _name_ov_count = 0;
+    File f = _store->openRead("/disp_names");
+    if (!f) return;
+    while (_name_ov_count < MAX_NAME_OVERRIDES) {
+      NameOverride o;
+      if (f.read(o.pubkey, 6) != 6) break;
+      if (f.read((uint8_t*)o.name, 32) != 32) break;
+      o.name[31] = 0;
+      _name_ov[_name_ov_count++] = o;
+    }
+    f.close();
+  }
+  bool getNameOverride(const uint8_t* pubkey, char* out, size_t cap) {
+    for (int i = 0; i < _name_ov_count; i++) {
+      if (memcmp(_name_ov[i].pubkey, pubkey, 6) == 0) {
+        strncpy(out, _name_ov[i].name, cap - 1);
+        out[cap - 1] = 0;
+        return out[0] != 0;
+      }
+    }
+    if (cap) out[0] = 0;
+    return false;
+  }
+  void setNameOverride(const uint8_t* pubkey, const char* name) {
+    int idx = -1;
+    for (int i = 0; i < _name_ov_count; i++)
+      if (memcmp(_name_ov[i].pubkey, pubkey, 6) == 0) { idx = i; break; }
+    if (!name || !name[0]) {                       // clear
+      if (idx >= 0) _name_ov[idx] = _name_ov[--_name_ov_count];
+    } else {
+      if (idx < 0) {
+        if (_name_ov_count >= MAX_NAME_OVERRIDES) return;
+        idx = _name_ov_count++;
+        memcpy(_name_ov[idx].pubkey, pubkey, 6);
+      }
+      strncpy(_name_ov[idx].name, name, sizeof(_name_ov[idx].name) - 1);
+      _name_ov[idx].name[sizeof(_name_ov[idx].name) - 1] = 0;
+    }
+    saveNameOverrides();
+  }
+  void saveNameOverrides() {
+    File f = _store->createFile("/disp_names");
+    if (!f) return;
+    for (int i = 0; i < _name_ov_count; i++) {
+      f.write(_name_ov[i].pubkey, 6);
+      f.write((uint8_t*)_name_ov[i].name, 32);
+    }
+    f.close();
+  }
+
 #if ENV_INCLUDE_GPS == 1
   void applyGpsPrefs() {
     sensors.setSettingValue("gps", _prefs.gps_enabled ? "1" : "0");
@@ -201,6 +256,11 @@ public:
 #endif
 
 private:
+  struct NameOverride { uint8_t pubkey[6]; char name[32]; };
+  static const int MAX_NAME_OVERRIDES = 32;
+  NameOverride _name_ov[MAX_NAME_OVERRIDES];
+  int _name_ov_count = 0;
+
   void writeOKFrame();
   void writeErrFrame(uint8_t err_code);
   void writeDisabledFrame();

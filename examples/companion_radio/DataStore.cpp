@@ -168,6 +168,10 @@ File DataStore::openRead(FILESYSTEM* fs, const char* filename) {
 #endif
 }
 
+File DataStore::createFile(const char* filename) {
+  return openWrite(_fs, filename);
+}
+
 bool DataStore::removeFile(const char* filename) {
   return _fs->remove(filename);
 }
