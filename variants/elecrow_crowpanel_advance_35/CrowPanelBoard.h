@@ -15,6 +15,16 @@
   #define PIN_TFT_BL 38
 #endif
 
+// Audio path: buzzer on GPIO8, speaker-amp mute on GPIO21. Left floating, the
+// amp/buzzer pick up EMI from SPI/touch activity and click. The factory
+// firmware drives the buzzer pin and asserts mute (GPIO21 HIGH) at boot.
+#ifndef PIN_BUZZER
+  #define PIN_BUZZER 8
+#endif
+#ifndef PIN_SPK_MUTE
+  #define PIN_SPK_MUTE 21
+#endif
+
 class CrowPanelBoard : public ESP32Board {
 public:
   void begin();

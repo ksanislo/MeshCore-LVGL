@@ -8,4 +8,11 @@ void CrowPanelBoard::begin() {
 
   pinMode(PIN_TFT_BL, OUTPUT);
   digitalWrite(PIN_TFT_BL, HIGH);
+
+  // Quiet the audio path so it doesn't click on touch/SPI EMI (matches the
+  // factory firmware's boot state: buzzer driven low, speaker-amp muted).
+  pinMode(PIN_BUZZER, OUTPUT);
+  digitalWrite(PIN_BUZZER, LOW);
+  pinMode(PIN_SPK_MUTE, OUTPUT);
+  digitalWrite(PIN_SPK_MUTE, HIGH);
 }
