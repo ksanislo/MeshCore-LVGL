@@ -335,7 +335,8 @@ void UITask::chat_back_cb(lv_event_t* e) {
 
 void UITask::chat_input_event_cb(lv_event_t* e) {
   if (!_instance) return;
-  if (lv_event_get_code(e) == LV_EVENT_FOCUSED) _instance->layoutChatBody(true);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) _instance->layoutChatBody(true);
 }
 
 void UITask::chat_send_cb(lv_event_t* e) {
@@ -352,30 +353,82 @@ void UITask::chat_kb_event_cb(lv_event_t* e) {
 
 void UITask::layoutChatBody(bool keyboard_shown) {
   if (!_chat_history || !_chat_compose) return;
-  int kb_h = keyboard_shown ? (_screen_h * 45 / 100) : 0;
 
+  // Only re-pin to the newest message if we were already at the bottom;
+  // otherwise leave the scroll where it is so reading history isn't disrupted.
+  bool was_at_bottom = lv_obj_get_scroll_bottom(_chat_history) <= 4;
+
+  // The keyboard sizes itself from its key matrix and bottom-aligns, so don't
+  // assume a height -- show it, let it lay out, then read its actual top edge
+  // and stack the compose band + history above that.
+  int avail_bottom = _screen_h;
   if (_chat_keyboard) {
     if (keyboard_shown) {
       lv_obj_clear_flag(_chat_keyboard, LV_OBJ_FLAG_HIDDEN);
-      lv_obj_set_size(_chat_keyboard, _screen_w, kb_h);
-      lv_obj_align(_chat_keyboard, LV_ALIGN_TOP_MID, 0, _screen_h - kb_h);
+      lv_obj_align(_chat_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);  // re-pin each show
+      lv_obj_update_layout(_chat_keyboard);
+      // Derive the free area from the keyboard's height (its y can be stale
+      // right after un-hiding, before the parent's layout pass re-applies it).
+      avail_bottom = _screen_h - lv_obj_get_height(_chat_keyboard);
     } else {
       lv_obj_add_flag(_chat_keyboard, LV_OBJ_FLAG_HIDDEN);
     }
   }
 
-  int compose_y = _screen_h - kb_h - COMPOSE_H;
+  int compose_y = avail_bottom - COMPOSE_H;
   lv_obj_set_size(_chat_compose, _screen_w, COMPOSE_H);
   lv_obj_align(_chat_compose, LV_ALIGN_TOP_MID, 0, compose_y);
 
   lv_obj_set_size(_chat_history, _screen_w, compose_y - HEADER_H);
   lv_obj_align(_chat_history, LV_ALIGN_TOP_MID, 0, HEADER_H);
+
+  lv_obj_update_layout(_chat_history);
+  if (was_at_bottom) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
+}
+
+// Rewrite "@Name" -> "@[Name]" when Name matches a known contact (longest
+// match, ending at a word boundary), so other clients render it as a mention.
+// Non-matching "@text" and already-bracketed "@[Name]" pass through unchanged.
+static void encodeMentions(const char* in, char* out, size_t cap) {
+  auto isBoundary = [](char a) {
+    return a == 0 || a == ' ' || a == '\n' || a == '\t' || a == ',' || a == '.' ||
+           a == '!' || a == '?' || a == ';' || a == ':' || a == ')' || a == '\'';
+  };
+  size_t o = 0;
+  const char* p = in;
+  auto emit = [&](const char* s, size_t n) { while (n-- && o + 1 < cap) out[o++] = *s++; };
+
+  while (*p && o + 1 < cap) {
+    if (*p == '@' && p[1] != '[') {
+      const char* nm = p + 1;
+      size_t bestlen = 0;
+      ContactsIterator it;
+      ContactInfo c;
+      while (it.hasNext(&the_mesh, c)) {
+        size_t nl = strlen(c.name);
+        if (nl > bestlen && strncmp(nm, c.name, nl) == 0 && isBoundary(nm[nl])) bestlen = nl;
+      }
+      if (bestlen > 0) {
+        emit("@[", 2);
+        emit(nm, bestlen);
+        if (o + 1 < cap) out[o++] = ']';
+        p = nm + bestlen;
+        continue;
+      }
+    }
+    out[o++] = *p++;
+  }
+  out[o] = 0;
 }
 
 void UITask::sendCurrentMessage() {
   if (!_chat_input) return;
-  const char* text = lv_textarea_get_text(_chat_input);
-  if (!text || !text[0]) return;
+  const char* raw = lv_textarea_get_text(_chat_input);
+  if (!raw || !raw[0]) return;
+
+  char encoded[CHAT_MSG_TEXT_MAX + 32];
+  encodeMentions(raw, encoded, sizeof(encoded));
+  const char* text = encoded;
 
   const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
   uint32_t now = the_mesh.getRTCClock()->getCurrentTimeUnique();
