@@ -21,8 +21,24 @@
 #ifndef PIN_BUZZER
   #define PIN_BUZZER 8
 #endif
+// Factory speaker idle state: GPIO14 LOW + GPIO21 HIGH (mute). GPIO21 LOW
+// unmutes to play; GPIO14 is the amp's other control line, held low.
+#ifndef PIN_SPK_CTL
+  #define PIN_SPK_CTL 14
+#endif
 #ifndef PIN_SPK_MUTE
   #define PIN_SPK_MUTE 21
+#endif
+// Speaker I2S output pins (BCLK/LRCK/DOUT). Held low so a floating clock/data
+// line doesn't pick up SPI EMI and get amplified into the speaker.
+#ifndef PIN_I2S_BCLK
+  #define PIN_I2S_BCLK 13
+#endif
+#ifndef PIN_I2S_LRCK
+  #define PIN_I2S_LRCK 11
+#endif
+#ifndef PIN_I2S_DOUT
+  #define PIN_I2S_DOUT 12
 #endif
 
 class CrowPanelBoard : public ESP32Board {
