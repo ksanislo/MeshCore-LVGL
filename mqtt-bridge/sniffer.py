@@ -410,12 +410,25 @@ class NodeRegistry:
                 )
                 return
             loaded = 0
+            backfilled = 0
             for entry in data.get("nodes", []):
                 try:
                     pk = bytes.fromhex(entry["pubkey"])
                     # Optional fields: tolerate missing values from older
                     # registry files written before these were captured.
+                    last_seen = float(entry.get("last_seen", 0.0))
                     fs = entry.get("first_seen")
+                    # Backfill first_seen for pre-existing entries: we don't
+                    # know the actual first sighting, but we know it was no
+                    # later than the most recent one we recorded. Setting
+                    # first_seen = last_seen is the most conservative truth
+                    # (the real value may be earlier). Once set, register()
+                    # preserves it across future adverts.
+                    if fs is not None:
+                        first_seen = float(fs)
+                    else:
+                        first_seen = last_seen
+                        backfilled += 1
                     at = entry.get("advert_timestamp")
                     lat = entry.get("lat")
                     lon = entry.get("lon")
@@ -423,8 +436,8 @@ class NodeRegistry:
                         pubkey=pk,
                         name=entry.get("name", ""),
                         adv_type=int(entry.get("adv_type", 0)),
-                        last_seen=float(entry.get("last_seen", 0.0)),
-                        first_seen=float(fs) if fs is not None else None,
+                        last_seen=last_seen,
+                        first_seen=first_seen,
                         advert_timestamp=int(at) if at is not None else None,
                         lat=float(lat) if lat is not None else None,
                         lon=float(lon) if lon is not None else None,
@@ -432,6 +445,13 @@ class NodeRegistry:
                     loaded += 1
                 except (ValueError, KeyError, TypeError):
                     continue
+            if backfilled:
+                # Persist the inferred values so we don't re-derive them on
+                # every startup -- and so the file reflects them even if the
+                # process exits before any new adverts arrive.
+                self._dirty = True
+                print(f"[{ts_now()}] registry: backfilled first_seen for "
+                      f"{backfilled} pre-existing node(s)")
             print(f"[{ts_now()}] registry: loaded {loaded} nodes from "
                   f"{self.persist_path}")
             self._last_save = time.time()
