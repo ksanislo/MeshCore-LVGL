@@ -25,14 +25,29 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _tab_contacts;
   lv_obj_t*       _tab_channels;
   lv_obj_t*       _tab_settings;
-  lv_obj_t*       _contacts_list;       // lv_list inside _tab_contacts
-  lv_obj_t*       _contacts_empty;      // "no contacts yet" label, shown when list is empty
+  lv_obj_t*       _contacts_table;      // lv_table inside _tab_contacts (rows drawn, not objects)
+  lv_obj_t*       _contacts_search_ta;  // name search field
+  lv_obj_t*       _contacts_kb;         // keyboard for the search field (overlays home screen)
+  lv_obj_t*       _contacts_filter_btn; // opens the order/filter pop-out
+  lv_obj_t*       _cfilt_popup;         // top-layer pop-out (order + filter radio groups)
+  lv_obj_t*       _cfilt_order_grp;     // radio rows: A-Z / Heard Recently / Latest Messages
+  lv_obj_t*       _cfilt_filt_grp;      // radio rows: All / Favorites / Users / Repeaters / Rooms / Sensors
+  int             _contacts_order;      // 0=A-Z, 1=Heard Recently, 2=Latest Messages
+  int             _contacts_filt;       // 0=All,1=Fav,2=Users,3=Repeaters,4=Rooms,5=Sensors
+  char            _contacts_filter[40]; // search substring
   lv_obj_t*       _channels_list;       // lv_list inside _tab_channels
   lv_obj_t*       _status_label;        // header status (bottom of contacts tab)
   bool            _contacts_dirty;      // set by newMsg(), serviced (throttled) in loop()
   uint32_t        _contacts_rebuilt_ms; // last rebuild time
   uint32_t        _contacts_sig;        // change-detect signature (add/remove/favourite/rename)
   uint32_t        _contacts_check_ms;   // last signature poll
+
+  // Sorted/filtered view of the address book (favourites first, then recency).
+  // Holds indices only -- no per-contact widgets -- so it scales to a full book.
+  static const int CONTACTS_MAX_ROWS = 400;
+  struct ContactDispRow { uint16_t idx; uint32_t heard; uint8_t fav; };
+  ContactDispRow  _crows[CONTACTS_MAX_ROWS];
+  int             _crow_count;
 
   // Chat (conversation) screen. Three-band: fixed top bar / scrollable history
   // / fixed compose band (compose added with the keyboard step).
@@ -138,10 +153,20 @@ class UITask : public AbstractUITask {
   lv_obj_t* buildSplashScreen();
   lv_obj_t* buildHomeScreen();
   void      rebuildContactsList();
-  void      addContactRow(const struct ContactInfo& c, uint32_t now_secs);
+  bool      contactPasses(const struct ContactInfo& c);
   uint32_t  contactsSignature();
   void      rebuildChannelsList();
   static void channel_clicked_cb(lv_event_t* e);
+  static void contacts_table_cb(lv_event_t* e);
+  static void contacts_table_draw_cb(lv_event_t* e);
+  static void contacts_search_ta_cb(lv_event_t* e);
+  static void contacts_kb_cb(lv_event_t* e);
+  static int  crow_cmp(const void* a, const void* b);
+  void      showContactsFilter();
+  void      refreshContactsFilterChecks();
+  static void contacts_filter_btn_cb(lv_event_t* e);
+  static void contacts_order_pick_cb(lv_event_t* e);
+  static void contacts_filt_pick_cb(lv_event_t* e);
 
   void      openChat(const char* peer_name);
   void      rebuildChatHistory();
@@ -153,7 +178,6 @@ class UITask : public AbstractUITask {
   void      buildContactPicker(lv_obj_t* list, lv_event_cb_t cb, bool styled);
   void      closeInsertPopup();
   void      insertContactRef(const uint8_t* pubkey, uint8_t type, const char* name);
-  static void contact_clicked_cb(lv_event_t* e);
   static void chat_back_cb(lv_event_t* e);
   static void chat_input_event_cb(lv_event_t* e);
   static void chat_send_cb(lv_event_t* e);
@@ -261,9 +285,12 @@ public:
       _header_label(NULL),
       _tabview(NULL),
       _tab_contacts(NULL), _tab_channels(NULL), _tab_settings(NULL),
-      _contacts_list(NULL), _contacts_empty(NULL), _channels_list(NULL), _status_label(NULL),
+      _contacts_table(NULL), _contacts_search_ta(NULL), _contacts_kb(NULL),
+      _contacts_filter_btn(NULL), _cfilt_popup(NULL), _cfilt_order_grp(NULL),
+      _cfilt_filt_grp(NULL), _contacts_order(1), _contacts_filt(0),
+      _channels_list(NULL), _status_label(NULL),
       _contacts_dirty(false), _contacts_rebuilt_ms(0),
-      _contacts_sig(0), _contacts_check_ms(0),
+      _contacts_sig(0), _contacts_check_ms(0), _crow_count(0),
       _chat_screen(NULL), _chat_title(NULL), _chat_history(NULL),
       _chat_compose(NULL), _chat_input(NULL), _chat_keyboard(NULL),
       _insert_popup(NULL), _insert_list(NULL),
@@ -288,6 +315,7 @@ public:
         _chat_peer[0] = 0;
         _search_filter[0] = 0;
         _clipboard[0] = 0;
+        _contacts_filter[0] = 0;
         memset(_chat_pubkey, 0, sizeof(_chat_pubkey));
         memset(_cinfo_pubkey, 0, sizeof(_cinfo_pubkey));
       }

@@ -250,8 +250,12 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     // unset -- file.read() returns 0 at EOF without touching the destination.
     _prefs.display_brightness = 0;                                                         // 137
     _prefs.display_rotation = 0;                                                           // 138
+    _prefs.contacts_order = 0xFF;                                                          // 139 (0xFF = unset)
+    _prefs.contacts_filter = 0xFF;                                                         // 140 (0xFF = unset)
     file.read((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
     file.read((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
+    file.read((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
+    file.read((uint8_t *)&_prefs.contacts_filter, sizeof(_prefs.contacts_filter));         // 140
 
     file.close();
   }
@@ -292,6 +296,11 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.rx_boosted_gain, sizeof(_prefs.rx_boosted_gain));         // 89
     file.write((uint8_t *)_prefs.default_scope_name, sizeof(_prefs.default_scope_name));    // 90
     file.write((uint8_t *)_prefs.default_scope_key, sizeof(_prefs.default_scope_key));     // 121
+    // Appended UI fields (must match loadPrefsInt order/offsets).
+    file.write((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
+    file.write((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
+    file.write((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
+    file.write((uint8_t *)&_prefs.contacts_filter, sizeof(_prefs.contacts_filter));         // 140
 
     file.close();
   }

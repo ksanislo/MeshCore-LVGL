@@ -36,6 +36,9 @@ public:
 
   // Drop all messages for a peer (clear that conversation's history).
   virtual void clearPeer(const char* peer) = 0;
+
+  // Newest message timestamp for a peer, or 0 if none (for "latest message" sort).
+  virtual uint32_t latestTimestampFor(const char* peer) = 0;
 };
 
 // Fixed-capacity ring buffer. Oldest message is overwritten when full.
@@ -70,6 +73,17 @@ public:
       ChatMessage& m = _buf[i];
       if (strncmp(m.peer, peer, CHAT_PEER_NAME_MAX) == 0) m.peer[0] = 0;  // tombstone
     }
+  }
+
+  uint32_t latestTimestampFor(const char* peer) override {
+    if (!peer) return 0;
+    uint32_t latest = 0;
+    for (int i = 0; i < _count; i++) {
+      const ChatMessage& m = _buf[i];
+      if (m.peer[0] && strncmp(m.peer, peer, CHAT_PEER_NAME_MAX) == 0 && m.timestamp > latest)
+        latest = m.timestamp;
+    }
+    return latest;
   }
 
   int messagesFor(const char* peer, const ChatMessage** out, int max) override {

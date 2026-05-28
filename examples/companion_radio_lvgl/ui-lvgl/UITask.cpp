@@ -5,6 +5,7 @@
 #include <Utils.h>                      // mesh::Utils::toHex
 #include <esp_heap_caps.h>
 #include <ctype.h>                      // tolower (case-insensitive search)
+#include <strings.h>                    // strcasecmp (A-Z contact sort)
 
 // main.cpp owns the_mesh; we read contacts/channels via the base class.
 extern MyMesh the_mesh;
@@ -19,6 +20,7 @@ void radio_set_tx_power(int8_t dbm);
 extern "C" __attribute__((weak)) void board_set_backlight(uint8_t duty) { (void)duty; }
 
 static void sanitizeForFont(const char* in, char* out, size_t cap);
+static bool containsCI(const char* hay, const char* needle);
 
 UITask* UITask::_instance = NULL;
 
@@ -138,25 +140,69 @@ lv_obj_t* UITask::buildHomeScreen() {
     lv_obj_set_style_bg_opa(page, LV_OPA_COVER, 0);
   }
 
-  // ----- Contacts tab: scrollable list, with an empty-state label when zero -----
+  // ----- Contacts tab: fixed search/filter band + a virtualized lv_table -----
   lv_obj_set_style_pad_all(_tab_contacts, 0, 0);
+  lv_obj_clear_flag(_tab_contacts, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(_tab_contacts, LV_FLEX_FLOW_COLUMN);
 
-  _contacts_list = lv_list_create(_tab_contacts);
-  lv_obj_set_size(_contacts_list, LV_PCT(100), LV_PCT(100));
-  lv_obj_set_style_bg_color(_contacts_list, lv_color_hex(BG_HEX), 0);
-  lv_obj_set_style_bg_opa(_contacts_list, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(_contacts_list, 0, 0);
-  lv_obj_set_style_pad_row(_contacts_list, 0, 0);
+  // Search row: text field (grows) + a filter/menu button on the right that
+  // opens the order/filter pop-out.
+  lv_obj_t* cctl = lv_obj_create(_tab_contacts);
+  lv_obj_set_width(cctl, LV_PCT(100));
+  lv_obj_set_height(cctl, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_color(cctl, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(cctl, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(cctl, 0, 0);
+  lv_obj_set_style_radius(cctl, 0, 0);
+  lv_obj_set_style_pad_all(cctl, 6, 0);
+  lv_obj_set_style_pad_column(cctl, 6, 0);
+  lv_obj_clear_flag(cctl, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(cctl, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(cctl, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-  _contacts_empty = lv_label_create(_tab_contacts);
-  lv_label_set_text(_contacts_empty, "No contacts yet.\nWaiting for first advert...");
-  lv_label_set_long_mode(_contacts_empty, LV_LABEL_LONG_WRAP);
-  lv_obj_set_width(_contacts_empty, _screen_w - 24);
-  lv_obj_set_style_text_color(_contacts_empty, lv_color_hex(DIM_HEX), 0);
-  lv_obj_set_style_text_align(_contacts_empty, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_align(_contacts_empty, LV_ALIGN_CENTER, 0, 0);
+  _contacts_search_ta = lv_textarea_create(cctl);
+  lv_textarea_set_one_line(_contacts_search_ta, true);
+  lv_textarea_set_placeholder_text(_contacts_search_ta, LV_SYMBOL_EYE_OPEN " Search");
+  lv_obj_set_flex_grow(_contacts_search_ta, 1);
+  lv_obj_add_event_cb(_contacts_search_ta, contacts_search_ta_cb, LV_EVENT_ALL, NULL);
 
-  _status_label = NULL;  // not used here yet; reserved for future status bar
+  _contacts_filter_btn = lv_btn_create(cctl);
+  lv_obj_add_event_cb(_contacts_filter_btn, contacts_filter_btn_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* fbl = lv_label_create(_contacts_filter_btn);
+  lv_label_set_text(fbl, LV_SYMBOL_LIST);
+  lv_obj_center(fbl);
+
+  _contacts_table = lv_table_create(_tab_contacts);
+  lv_obj_set_width(_contacts_table, LV_PCT(100));
+  lv_obj_set_flex_grow(_contacts_table, 1);            // fill remaining height -> internal scroll
+  lv_obj_set_style_bg_color(_contacts_table, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(_contacts_table, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(_contacts_table, 0, 0);
+  lv_obj_set_style_radius(_contacts_table, 0, 0);
+  lv_obj_set_style_bg_color(_contacts_table, lv_color_hex(BG_HEX), LV_PART_ITEMS);
+  lv_obj_set_style_bg_opa(_contacts_table, LV_OPA_COVER, LV_PART_ITEMS);
+  lv_obj_set_style_text_color(_contacts_table, lv_color_hex(FG_HEX), LV_PART_ITEMS);
+  lv_obj_set_style_pad_top(_contacts_table, 10, LV_PART_ITEMS);
+  lv_obj_set_style_pad_bottom(_contacts_table, 10, LV_PART_ITEMS);
+  lv_obj_set_style_pad_left(_contacts_table, 8, LV_PART_ITEMS);
+  lv_obj_set_style_border_color(_contacts_table, lv_color_hex(0x374151), LV_PART_ITEMS);
+  lv_obj_set_style_border_width(_contacts_table, 1, LV_PART_ITEMS);
+  lv_obj_set_style_border_side(_contacts_table, LV_BORDER_SIDE_BOTTOM, LV_PART_ITEMS);
+  lv_table_set_col_cnt(_contacts_table, 2);
+  lv_table_set_col_width(_contacts_table, 0, _screen_w - 64);
+  lv_table_set_col_width(_contacts_table, 1, 56);
+  // lv_table reports the tapped cell via VALUE_CHANGED on release (and only when
+  // not scrolling), then clears the selection -- so CLICKED would see CELL_NONE.
+  lv_obj_add_event_cb(_contacts_table, contacts_table_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_event_cb(_contacts_table, contacts_table_draw_cb, LV_EVENT_DRAW_PART_BEGIN, NULL);
+
+  // Search keyboard (hidden; overlays the home screen, like the settings one).
+  _contacts_kb = lv_keyboard_create(scr);
+  lv_keyboard_set_textarea(_contacts_kb, _contacts_search_ta);
+  lv_obj_add_event_cb(_contacts_kb, contacts_kb_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_contacts_kb, LV_OBJ_FLAG_HIDDEN);
+
+  _status_label = NULL;
 
   // ----- Channels tab: scrollable list -----
   lv_obj_set_style_pad_all(_tab_channels, 0, 0);
@@ -195,33 +241,6 @@ static void formatLastSeen(char* out, size_t cap, uint32_t lastmod_secs, uint32_
 static constexpr uint8_t CONTACT_FLAG_FAVOURITE = 0x01;  // matches firmware
 static constexpr uint32_t FAV_HEX = 0xFBBF24;            // amber-400 accent
 
-void UITask::addContactRow(const ContactInfo& c, uint32_t now_secs) {
-  bool fav = (c.flags & CONTACT_FLAG_FAVOURITE) != 0;
-
-  char cname[CHAT_PEER_NAME_MAX + 4];
-  sanitizeForFont(c.name[0] ? c.name : "(unnamed)", cname, sizeof(cname));
-  lv_obj_t* btn = lv_list_add_btn(_contacts_list, contactSymbol(c.type), cname);
-  lv_obj_set_style_bg_color(btn, lv_color_hex(BG_HEX), 0);
-  lv_obj_set_style_text_color(btn, lv_color_hex(fav ? FAV_HEX : FG_HEX), 0);
-  lv_obj_set_style_border_color(btn, lv_color_hex(0x374151), 0);  // gray-700
-  lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, 0);
-  lv_obj_set_style_border_width(btn, 1, 0);
-
-  // Tap -> open chat. Stash the 4-byte pubkey prefix in user_data (no
-  // allocation, survives list rebuilds); resolve it back to a contact on tap.
-  uint32_t key = 0;
-  memcpy(&key, c.id.pub_key, 4);
-  lv_obj_set_user_data(btn, (void*)(uintptr_t)key);
-  lv_obj_add_event_cb(btn, contact_clicked_cb, LV_EVENT_CLICKED, NULL);
-
-  char ago[16];
-  formatLastSeen(ago, sizeof(ago), c.lastmod, now_secs);
-  lv_obj_t* age = lv_label_create(btn);
-  lv_label_set_text(age, ago);
-  lv_obj_set_style_text_color(age, lv_color_hex(DIM_HEX), 0);
-  lv_obj_align(age, LV_ALIGN_RIGHT_MID, -4, 0);
-}
-
 // Cheap change-detect over the contact set. Captures add/remove (count),
 // favourite toggles + edits (flags), renames (name) and identity (pubkey).
 // Deliberately excludes lastmod so routine RF adverts don't trigger rebuilds.
@@ -239,39 +258,301 @@ uint32_t UITask::contactsSignature() {
   return sig ^ (uint32_t)(n << 1);
 }
 
+// Filter predicate: the pop-out's filter choice + the name search box.
+// _contacts_filt: 0=All,1=Favorites,2=Users,3=Repeaters,4=Room Servers,5=Sensors.
+bool UITask::contactPasses(const ContactInfo& c) {
+  switch (_contacts_filt) {
+    case 1: if (!(c.flags & CONTACT_FLAG_FAVOURITE)) return false; break;
+    case 2: if (c.type != ADV_TYPE_CHAT)     return false; break;
+    case 3: if (c.type != ADV_TYPE_REPEATER) return false; break;
+    case 4: if (c.type != ADV_TYPE_ROOM)     return false; break;
+    case 5: if (c.type != ADV_TYPE_SENSOR)   return false; break;
+    default: break;  // All
+  }
+  if (_contacts_filter[0] && !containsCI(c.name, _contacts_filter)) return false;
+  return true;
+}
+
+// Name collation: order by character class first (letters, then numbers, then
+// symbols), then case-insensitively by value -- so "Alice" < "Zoe" < "7th" < "_hub".
+static int nameClass(unsigned char c) {
+  if (isalpha(c)) return 0;
+  if (isdigit(c)) return 1;
+  return 2;
+}
+static int nameCmpLNS(const char* a, const char* b) {
+  const unsigned char* pa = (const unsigned char*)a;
+  const unsigned char* pb = (const unsigned char*)b;
+  while (*pa && *pb) {
+    int ka = nameClass(*pa), kb = nameClass(*pb);
+    if (ka != kb) return ka - kb;
+    unsigned char la = (unsigned char)tolower(*pa), lb = (unsigned char)tolower(*pb);
+    if (la != lb) return (int)la - (int)lb;
+    pa++; pb++;
+  }
+  return (int)*pa - (int)*pb;  // shorter string sorts first
+}
+
+// qsort comparator reads the active order from this file-static (single-threaded
+// LVGL). 0=A-Z (by name), 1=Heard Recently, 2=Latest Messages (both newest-first
+// using the row's `heard` key populated per the chosen order).
+static int s_contacts_order = 1;
+int UITask::crow_cmp(const void* pa, const void* pb) {
+  const ContactDispRow* a = (const ContactDispRow*)pa;
+  const ContactDispRow* b = (const ContactDispRow*)pb;
+  if (a->fav != b->fav) return (int)b->fav - (int)a->fav;  // favourites first, then order within each group
+  if (s_contacts_order == 0) {
+    ContactInfo ca, cb;
+    the_mesh.getContactByIdx(a->idx, ca);
+    the_mesh.getContactByIdx(b->idx, cb);
+    return nameCmpLNS(ca.name, cb.name);
+  }
+  if (a->heard != b->heard) return (b->heard > a->heard) ? 1 : -1;
+  return 0;
+}
+
 void UITask::rebuildContactsList() {
-  if (!_contacts_list) return;
+  if (!_contacts_table) return;
   _contacts_dirty = false;
   _contacts_rebuilt_ms = millis();
   _contacts_sig = contactsSignature();  // keep poll baseline in sync
-  lv_obj_clean(_contacts_list);
 
-  uint32_t now_secs = the_mesh.getRTCClock()->getCurrentTime();
-  int count = 0;
-
-  // Pass 1: favourites first, always shown (user-curated, few).
-  {
-    ContactsIterator it;
+  // Build the filtered display set (indices only -- no per-contact widgets).
+  _crow_count = 0;
+  int total = the_mesh.getNumContacts();
+  for (int i = 0; i < total && _crow_count < CONTACTS_MAX_ROWS; i++) {
     ContactInfo c;
-    while (it.hasNext(&the_mesh, c)) {
-      if (c.flags & CONTACT_FLAG_FAVOURITE) { addContactRow(c, now_secs); ++count; }
-    }
+    if (!the_mesh.getContactByIdx(i, c)) continue;
+    if (!contactPasses(c)) continue;
+    _crows[_crow_count].idx = (uint16_t)i;
+    // Sort key: latest message time for "Latest Messages", else last-heard.
+    _crows[_crow_count].heard = (_contacts_order == 2)
+        ? _msgs.latestTimestampFor(c.name) : c.last_advert_timestamp;
+    _crows[_crow_count].fav = (c.flags & CONTACT_FLAG_FAVOURITE) ? 1 : 0;
+    _crow_count++;
+  }
+  s_contacts_order = _contacts_order;
+  qsort(_crows, _crow_count, sizeof(ContactDispRow), crow_cmp);
+
+  if (_crow_count == 0) {
+    lv_table_set_row_cnt(_contacts_table, 1);
+    lv_table_set_cell_value(_contacts_table, 0, 0,
+        the_mesh.getNumContacts() > 0 ? "No contacts match." : "No contacts yet. Waiting for adverts...");
+    lv_table_set_cell_value(_contacts_table, 0, 1, "");
+    return;
   }
 
-  // Pass 2: fill remaining slots with non-favourites, in storage order.
-  // Widget allocs now come from PSRAM, so this cap is just a sanity bound
-  // on rebuild time, not a memory limit. Favourites above are uncapped.
-  const int MAX_RENDER = 200;
-  {
-    ContactsIterator it;
+  uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+  lv_table_set_row_cnt(_contacts_table, _crow_count);
+  for (int r = 0; r < _crow_count; r++) {
     ContactInfo c;
-    while (it.hasNext(&the_mesh, c) && count < MAX_RENDER) {
-      if (!(c.flags & CONTACT_FLAG_FAVOURITE)) { addContactRow(c, now_secs); ++count; }
+    if (!the_mesh.getContactByIdx(_crows[r].idx, c)) continue;
+    char clean[CHAT_PEER_NAME_MAX + 4];
+    sanitizeForFont(c.name[0] ? c.name : "(unnamed)", clean, sizeof(clean));
+    char cell[CHAT_PEER_NAME_MAX + 12];
+    snprintf(cell, sizeof(cell), "%s %s", contactSymbol(c.type), clean);
+    lv_table_set_cell_value(_contacts_table, r, 0, cell);
+    char ago[16];
+    formatLastSeen(ago, sizeof(ago), c.last_advert_timestamp, now);
+    lv_table_set_cell_value(_contacts_table, r, 1, ago);
+  }
+  lv_obj_scroll_to_y(_contacts_table, 0, LV_ANIM_OFF);
+}
+
+void UITask::contacts_table_cb(lv_event_t* e) {
+  if (!_instance) return;
+  uint16_t row = 0, col = 0;
+  lv_table_get_selected_cell(lv_event_get_target(e), &row, &col);
+  if (row == LV_TABLE_CELL_NONE || (int)row >= _instance->_crow_count) return;
+  ContactInfo c;
+  if (!the_mesh.getContactByIdx(_instance->_crows[row].idx, c)) return;
+  _instance->_chat_is_channel = false;
+  memcpy(_instance->_chat_pubkey, c.id.pub_key, 6);
+  _instance->openChat(c.name);
+}
+
+void UITask::contacts_table_draw_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_draw_part_dsc_t* dsc = lv_event_get_draw_part_dsc(e);
+  if (dsc->part != LV_PART_ITEMS || dsc->label_dsc == NULL) return;
+  uint16_t cols = lv_table_get_col_cnt(lv_event_get_target(e));
+  uint32_t row = dsc->id / cols;
+  uint32_t col = dsc->id % cols;
+  if (col == 1) {
+    dsc->label_dsc->color = lv_color_hex(DIM_HEX);                 // age column
+  } else if ((int)row < _instance->_crow_count && _instance->_crows[row].fav) {
+    dsc->label_dsc->color = lv_color_hex(FAV_HEX);                 // favourite name
+  } else {
+    dsc->label_dsc->color = lv_color_hex(FG_HEX);
+  }
+}
+
+void UITask::contacts_search_ta_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    lv_keyboard_set_textarea(_instance->_contacts_kb, ta);
+    lv_keyboard_set_mode(_instance->_contacts_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_contacts_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_contacts_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_contacts_kb);
+  } else if (code == LV_EVENT_VALUE_CHANGED) {
+    const char* s = lv_textarea_get_text(ta);
+    strncpy(_instance->_contacts_filter, s ? s : "", sizeof(_instance->_contacts_filter) - 1);
+    _instance->_contacts_filter[sizeof(_instance->_contacts_filter) - 1] = 0;
+    _instance->rebuildContactsList();
+  }
+}
+
+void UITask::contacts_kb_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
+    lv_obj_add_flag(_instance->_contacts_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+// A pick-one row: [indicator][label], clickable, value stashed in user_data.
+// Indicator (child 0) shows a check when selected; refreshed in place (no clean).
+static lv_obj_t* addRadioRow(lv_obj_t* grp, const char* text, int value, lv_event_cb_t cb) {
+  lv_obj_t* row = lv_obj_create(grp);
+  lv_obj_set_width(row, LV_PCT(100));
+  lv_obj_set_height(row, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(row, 0, 0);
+  lv_obj_set_style_pad_all(row, 6, 0);
+  lv_obj_set_style_pad_column(row, 8, 0);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_user_data(row, (void*)(intptr_t)value);
+  lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* ind = lv_label_create(row);
+  lv_obj_set_width(ind, 16);
+  lv_label_set_text(ind, " ");
+  lv_obj_set_style_text_color(ind, lv_color_hex(0x34D399), 0);
+  lv_obj_t* lbl = lv_label_create(row);
+  lv_label_set_text(lbl, text);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(0xF3F4F6), 0);
+  return row;
+}
+
+static lv_obj_t* addFilterHeader(lv_obj_t* card, const char* text) {
+  lv_obj_t* h = lv_label_create(card);
+  lv_label_set_text(h, text);
+  lv_obj_set_style_text_color(h, lv_color_hex(0x60A5FA), 0);
+  lv_obj_set_style_text_font(h, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_pad_top(h, 4, 0);
+  return h;
+}
+
+void UITask::showContactsFilter() {
+  if (!_cfilt_popup) {
+    _cfilt_popup = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(_cfilt_popup, _screen_w, _screen_h);
+    lv_obj_set_pos(_cfilt_popup, 0, 0);
+    lv_obj_set_style_bg_color(_cfilt_popup, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(_cfilt_popup, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(_cfilt_popup, 0, 0);
+    lv_obj_set_style_pad_all(_cfilt_popup, 0, 0);
+    lv_obj_add_flag(_cfilt_popup, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_cfilt_popup, [](lv_event_t* ev) {  // tap backdrop to close
+      if (_instance && lv_event_get_target(ev) == _instance->_cfilt_popup)
+        lv_obj_add_flag(_instance->_cfilt_popup, LV_OBJ_FLAG_HIDDEN);
+    }, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* card = lv_obj_create(_cfilt_popup);
+    lv_obj_set_width(card, LV_PCT(80));
+    lv_obj_set_height(card, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(card, LV_PCT(90), 0);
+    lv_obj_align(card, LV_ALIGN_TOP_RIGHT, -6, HEADER_H + 6);  // drop down from the filter button
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_pad_all(card, 10, 0);
+    lv_obj_set_style_pad_row(card, 2, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+
+    addFilterHeader(card, "Order");
+    _cfilt_order_grp = lv_obj_create(card);
+    lv_obj_set_width(_cfilt_order_grp, LV_PCT(100));
+    lv_obj_set_height(_cfilt_order_grp, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(_cfilt_order_grp, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(_cfilt_order_grp, 0, 0);
+    lv_obj_set_style_pad_all(_cfilt_order_grp, 0, 0);
+    lv_obj_clear_flag(_cfilt_order_grp, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(_cfilt_order_grp, LV_FLEX_FLOW_COLUMN);
+    addRadioRow(_cfilt_order_grp, "A-Z", 0, contacts_order_pick_cb);
+    addRadioRow(_cfilt_order_grp, "Heard Recently", 1, contacts_order_pick_cb);
+    addRadioRow(_cfilt_order_grp, "Latest Messages", 2, contacts_order_pick_cb);
+
+    addFilterHeader(card, "Filter");
+    _cfilt_filt_grp = lv_obj_create(card);
+    lv_obj_set_width(_cfilt_filt_grp, LV_PCT(100));
+    lv_obj_set_height(_cfilt_filt_grp, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(_cfilt_filt_grp, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(_cfilt_filt_grp, 0, 0);
+    lv_obj_set_style_pad_all(_cfilt_filt_grp, 0, 0);
+    lv_obj_clear_flag(_cfilt_filt_grp, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(_cfilt_filt_grp, LV_FLEX_FLOW_COLUMN);
+    addRadioRow(_cfilt_filt_grp, "All", 0, contacts_filt_pick_cb);
+    addRadioRow(_cfilt_filt_grp, "Favorites", 1, contacts_filt_pick_cb);
+    addRadioRow(_cfilt_filt_grp, "Users", 2, contacts_filt_pick_cb);
+    addRadioRow(_cfilt_filt_grp, "Repeaters", 3, contacts_filt_pick_cb);
+    addRadioRow(_cfilt_filt_grp, "Room Servers", 4, contacts_filt_pick_cb);
+    addRadioRow(_cfilt_filt_grp, "Sensors", 5, contacts_filt_pick_cb);
+  }
+  refreshContactsFilterChecks();
+  lv_obj_clear_flag(_cfilt_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_cfilt_popup);
+}
+
+void UITask::refreshContactsFilterChecks() {
+  if (_cfilt_order_grp) {
+    uint32_t n = lv_obj_get_child_cnt(_cfilt_order_grp);
+    for (uint32_t i = 0; i < n; i++) {
+      lv_obj_t* row = lv_obj_get_child(_cfilt_order_grp, i);
+      int val = (int)(intptr_t)lv_obj_get_user_data(row);
+      lv_label_set_text(lv_obj_get_child(row, 0), val == _contacts_order ? LV_SYMBOL_OK : " ");
     }
   }
+  if (_cfilt_filt_grp) {
+    uint32_t n = lv_obj_get_child_cnt(_cfilt_filt_grp);
+    for (uint32_t i = 0; i < n; i++) {
+      lv_obj_t* row = lv_obj_get_child(_cfilt_filt_grp, i);
+      int val = (int)(intptr_t)lv_obj_get_user_data(row);
+      lv_label_set_text(lv_obj_get_child(row, 0), val == _contacts_filt ? LV_SYMBOL_OK : " ");
+    }
+  }
+}
 
-  if (count == 0) lv_obj_clear_flag(_contacts_empty, LV_OBJ_FLAG_HIDDEN);
-  else            lv_obj_add_flag(_contacts_empty,  LV_OBJ_FLAG_HIDDEN);
+void UITask::contacts_filter_btn_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->showContactsFilter();
+}
+
+void UITask::contacts_order_pick_cb(lv_event_t* e) {
+  if (!_instance) return;
+  _instance->_contacts_order = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+  if (_instance->_node_prefs) {
+    _instance->_node_prefs->contacts_order = (uint8_t)_instance->_contacts_order;
+    the_mesh.savePrefs();
+  }
+  _instance->refreshContactsFilterChecks();
+  _instance->rebuildContactsList();
+}
+
+void UITask::contacts_filt_pick_cb(lv_event_t* e) {
+  if (!_instance) return;
+  _instance->_contacts_filt = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+  if (_instance->_node_prefs) {
+    _instance->_node_prefs->contacts_filter = (uint8_t)_instance->_contacts_filt;
+    the_mesh.savePrefs();
+  }
+  _instance->refreshContactsFilterChecks();
+  _instance->rebuildContactsList();
 }
 
 void UITask::channel_clicked_cb(lv_event_t* e) {
@@ -320,20 +601,6 @@ void UITask::splash_dismiss_cb(lv_timer_t* t) {
 }
 
 // ---- Chat (conversation) screen ----------------------------------------
-
-void UITask::contact_clicked_cb(lv_event_t* e) {
-  if (!_instance) return;
-  lv_obj_t* btn = lv_event_get_target(e);
-  uint32_t key = (uint32_t)(uintptr_t)lv_obj_get_user_data(btn);
-  uint8_t pfx[4];
-  memcpy(pfx, &key, 4);
-  ContactInfo* c = the_mesh.lookupContactByPubKey(pfx, 4);
-  if (c) {
-    _instance->_chat_is_channel = false;
-    memcpy(_instance->_chat_pubkey, c->id.pub_key, 6);  // 6-byte prefix for sendMessage
-    _instance->openChat(c->name);
-  }
-}
 
 void UITask::chat_back_cb(lv_event_t* e) {
   (void)e;
@@ -1158,6 +1425,12 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _sensors = sensors;
   _node_prefs = node_prefs;
   _instance = this;
+
+  // Restore the saved contacts sort/filter (0xFF = unset -> keep code defaults).
+  if (_node_prefs) {
+    if (_node_prefs->contacts_order <= 2)  _contacts_order = _node_prefs->contacts_order;
+    if (_node_prefs->contacts_filter <= 5) _contacts_filt  = _node_prefs->contacts_filter;
+  }
 
   // Every variant that uses this LVGL UITask must derive its DISPLAY_CLASS
   // from LGFXDisplay so we can reach the underlying LovyanGFX device.

@@ -38,4 +38,6 @@ struct NodePrefs {  // persisted to file
   // by older firmware lacks these bytes, so they load as 0 = "unset, use default".
   uint8_t display_brightness;  // 8-bit LEDC backlight duty (1-255); 0 = board default
   uint8_t display_rotation;    // rotation index + 1 (1=rot0 .. 4=rot3); 0 = compile default
+  uint8_t contacts_order;      // contacts list sort: 0=A-Z,1=Heard,2=Latest; 0xFF = unset
+  uint8_t contacts_filter;     // contacts list filter: 0=All,1=Fav,2=Users,3=Rptr,4=Room,5=Sensor; 0xFF = unset
 };
