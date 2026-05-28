@@ -56,22 +56,73 @@ lv_obj_t* UITask::buildSplashScreen() {
   return scr;
 }
 
+static constexpr int HEADER_H   = 48;
+static constexpr int TABBAR_H   = 56;
+static constexpr uint32_t FG_HEX = 0xD1D5DB;  // tailwind gray-300
+static constexpr uint32_t DIM_HEX = 0x6B7280; // tailwind gray-500
+
 lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_t* scr = lv_obj_create(NULL);
   styleAsDarkScreen(scr);
+  lv_obj_set_style_pad_all(scr, 0, 0);
 
-  // Small wordmark as a header until we have a real status bar
-  lv_obj_t* header = lv_img_create(scr);
-  lv_img_set_src(header, &meshcore_logo_img);
-  lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 12);
+  // ----- header strip -----
+  lv_obj_t* header = lv_obj_create(scr);
+  lv_obj_set_size(header, _screen_w, HEADER_H);
+  lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 0);
+  lv_obj_set_style_bg_color(header, lv_color_hex(0x1F2937), 0);  // gray-800
+  lv_obj_set_style_bg_opa(header, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(header, 0, 0);
+  lv_obj_set_style_radius(header, 0, 0);
+  lv_obj_set_style_pad_all(header, 8, 0);
+  lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
 
-  _status_label = lv_label_create(scr);
-  lv_label_set_text(_status_label, "waiting for first packet...");
+  _header_label = lv_label_create(header);
+  lv_label_set_text(_header_label, "MeshCore");
+  lv_obj_set_style_text_color(_header_label, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(_header_label, &lv_font_montserrat_20, 0);
+  lv_obj_align(_header_label, LV_ALIGN_LEFT_MID, 4, 0);
+
+  // ----- tabbed body (tabs pinned to bottom) -----
+  _tabview = lv_tabview_create(scr, LV_DIR_BOTTOM, TABBAR_H);
+  lv_obj_set_size(_tabview, _screen_w, _screen_h - HEADER_H);
+  lv_obj_align(_tabview, LV_ALIGN_TOP_MID, 0, HEADER_H);
+  lv_obj_set_style_bg_color(_tabview, lv_color_hex(BG_HEX), 0);
+
+  // tab bar styling
+  lv_obj_t* tab_btns = lv_tabview_get_tab_btns(_tabview);
+  lv_obj_set_style_bg_color(tab_btns, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_text_color(tab_btns, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_color(tab_btns, lv_color_hex(FG_HEX),
+                              LV_PART_ITEMS | LV_STATE_CHECKED);
+  lv_obj_set_style_border_width(tab_btns, 0, 0);
+
+  // Three tabs in ~320 px = ~107 px each. Map lives behind context menus
+  // off contacts/channels, since it'll be referenced from those views.
+  _tab_contacts = lv_tabview_add_tab(_tabview, LV_SYMBOL_LIST     " Contacts");
+  _tab_channels = lv_tabview_add_tab(_tabview, LV_SYMBOL_WIFI     " Channels");
+  _tab_settings = lv_tabview_add_tab(_tabview, LV_SYMBOL_SETTINGS " Settings");
+
+  // ----- Contacts tab placeholder (will become the contacts list) -----
+  _status_label = lv_label_create(_tab_contacts);
+  lv_label_set_text(_status_label, "No contacts yet.\nWaiting for first packet...");
   lv_label_set_long_mode(_status_label, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(_status_label, _screen_w - 24);
-  lv_obj_set_style_text_color(_status_label, lv_color_hex(0xD1D5DB), 0);
+  lv_obj_set_style_text_color(_status_label, lv_color_hex(DIM_HEX), 0);
   lv_obj_set_style_text_align(_status_label, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_align(_status_label, LV_ALIGN_CENTER, 0, 0);
+
+  // ----- Channels tab placeholder -----
+  lv_obj_t* ch_placeholder = lv_label_create(_tab_channels);
+  lv_label_set_text(ch_placeholder, "Channels not implemented yet.");
+  lv_obj_set_style_text_color(ch_placeholder, lv_color_hex(DIM_HEX), 0);
+  lv_obj_center(ch_placeholder);
+
+  // ----- Settings tab placeholder -----
+  lv_obj_t* set_placeholder = lv_label_create(_tab_settings);
+  lv_label_set_text(set_placeholder, "Settings not implemented yet.");
+  lv_obj_set_style_text_color(set_placeholder, lv_color_hex(DIM_HEX), 0);
+  lv_obj_center(set_placeholder);
 
   return scr;
 }

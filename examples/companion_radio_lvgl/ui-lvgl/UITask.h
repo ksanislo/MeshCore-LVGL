@@ -15,7 +15,12 @@ class UITask : public AbstractUITask {
   int             _msgcount;
   lv_obj_t*       _splash_screen;
   lv_obj_t*       _home_screen;
-  lv_obj_t*       _status_label;
+  lv_obj_t*       _header_label;
+  lv_obj_t*       _tabview;
+  lv_obj_t*       _tab_contacts;
+  lv_obj_t*       _tab_channels;
+  lv_obj_t*       _tab_settings;
+  lv_obj_t*       _status_label;  // lives inside _tab_contacts for now
 
   // LVGL display + input. Resolution is read from the LGFX device after
   // setRotation, so this UITask doesn't care whether the variant chose
@@ -43,7 +48,11 @@ public:
     : AbstractUITask(board, serial),
       _lgfx(NULL), _node_prefs(NULL), _sensors(NULL),
       _started(false), _last_tick_ms(0), _msgcount(0),
-      _splash_screen(NULL), _home_screen(NULL), _status_label(NULL),
+      _splash_screen(NULL), _home_screen(NULL),
+      _header_label(NULL),
+      _tabview(NULL),
+      _tab_contacts(NULL), _tab_channels(NULL), _tab_settings(NULL),
+      _status_label(NULL),
       _screen_w(0), _screen_h(0),
       _buf1(NULL), _buf2(NULL) {}
 
