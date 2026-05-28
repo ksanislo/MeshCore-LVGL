@@ -108,6 +108,13 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_set_style_text_font(_header_label, &lv_font_montserrat_20, 0);
   lv_obj_align(_header_label, LV_ALIGN_LEFT_MID, 4, 0);
 
+  // Live device clock (right side of the header), updated once a second in loop().
+  _clock_label = lv_label_create(header);
+  lv_label_set_text(_clock_label, "--");
+  lv_obj_set_style_text_color(_clock_label, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_font(_clock_label, &lv_font_montserrat_14, 0);
+  lv_obj_align(_clock_label, LV_ALIGN_RIGHT_MID, -4, 0);
+
   // ----- tabbed body (tabs pinned to bottom) -----
   _tabview = lv_tabview_create(scr, LV_DIR_BOTTOM, TABBAR_H);
   lv_obj_set_size(_tabview, _screen_w, _screen_h - HEADER_H);
@@ -2072,9 +2079,10 @@ void UITask::cinfo_telemetry_cb(lv_event_t* e) {
   if (!_instance) return;
   ContactInfo* c = _instance->cinfoContact();
   if (!c) return;
-  uint32_t tag = 0, est = 0;
-  the_mesh.sendRequest(*c, 0x03 /*REQ_TYPE_GET_TELEMETRY_DATA*/, tag, est);
-  _instance->showToast("Telemetry requested");
+  // requestTelemetry records the pending tag so the reply is matched and routed
+  // back to telemetryResponse() (a bare sendRequest wouldn't be matched).
+  bool ok = the_mesh.requestTelemetry(*c);
+  _instance->showToast(ok ? "Telemetry requested..." : "Telemetry send failed");
 }
 
 void UITask::cinfo_clearpath_cb(lv_event_t* e) {
@@ -2777,6 +2785,10 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_width(_set_rot_dd, LV_PCT(100));
   lv_obj_add_event_cb(_set_rot_dd, set_rot_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  // Local-time offset for the header clock. Entered in hours (decimals OK for
+  // half/quarter-hour zones, e.g. 5.5, 5.75, -3.5); stored as minutes.
+  _set_tz_ta = makeNumberField(body, "UTC offset (hours)", set_tz_ta_event_cb);
+
   // Shared on-screen keyboard for the settings textareas. Parented to the home
   // screen so it overlays the tabview; hidden until a field is focused.
   _set_kb = lv_keyboard_create(parent);
@@ -2832,6 +2844,12 @@ void UITask::populateSettings() {
   lv_slider_set_value(_set_bright_slider, pct, LV_ANIM_OFF);
 
   lv_dropdown_set_selected(_set_rot_dd, _lgfx ? (_lgfx->getRotation() & 3) : 0);
+
+  if (_set_tz_ta) {
+    char tb[16];
+    snprintf(tb, sizeof(tb), "%g", _node_prefs->tz_offset_minutes / 60.0);
+    lv_textarea_set_text(_set_tz_ta, tb);
+  }
 }
 
 void UITask::commitNodeName() {
@@ -2940,6 +2958,7 @@ void UITask::set_kb_event_cb(lv_event_t* e) {
     if (_instance->_set_active_ta == _instance->_set_name_ta) _instance->commitNodeName();
     else if (_instance->_set_active_ta == _instance->_set_lat_ta ||
              _instance->_set_active_ta == _instance->_set_lon_ta) _instance->commitPosition();
+    else if (_instance->_set_active_ta == _instance->_set_tz_ta) _instance->commitTz();
     _instance->_set_active_ta = NULL;
     lv_obj_add_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
   }
@@ -3009,6 +3028,32 @@ void UITask::commitPosition() {
   _sensors->node_lat = atof(lv_textarea_get_text(_set_lat_ta));
   _sensors->node_lon = atof(lv_textarea_get_text(_set_lon_ta));
   the_mesh.savePrefs();
+}
+
+void UITask::commitTz() {
+  if (!_set_tz_ta || !_node_prefs) return;
+  long m = lround(atof(lv_textarea_get_text(_set_tz_ta)) * 60.0);  // hours -> minutes
+  if (m < -720) m = -720;   // UTC-12:00
+  if (m > 840) m = 840;     // UTC+14:00
+  _node_prefs->tz_offset_minutes = (int16_t)m;
+  the_mesh.savePrefs();
+}
+
+void UITask::set_tz_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    _instance->_set_active_ta = ta;
+    lv_keyboard_set_textarea(_instance->_set_kb, ta);
+    lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
+    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_set_kb);
+    lv_obj_scroll_to_view(ta, LV_ANIM_OFF);
+  } else if (code == LV_EVENT_DEFOCUSED) {
+    _instance->commitTz();
+  }
 }
 
 void UITask::set_pos_ta_event_cb(lv_event_t* e) {
@@ -3120,6 +3165,133 @@ void UITask::sharepos_confirm_cb(lv_event_t* e) {
   _instance->showToast("Position sharing on");
 }
 
+// ----- Reusable info modal (telemetry now; repeater status/CLI later) --------
+void UITask::info_close_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance && _instance->_info_popup) lv_obj_add_flag(_instance->_info_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::showInfoPopup(const char* title, const char* body) {
+  if (!_info_popup) {
+    _info_popup = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(_info_popup, _screen_w, _screen_h);
+    lv_obj_set_pos(_info_popup, 0, 0);
+    lv_obj_set_style_bg_color(_info_popup, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(_info_popup, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(_info_popup, 0, 0);
+    lv_obj_set_style_pad_all(_info_popup, 0, 0);
+    lv_obj_add_flag(_info_popup, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_info_popup, [](lv_event_t* ev) {  // tap backdrop closes
+      if (_instance && lv_event_get_target(ev) == _instance->_info_popup)
+        lv_obj_add_flag(_instance->_info_popup, LV_OBJ_FLAG_HIDDEN);
+    }, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* card = lv_obj_create(_info_popup);
+    lv_obj_set_width(card, LV_PCT(86));
+    lv_obj_set_height(card, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(card, LV_PCT(80), 0);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_pad_all(card, 14, 0);
+    lv_obj_set_style_pad_row(card, 10, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+
+    _info_title_lbl = lv_label_create(card);
+    lv_obj_set_style_text_color(_info_title_lbl, lv_color_hex(0x60A5FA), 0);
+    lv_obj_set_style_text_font(_info_title_lbl, &lv_font_montserrat_16, 0);
+
+    _info_body_lbl = lv_label_create(card);
+    lv_label_set_long_mode(_info_body_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(_info_body_lbl, LV_PCT(100));
+    lv_obj_set_style_text_color(_info_body_lbl, lv_color_hex(0xF3F4F6), 0);
+
+    lv_obj_t* ok = lv_btn_create(card);
+    lv_obj_add_event_cb(ok, info_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* okl = lv_label_create(ok);
+    lv_label_set_text(okl, "Close");
+  }
+  lv_label_set_text(_info_title_lbl, title);
+  lv_label_set_text(_info_body_lbl, body);
+  lv_obj_clear_flag(_info_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_info_popup);
+}
+
+// CayenneLPP type codes we decode for telemetry display (subset of the standard).
+enum {
+  LPP_T_ANALOG_INPUT = 2, LPP_T_LUMINOSITY = 101, LPP_T_TEMPERATURE = 103,
+  LPP_T_HUMIDITY = 104, LPP_T_BAROMETER = 115, LPP_T_VOLTAGE = 116,
+  LPP_T_CURRENT = 117, LPP_T_PERCENTAGE = 120, LPP_T_GPS = 136
+};
+
+void UITask::telemetryResponse(const char* from_name, const uint8_t* lpp, uint8_t lpp_len) {
+  char body[320];
+  size_t o = 0;
+  int i = 0;
+  while (i + 2 <= lpp_len && o + 1 < sizeof(body)) {
+    uint8_t ch = lpp[i++];
+    uint8_t type = lpp[i++];
+    char line[48];
+    line[0] = 0;
+    switch (type) {
+      case LPP_T_VOLTAGE:
+        if (i + 2 > lpp_len) { i = lpp_len; break; }
+        snprintf(line, sizeof(line), "Battery: %.2f V", ((lpp[i] << 8) | lpp[i + 1]) / 100.0);
+        i += 2; break;
+      case LPP_T_TEMPERATURE: {
+        if (i + 2 > lpp_len) { i = lpp_len; break; }
+        int16_t v = (int16_t)((lpp[i] << 8) | lpp[i + 1]);
+        snprintf(line, sizeof(line), "Temp: %.1f C", v / 10.0);
+        i += 2; break; }
+      case LPP_T_HUMIDITY:
+        if (i + 1 > lpp_len) { i = lpp_len; break; }
+        snprintf(line, sizeof(line), "Humidity: %.1f %%", lpp[i] / 2.0);
+        i += 1; break;
+      case LPP_T_BAROMETER:
+        if (i + 2 > lpp_len) { i = lpp_len; break; }
+        snprintf(line, sizeof(line), "Pressure: %.1f hPa", ((lpp[i] << 8) | lpp[i + 1]) / 10.0);
+        i += 2; break;
+      case LPP_T_ANALOG_INPUT: {
+        if (i + 2 > lpp_len) { i = lpp_len; break; }
+        int16_t v = (int16_t)((lpp[i] << 8) | lpp[i + 1]);
+        snprintf(line, sizeof(line), "Analog %u: %.2f", ch, v / 100.0);
+        i += 2; break; }
+      case LPP_T_LUMINOSITY:
+        if (i + 2 > lpp_len) { i = lpp_len; break; }
+        snprintf(line, sizeof(line), "Light: %u lux", (unsigned)((lpp[i] << 8) | lpp[i + 1]));
+        i += 2; break;
+      case LPP_T_CURRENT:
+        if (i + 2 > lpp_len) { i = lpp_len; break; }
+        snprintf(line, sizeof(line), "Current: %.3f A", ((lpp[i] << 8) | lpp[i + 1]) / 1000.0);
+        i += 2; break;
+      case LPP_T_PERCENTAGE:
+        if (i + 1 > lpp_len) { i = lpp_len; break; }
+        snprintf(line, sizeof(line), "Level: %u%%", lpp[i]);
+        i += 1; break;
+      case LPP_T_GPS: {
+        if (i + 9 > lpp_len) { i = lpp_len; break; }
+        int32_t lat = (lpp[i] << 16) | (lpp[i + 1] << 8) | lpp[i + 2];
+        int32_t lon = (lpp[i + 3] << 16) | (lpp[i + 4] << 8) | lpp[i + 5];
+        if (lat & 0x800000) lat |= 0xFF000000;
+        if (lon & 0x800000) lon |= 0xFF000000;
+        snprintf(line, sizeof(line), "GPS: %.4f, %.4f", lat / 10000.0, lon / 10000.0);
+        i += 9; break; }
+      default:
+        i = lpp_len;  // unknown type: size unknown, stop decoding
+        break;
+    }
+    if (line[0]) o += snprintf(body + o, sizeof(body) - o, "%s%s", o ? "\n" : "", line);
+  }
+  if (o == 0) snprintf(body, sizeof(body), "(no readable telemetry)");
+  char nm[CHAT_PEER_NAME_MAX + 4];
+  sanitizeForFont(from_name && from_name[0] ? from_name : "?", nm, sizeof(nm));
+  char title[CHAT_PEER_NAME_MAX + 16];
+  snprintf(title, sizeof(title), "Telemetry: %s", nm);
+  showInfoPopup(title, body);
+}
+
 void UITask::loop() {
   if (!_started) return;
   uint32_t now = millis();
@@ -3127,6 +3299,20 @@ void UITask::loop() {
   if (delta > 0) {
     lv_tick_inc(delta);
     _last_tick_ms = now;
+  }
+
+  // Live header clock (1 Hz). getCurrentTime() is the internal RTC -- no bus traffic.
+  if (_clock_label) {
+    uint32_t secs = the_mesh.getRTCClock()->getCurrentTime();
+    if (secs != _clock_last) {
+      _clock_last = secs;
+      time_t t = (time_t)secs + (_node_prefs ? _node_prefs->tz_offset_minutes * 60 : 0);
+      struct tm tmv;
+      gmtime_r(&t, &tmv);  // gmtime of (UTC + offset) = local wall time
+      char buf[24];
+      strftime(buf, sizeof(buf), "%m-%d %H:%M:%S", &tmv);
+      lv_label_set_text(_clock_label, buf);
+    }
   }
 
   // Throttled contacts refresh (set dirty by newMsg).

@@ -165,6 +165,15 @@ protected:
 
 public:
   void savePrefs() { _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon); }
+  // Request telemetry from a contact AND record the tag so onContactResponse()
+  // matches the reply (the on-device UI calls this; the BLE path sets the tag
+  // in its own CMD handler). Returns false if the send failed.
+  bool requestTelemetry(const ContactInfo& c) {
+    uint32_t tag = 0, est = 0;
+    if (sendRequest(c, REQ_TYPE_GET_TELEMETRY_DATA, tag, est) == MSG_SEND_FAILED) return false;
+    pending_telemetry = tag;
+    return true;
+  }
   void saveContacts() { _store->saveContacts(this); }  // public: on-device UI edits contacts
   // Persist a single edited contact in place (crash-safe vs the full rewrite).
   // Use for field edits only (add/remove change indices -> use saveContacts()).

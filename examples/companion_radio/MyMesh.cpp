@@ -716,6 +716,9 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     memcpy(&out_frame[i], &data[4], len - 4);
     i += (len - 4);
     _serial->writeFrame(out_frame, i);
+#ifdef DISPLAY_CLASS
+    if (_ui) _ui->telemetryResponse(contact.name, &data[4], len - 4);
+#endif
   } else if (len > 4 && tag == pending_req) {  // check for matching response tag
     pending_req = 0;
 

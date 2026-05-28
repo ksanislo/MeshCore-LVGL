@@ -21,6 +21,8 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _splash_screen;
   lv_obj_t*       _home_screen;
   lv_obj_t*       _header_label;
+  lv_obj_t*       _clock_label;         // live device clock in the home header
+  uint32_t        _clock_last;          // last shown second (1 Hz throttle)
   lv_obj_t*       _tabview;
   lv_obj_t*       _tab_contacts;
   lv_obj_t*       _tab_channels;
@@ -125,6 +127,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_path_dd;
   lv_obj_t*       _set_bright_slider;
   lv_obj_t*       _set_rot_dd;
+  lv_obj_t*       _set_tz_ta;           // UTC offset (hours) for local-time display
   lv_obj_t*       _set_kb;
   lv_obj_t*       _set_active_ta;       // settings textarea currently being edited
   lv_obj_t*       _set_key_ta;          // read-only self public key (scrolls horizontally)
@@ -132,6 +135,11 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_lon_ta;
   lv_obj_t*       _set_sharepos;        // "share position" checkbox
   lv_obj_t*       _confirm_popup;       // share-position warning modal (top layer)
+
+  // Reusable info modal (telemetry response now; repeater status/CLI later).
+  lv_obj_t*       _info_popup;
+  lv_obj_t*       _info_title_lbl;
+  lv_obj_t*       _info_body_lbl;
 
   // Tiny internal clipboard (no OS/LVGL clipboard on-device). Copy fills it;
   // the chat compose "+" menu can paste it.
@@ -281,12 +289,16 @@ class UITask : public AbstractUITask {
   static void radio_preset_cb(lv_event_t* e);
   static void radio_preset_pick_cb(lv_event_t* e);
   void      commitPosition();
+  void      commitTz();
+  static void set_tz_ta_event_cb(lv_event_t* e);
   void      showSharePosWarning();
   static void set_copykey_cb(lv_event_t* e);
   static void set_pos_ta_event_cb(lv_event_t* e);
   static void set_sharepos_cb(lv_event_t* e);
   static void sharepos_confirm_cb(lv_event_t* e);
   static void sharepos_cancel_cb(lv_event_t* e);
+  void      showInfoPopup(const char* title, const char* body);
+  static void info_close_cb(lv_event_t* e);
   static void insert_paste_cb(lv_event_t* e);
 
   // Share-as-QR screen
@@ -301,7 +313,7 @@ public:
       _lgfx(NULL), _node_prefs(NULL), _sensors(NULL),
       _started(false), _last_tick_ms(0), _msgcount(0),
       _splash_screen(NULL), _home_screen(NULL),
-      _header_label(NULL),
+      _header_label(NULL), _clock_label(NULL), _clock_last(0),
       _tabview(NULL),
       _tab_contacts(NULL), _tab_channels(NULL), _tab_settings(NULL),
       _contacts_table(NULL), _contacts_search_ta(NULL), _contacts_kb(NULL),
@@ -327,8 +339,9 @@ public:
       _path_screen(NULL), _path_size_dd(NULL), _path_ta(NULL), _path_kb(NULL), _path_err(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
-      _set_rot_dd(NULL), _set_kb(NULL), _set_active_ta(NULL), _set_key_ta(NULL),
+      _set_rot_dd(NULL), _set_tz_ta(NULL), _set_kb(NULL), _set_active_ta(NULL), _set_key_ta(NULL),
       _set_lat_ta(NULL), _set_lon_ta(NULL), _set_sharepos(NULL), _confirm_popup(NULL),
+      _info_popup(NULL), _info_title_lbl(NULL), _info_body_lbl(NULL),
       _qr_screen(NULL), _qr_code(NULL), _qr_name_lbl(NULL), _qr_key_lbl(NULL),
       _qr_return_screen(NULL),
       _screen_w(0), _screen_h(0),
@@ -352,6 +365,7 @@ public:
   void msgRead(int msgcount) override;
   void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) override;
   void sentMsg(const char* peer, const char* text) override;
+  void telemetryResponse(const char* from_name, const uint8_t* lpp, uint8_t lpp_len) override;
   void notify(UIEventType t = UIEventType::none) override;
   void loop() override;
 };

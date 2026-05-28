@@ -252,10 +252,12 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     _prefs.display_rotation = 0;                                                           // 138
     _prefs.contacts_order = 0xFF;                                                          // 139 (0xFF = unset)
     _prefs.contacts_filter = 0xFF;                                                         // 140 (0xFF = unset)
+    _prefs.tz_offset_minutes = 0;                                                          // 141 (default UTC)
     file.read((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
     file.read((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
     file.read((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
     file.read((uint8_t *)&_prefs.contacts_filter, sizeof(_prefs.contacts_filter));         // 140
+    file.read((uint8_t *)&_prefs.tz_offset_minutes, sizeof(_prefs.tz_offset_minutes));     // 141
 
     file.close();
   }
@@ -301,6 +303,7 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
     file.write((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
     file.write((uint8_t *)&_prefs.contacts_filter, sizeof(_prefs.contacts_filter));         // 140
+    file.write((uint8_t *)&_prefs.tz_offset_minutes, sizeof(_prefs.tz_offset_minutes));     // 141
 
     file.close();
   }
