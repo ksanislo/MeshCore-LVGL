@@ -1,0 +1,54 @@
+#pragma once
+
+#include <Arduino.h>
+#include <lvgl.h>
+#include "../../companion_radio/AbstractUITask.h"
+#include "../../companion_radio/NodePrefs.h"
+#include "../../../variants/elecrow_crowpanel_advance_35/CrowPanelLGFX.h"
+
+class UITask : public AbstractUITask {
+  CrowPanelLGFX*  _lgfx;
+  NodePrefs*      _node_prefs;
+  SensorManager*  _sensors;
+  bool            _started;
+  uint32_t        _last_tick_ms;
+  int             _msgcount;
+  lv_obj_t*       _status_label;
+
+  // LVGL display + input
+  static constexpr uint16_t kScreenW = 480;
+  static constexpr uint16_t kScreenH = 320;
+  static constexpr uint16_t kBufferLines = 40;
+
+  lv_disp_draw_buf_t _draw_buf;
+  lv_color_t*        _buf1;
+  lv_color_t*        _buf2;
+  lv_disp_drv_t      _disp_drv;
+  lv_indev_drv_t     _indev_drv;
+
+  static UITask* _instance;
+  static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p);
+  static void touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data);
+
+  void buildHomeScreen();
+
+public:
+  UITask(mesh::MainBoard* board, BaseSerialInterface* serial)
+    : AbstractUITask(board, serial),
+      _lgfx(NULL), _node_prefs(NULL), _sensors(NULL),
+      _started(false), _last_tick_ms(0), _msgcount(0),
+      _status_label(NULL),
+      _buf1(NULL), _buf2(NULL) {}
+
+  void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
+
+  bool hasDisplay() const { return _started; }
+  bool isBuzzerQuiet() { return true; }
+  void shutdown(bool restart = false) { (void)restart; }
+
+  // AbstractUITask overrides
+  void msgRead(int msgcount) override;
+  void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) override;
+  void notify(UIEventType t = UIEventType::none) override;
+  void loop() override;
+};
