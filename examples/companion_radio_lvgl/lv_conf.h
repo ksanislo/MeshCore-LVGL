@@ -14,13 +14,16 @@
 #define LV_COLOR_MIX_ROUND_OFS          (LV_COLOR_DEPTH == 32 ? 0 : 128)
 #define LV_COLOR_CHROMA_KEY             lv_color_hex(0x00ff00)
 
-// Route LVGL's object heap to PSRAM (see lv_mem_psram.h). Keeps the widget
-// pool out of internal SRAM, which is reserved for DMA framebuffers.
-#define LV_MEM_CUSTOM                   1
-#define LV_MEM_CUSTOM_INCLUDE           "lv_mem_psram.h"
-#define LV_MEM_CUSTOM_ALLOC             ps_malloc
-#define LV_MEM_CUSTOM_FREE              free
-#define LV_MEM_CUSTOM_REALLOC           ps_realloc
+// Keep LVGL's own O(1) TLSF allocator, but back its pool with one big PSRAM
+// block grabbed at init (LV_MEM_POOL_ALLOC). This keeps internal SRAM free
+// for DMA framebuffers WITHOUT routing LVGL's per-render allocation churn
+// through the ESP-IDF heap -- doing the latter (LV_MEM_CUSTOM=1 + ps_malloc)
+// fragmented the PSRAM heap and caused multi-hundred-ms render stalls.
+#define LV_MEM_CUSTOM                   0
+#define LV_MEM_SIZE                     (256U * 1024U)
+#define LV_MEM_ADR                      0  // 0 => pool from LV_MEM_POOL_ALLOC
+#define LV_MEM_POOL_INCLUDE             "lv_mem_psram.h"
+#define LV_MEM_POOL_ALLOC               ps_malloc
 #define LV_MEM_BUF_MAX_NUM              16
 #define LV_MEMCPY_MEMSET_STD            1
 

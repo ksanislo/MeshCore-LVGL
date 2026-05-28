@@ -23,13 +23,15 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _contacts_list;       // lv_list inside _tab_contacts
   lv_obj_t*       _contacts_empty;      // "no contacts yet" label, shown when list is empty
   lv_obj_t*       _status_label;        // header status (bottom of contacts tab)
+  bool            _contacts_dirty;      // set by newMsg(), serviced (throttled) in loop()
+  uint32_t        _contacts_rebuilt_ms; // last rebuild time
 
   // LVGL display + input. Resolution is read from the LGFX device after
   // setRotation, so this UITask doesn't care whether the variant chose
   // portrait or landscape.
   uint16_t _screen_w;
   uint16_t _screen_h;
-  static constexpr uint16_t kBufferLines = 40;
+  static constexpr uint16_t kBufferLines = 64;  // target; falls back if RAM tight
 
   lv_disp_draw_buf_t _draw_buf;
   lv_color_t*        _buf1;
@@ -57,6 +59,7 @@ public:
       _tabview(NULL),
       _tab_contacts(NULL), _tab_channels(NULL), _tab_settings(NULL),
       _contacts_list(NULL), _contacts_empty(NULL), _status_label(NULL),
+      _contacts_dirty(false), _contacts_rebuilt_ms(0),
       _screen_w(0), _screen_h(0),
       _buf1(NULL), _buf2(NULL) {}
 

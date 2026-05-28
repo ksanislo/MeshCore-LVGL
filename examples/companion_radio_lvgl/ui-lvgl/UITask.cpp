@@ -16,10 +16,15 @@ void UITask::disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t
   uint32_t w = area->x2 - area->x1 + 1;
   uint32_t h = area->y2 - area->y1 + 1;
   LGFX_Device& lcd = *_instance->_lgfx;
+  // No endWrite(): leaving the transaction open returns immediately after
+  // queuing the DMA, so LVGL can render the next chunk (other buffer) while
+  // this one transfers. The next flush's setAddrWindow waits for this DMA via
+  // bus serialization, and double-buffering guarantees a buffer's DMA is done
+  // before LVGL cycles back to reuse it. SPI2 is display-only (bus_shared=0),
+  // so holding CS is fine.
   lcd.startWrite();
   lcd.setAddrWindow(area->x1, area->y1, w, h);
-  lcd.writePixels((lgfx::rgb565_t*)color_p, w * h);
-  lcd.endWrite();
+  lcd.writePixelsDMA((lgfx::rgb565_t*)color_p, w * h);
   lv_disp_flush_ready(drv);
 }
 
@@ -28,13 +33,11 @@ void UITask::touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     data->state = LV_INDEV_STATE_REL;
     return;
   }
-  int32_t x, y;
   uint16_t tx = 0, ty = 0;
   if (_instance->_lgfx->getTouch(&tx, &ty)) {
-    x = tx; y = ty;
     data->state = LV_INDEV_STATE_PR;
-    data->point.x = x;
-    data->point.y = y;
+    data->point.x = tx;
+    data->point.y = ty;
   } else {
     data->state = LV_INDEV_STATE_REL;
   }
@@ -92,6 +95,9 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_set_size(_tabview, _screen_w, _screen_h - HEADER_H);
   lv_obj_align(_tabview, LV_ALIGN_TOP_MID, 0, HEADER_H);
   lv_obj_set_style_bg_color(_tabview, lv_color_hex(BG_HEX), 0);
+  // Instant tab switches: the content scroll otherwise animates, repainting
+  // the whole viewport many times per switch.
+  lv_obj_set_style_anim_time(lv_tabview_get_content(_tabview), 0, 0);
 
   // tab bar styling
   lv_obj_t* tab_btns = lv_tabview_get_tab_btns(_tabview);
@@ -184,6 +190,8 @@ void UITask::addContactRow(const ContactInfo& c, uint32_t now_secs) {
 
 void UITask::rebuildContactsList() {
   if (!_contacts_list) return;
+  _contacts_dirty = false;
+  _contacts_rebuilt_ms = millis();
   lv_obj_clean(_contacts_list);
 
   uint32_t now_secs = the_mesh.getRTCClock()->getCurrentTime();
@@ -251,11 +259,19 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 
   lv_init();
 
-  const size_t buf_pixels = (size_t)_screen_w * kBufferLines;
-  _buf1 = (lv_color_t*)heap_caps_malloc(buf_pixels * sizeof(lv_color_t),
-                                        MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-  _buf2 = (lv_color_t*)heap_caps_malloc(buf_pixels * sizeof(lv_color_t),
-                                        MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  // Two DMA-capable internal buffers for double-buffered, pipelined flush.
+  // Bigger buffers => fewer flush chunks => less per-transaction overhead.
+  // Fall back to fewer lines if internal DMA RAM is tight.
+  size_t buf_pixels = 0;
+  for (uint16_t lines = kBufferLines; lines >= 24; lines -= 8) {
+    size_t px = (size_t)_screen_w * lines;
+    size_t bytes = px * sizeof(lv_color_t);
+    _buf1 = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    _buf2 = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (_buf1 && _buf2) { buf_pixels = px; break; }
+    if (_buf1) { heap_caps_free(_buf1); _buf1 = NULL; }
+    if (_buf2) { heap_caps_free(_buf2); _buf2 = NULL; }
+  }
   lv_disp_draw_buf_init(&_draw_buf, _buf1, _buf2, buf_pixels);
 
   lv_disp_drv_init(&_disp_drv);
@@ -290,9 +306,10 @@ void UITask::msgRead(int msgcount) {
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
   (void)path_len; (void)from_name; (void)text;
   _msgcount = msgcount;
-  // Cheap and correct: full rebuild on any message. Optimize later when
-  // we have selective per-row updates.
-  rebuildContactsList();
+  // Don't repaint the list on every packet -- mark dirty and let loop()
+  // rebuild at most once every few seconds. Avoids repaint storms under
+  // mesh traffic. (Selective per-row updates are the eventual fix.)
+  _contacts_dirty = true;
 }
 
 void UITask::notify(UIEventType t) {
@@ -307,5 +324,11 @@ void UITask::loop() {
     lv_tick_inc(delta);
     _last_tick_ms = now;
   }
+
+  // Throttled contacts refresh (set dirty by newMsg).
+  if (_contacts_dirty && now - _contacts_rebuilt_ms >= 3000) {
+    rebuildContactsList();
+  }
+
   lv_timer_handler();
 }
