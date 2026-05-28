@@ -5,6 +5,11 @@
 #include <helpers/ui/LGFXDisplay.h>
 #include "../../companion_radio/AbstractUITask.h"
 #include "../../companion_radio/NodePrefs.h"
+#include "MessageStore.h"
+
+#ifndef CHAT_HISTORY_CAP
+  #define CHAT_HISTORY_CAP 48
+#endif
 
 class UITask : public AbstractUITask {
   LGFX_Device*    _lgfx;
@@ -22,9 +27,18 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _tab_settings;
   lv_obj_t*       _contacts_list;       // lv_list inside _tab_contacts
   lv_obj_t*       _contacts_empty;      // "no contacts yet" label, shown when list is empty
+  lv_obj_t*       _channels_list;       // lv_list inside _tab_channels
   lv_obj_t*       _status_label;        // header status (bottom of contacts tab)
   bool            _contacts_dirty;      // set by newMsg(), serviced (throttled) in loop()
   uint32_t        _contacts_rebuilt_ms; // last rebuild time
+
+  // Chat (conversation) screen. Three-band: fixed top bar / scrollable history
+  // / fixed compose band (compose added with the keyboard step).
+  RamMessageStore<CHAT_HISTORY_CAP> _msgs;
+  lv_obj_t*       _chat_screen;
+  lv_obj_t*       _chat_title;          // contact name in the chat top bar
+  lv_obj_t*       _chat_history;        // scrollable message container (the VSA band)
+  char            _chat_peer[CHAT_PEER_NAME_MAX];  // peer whose chat is open ("" = none)
 
   // LVGL display + input. Resolution is read from the LGFX device after
   // setRotation, so this UITask doesn't care whether the variant chose
@@ -48,6 +62,13 @@ class UITask : public AbstractUITask {
   lv_obj_t* buildHomeScreen();
   void      rebuildContactsList();
   void      addContactRow(const struct ContactInfo& c, uint32_t now_secs);
+  void      rebuildChannelsList();
+  static void channel_clicked_cb(lv_event_t* e);
+
+  void      openChat(const char* peer_name);
+  void      rebuildChatHistory();
+  static void contact_clicked_cb(lv_event_t* e);
+  static void chat_back_cb(lv_event_t* e);
 
 public:
   UITask(mesh::MainBoard* board, BaseSerialInterface* serial)
@@ -58,10 +79,11 @@ public:
       _header_label(NULL),
       _tabview(NULL),
       _tab_contacts(NULL), _tab_channels(NULL), _tab_settings(NULL),
-      _contacts_list(NULL), _contacts_empty(NULL), _status_label(NULL),
+      _contacts_list(NULL), _contacts_empty(NULL), _channels_list(NULL), _status_label(NULL),
       _contacts_dirty(false), _contacts_rebuilt_ms(0),
+      _chat_screen(NULL), _chat_title(NULL), _chat_history(NULL),
       _screen_w(0), _screen_h(0),
-      _buf1(NULL), _buf2(NULL) {}
+      _buf1(NULL), _buf2(NULL) { _chat_peer[0] = 0; }
 
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 

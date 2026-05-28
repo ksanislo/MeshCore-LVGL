@@ -142,11 +142,14 @@ lv_obj_t* UITask::buildHomeScreen() {
 
   _status_label = NULL;  // not used here yet; reserved for future status bar
 
-  // ----- Channels tab placeholder -----
-  lv_obj_t* ch_placeholder = lv_label_create(_tab_channels);
-  lv_label_set_text(ch_placeholder, "Channels not implemented yet.");
-  lv_obj_set_style_text_color(ch_placeholder, lv_color_hex(DIM_HEX), 0);
-  lv_obj_center(ch_placeholder);
+  // ----- Channels tab: scrollable list -----
+  lv_obj_set_style_pad_all(_tab_channels, 0, 0);
+  _channels_list = lv_list_create(_tab_channels);
+  lv_obj_set_size(_channels_list, LV_PCT(100), LV_PCT(100));
+  lv_obj_set_style_bg_color(_channels_list, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(_channels_list, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(_channels_list, 0, 0);
+  lv_obj_set_style_pad_row(_channels_list, 0, 0);
 
   // ----- Settings tab placeholder -----
   lv_obj_t* set_placeholder = lv_label_create(_tab_settings);
@@ -190,6 +193,13 @@ void UITask::addContactRow(const ContactInfo& c, uint32_t now_secs) {
   lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, 0);
   lv_obj_set_style_border_width(btn, 1, 0);
 
+  // Tap -> open chat. Stash the 4-byte pubkey prefix in user_data (no
+  // allocation, survives list rebuilds); resolve it back to a contact on tap.
+  uint32_t key = 0;
+  memcpy(&key, c.id.pub_key, 4);
+  lv_obj_set_user_data(btn, (void*)(uintptr_t)key);
+  lv_obj_add_event_cb(btn, contact_clicked_cb, LV_EVENT_CLICKED, NULL);
+
   char ago[16];
   formatLastSeen(ago, sizeof(ago), c.lastmod, now_secs);
   lv_obj_t* age = lv_label_create(btn);
@@ -232,12 +242,188 @@ void UITask::rebuildContactsList() {
   else            lv_obj_add_flag(_contacts_empty,  LV_OBJ_FLAG_HIDDEN);
 }
 
+void UITask::channel_clicked_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* btn = lv_event_get_target(e);
+  int idx = (int)(intptr_t)lv_obj_get_user_data(btn);
+  ChannelDetails ch;
+  if (the_mesh.getChannel(idx, ch) && ch.name[0]) _instance->openChat(ch.name);
+}
+
+void UITask::rebuildChannelsList() {
+  if (!_channels_list) return;
+  lv_obj_clean(_channels_list);
+
+  // getChannel() returns true for any in-range slot incl. empty ones, so skip
+  // slots with no name. The Public channel is added on every boot (MyMesh).
+  for (int idx = 0; idx < MAX_GROUP_CHANNELS; idx++) {
+    ChannelDetails ch;
+    if (!the_mesh.getChannel(idx, ch) || ch.name[0] == 0) continue;
+
+    char label[40];
+    snprintf(label, sizeof(label), "# %s", ch.name);
+    lv_obj_t* btn = lv_list_add_btn(_channels_list, NULL, label);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(BG_HEX), 0);
+    lv_obj_set_style_text_color(btn, lv_color_hex(FG_HEX), 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x374151), 0);
+    lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_user_data(btn, (void*)(intptr_t)idx);
+    lv_obj_add_event_cb(btn, channel_clicked_cb, LV_EVENT_CLICKED, NULL);
+  }
+}
+
 void UITask::splash_dismiss_cb(lv_timer_t* t) {
   UITask* self = static_cast<UITask*>(t->user_data);
   if (self->_home_screen) {
     lv_scr_load_anim(self->_home_screen, LV_SCR_LOAD_ANIM_FADE_IN, 300, 0, false);
   }
   lv_timer_del(t);
+}
+
+// ---- Chat (conversation) screen ----------------------------------------
+
+void UITask::contact_clicked_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* btn = lv_event_get_target(e);
+  uint32_t key = (uint32_t)(uintptr_t)lv_obj_get_user_data(btn);
+  uint8_t pfx[4];
+  memcpy(pfx, &key, 4);
+  ContactInfo* c = the_mesh.lookupContactByPubKey(pfx, 4);
+  if (c) _instance->openChat(c->name);
+}
+
+void UITask::chat_back_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->_chat_peer[0] = 0;
+  lv_scr_load(_instance->_home_screen);  // keep chat screen allocated for reuse
+}
+
+void UITask::rebuildChatHistory() {
+  if (!_chat_history) return;
+  lv_obj_clean(_chat_history);
+
+  const ChatMessage* msgs[CHAT_HISTORY_CAP];
+  int n = _msgs.messagesFor(_chat_peer, msgs, CHAT_HISTORY_CAP);
+
+  if (n == 0) {
+    lv_obj_t* empty = lv_label_create(_chat_history);
+    lv_label_set_text(empty, "No messages yet.");
+    lv_obj_set_style_text_color(empty, lv_color_hex(DIM_HEX), 0);
+    lv_obj_center(empty);
+    return;
+  }
+
+  char last_sender[CHAT_PEER_NAME_MAX] = "";
+  bool last_outgoing = false;
+  bool first = true;
+
+  for (int i = 0; i < n; i++) {
+    const ChatMessage* m = msgs[i];
+
+    // Incoming bubbles get a sender-name header, but only at the start of a
+    // run of consecutive messages from the same sender. Outgoing bubbles
+    // (ours) never show a name.
+    bool show_name = !m->outgoing &&
+                     (first || last_outgoing ||
+                      strncmp(last_sender, m->sender, CHAT_PEER_NAME_MAX) != 0);
+    if (show_name) {
+      lv_obj_t* name = lv_label_create(_chat_history);  // flex child, left by default
+      lv_label_set_text(name, m->sender[0] ? m->sender : "?");
+      lv_obj_set_style_text_color(name, lv_color_hex(0x9CA3AF), 0);  // gray-400
+      lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+    }
+
+    // Full-width row wrapper so we can left/right-align the bubble inside it
+    // (flex columns can't per-item cross-align).
+    lv_obj_t* row = lv_obj_create(_chat_history);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* bubble = lv_obj_create(row);
+    lv_obj_set_width(bubble, LV_PCT(80));
+    lv_obj_set_height(bubble, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(bubble, 8, 0);
+    lv_obj_set_style_border_width(bubble, 0, 0);
+    lv_obj_set_style_radius(bubble, 10, 0);
+    lv_obj_clear_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
+    // sent = blue, right-aligned; received = gray-700, left-aligned
+    lv_obj_set_style_bg_color(bubble, lv_color_hex(m->outgoing ? 0x2563EB : 0x374151), 0);
+    lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, 0);
+    lv_obj_align(bubble, m->outgoing ? LV_ALIGN_TOP_RIGHT : LV_ALIGN_TOP_LEFT, 0, 0);
+
+    lv_obj_t* lbl = lv_label_create(bubble);
+    lv_label_set_text(lbl, m->text);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl, LV_PCT(100));
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xF3F4F6), 0);
+
+    strncpy(last_sender, m->sender, CHAT_PEER_NAME_MAX - 1);
+    last_sender[CHAT_PEER_NAME_MAX - 1] = 0;
+    last_outgoing = m->outgoing;
+    first = false;
+  }
+
+  // Scroll to newest.
+  lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
+}
+
+void UITask::openChat(const char* peer_name) {
+  strncpy(_chat_peer, peer_name ? peer_name : "", CHAT_PEER_NAME_MAX - 1);
+  _chat_peer[CHAT_PEER_NAME_MAX - 1] = 0;
+
+  // Build the screen skeleton once; reuse it across contacts.
+  if (!_chat_screen) {
+    _chat_screen = lv_obj_create(NULL);
+    styleAsDarkScreen(_chat_screen);
+    lv_obj_set_style_pad_all(_chat_screen, 0, 0);
+
+    // Fixed top bar (back + title).
+    lv_obj_t* bar = lv_obj_create(_chat_screen);
+    lv_obj_set_size(bar, _screen_w, HEADER_H);
+    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_radius(bar, 0, 0);
+    lv_obj_set_style_pad_all(bar, 6, 0);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* back = lv_btn_create(bar);
+    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_width(back, 0, 0);
+    lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_add_event_cb(back, chat_back_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* back_lbl = lv_label_create(back);
+    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(back_lbl, lv_color_hex(FG_HEX), 0);
+
+    _chat_title = lv_label_create(bar);
+    lv_obj_set_style_text_color(_chat_title, lv_color_hex(FG_HEX), 0);
+    lv_obj_set_style_text_font(_chat_title, &lv_font_montserrat_20, 0);
+    lv_obj_align(_chat_title, LV_ALIGN_LEFT_MID, 40, 0);
+
+    // Scrollable history band (the future hardware-scroll VSA).
+    _chat_history = lv_obj_create(_chat_screen);
+    lv_obj_set_size(_chat_history, _screen_w, _screen_h - HEADER_H);
+    lv_obj_align(_chat_history, LV_ALIGN_TOP_MID, 0, HEADER_H);
+    lv_obj_set_style_bg_color(_chat_history, lv_color_hex(BG_HEX), 0);
+    lv_obj_set_style_bg_opa(_chat_history, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(_chat_history, 0, 0);
+    lv_obj_set_style_radius(_chat_history, 0, 0);
+    lv_obj_set_style_pad_all(_chat_history, 8, 0);
+    lv_obj_set_style_pad_row(_chat_history, 6, 0);
+    lv_obj_set_flex_flow(_chat_history, LV_FLEX_FLOW_COLUMN);
+  }
+
+  lv_label_set_text(_chat_title, _chat_peer);
+  rebuildChatHistory();
+  lv_scr_load(_chat_screen);
 }
 
 void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs) {
@@ -299,6 +485,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _splash_screen = buildSplashScreen();
   _home_screen   = buildHomeScreen();
   rebuildContactsList();
+  rebuildChannelsList();
   lv_scr_load(_splash_screen);
 
   // Auto-dismiss splash after a brief dwell. Single-shot via lv_timer_del.
@@ -313,9 +500,46 @@ void UITask::msgRead(int msgcount) {
   _msgcount = msgcount;
 }
 
+// True if `name` matches a configured channel (vs a contact).
+static bool nameIsChannel(const char* name) {
+  if (!name) return false;
+  for (int idx = 0; idx < MAX_GROUP_CHANNELS; idx++) {
+    ChannelDetails ch;
+    if (the_mesh.getChannel(idx, ch) && ch.name[0] &&
+        strncmp(ch.name, name, sizeof(ch.name)) == 0) return true;
+  }
+  return false;
+}
+
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
-  (void)path_len; (void)from_name; (void)text;
+  (void)path_len;
   _msgcount = msgcount;
+
+  // For channel messages the wire text is "<sender>: <msg>" and from_name is
+  // the channel name. Split out the real sender. For DMs the sender is the
+  // contact (from_name) and the text is already clean.
+  const char* sender = from_name;
+  const char* body   = text;
+  char sender_buf[CHAT_PEER_NAME_MAX];
+  if (text && nameIsChannel(from_name)) {
+    const char* sep = strstr(text, ": ");
+    if (sep) {
+      size_t slen = sep - text;
+      if (slen >= sizeof(sender_buf)) slen = sizeof(sender_buf) - 1;
+      memcpy(sender_buf, text, slen);
+      sender_buf[slen] = 0;
+      sender = sender_buf;
+      body   = sep + 2;
+    }
+  }
+
+  _msgs.append(false, from_name, sender, body, the_mesh.getRTCClock()->getCurrentTime());
+
+  // If this peer's chat is currently open, refresh it live.
+  if (_chat_screen && from_name && strncmp(from_name, _chat_peer, CHAT_PEER_NAME_MAX) == 0) {
+    rebuildChatHistory();
+  }
+
   // Don't repaint the list on every packet -- mark dirty and let loop()
   // rebuild at most once every few seconds. Avoids repaint storms under
   // mesh traffic. (Selective per-row updates are the eventual fix.)
