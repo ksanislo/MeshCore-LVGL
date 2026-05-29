@@ -47,10 +47,10 @@ class UITask : public AbstractUITask {
   char            _contacts_filter[40]; // search substring
   lv_obj_t*       _channels_list;       // lv_list inside _tab_channels
   lv_obj_t*       _status_label;        // header status (bottom of contacts tab)
-  bool            _contacts_dirty;      // set by newMsg(), serviced (throttled) in loop()
+  bool            _contacts_dirty;      // message-store "latest" re-sort pending (set on new msg)
   uint32_t        _contacts_rebuilt_ms; // last rebuild time
-  uint32_t        _contacts_sig;        // change-detect signature (add/remove/favourite/rename)
-  uint32_t        _contacts_check_ms;   // last signature poll
+  bool            _contacts_pending;    // snapshot changed -> rebuild contacts when its tab is shown
+  bool            _channels_pending;    // snapshot changed -> rebuild channels when its tab is shown
 
   // Sorted/filtered view of the address book (favourites first, then recency).
   // Holds indices only -- no per-contact widgets -- so it scales to a full book.
@@ -390,7 +390,7 @@ public:
       _cfilt_filt_grp(NULL), _contacts_order(1), _contacts_filt(0),
       _channels_list(NULL), _status_label(NULL),
       _contacts_dirty(false), _contacts_rebuilt_ms(0),
-      _contacts_sig(0), _contacts_check_ms(0), _crow_count(0),
+      _contacts_pending(false), _channels_pending(false), _crow_count(0),
       _pick_popup(NULL), _pick_table(NULL), _pick_sb(NULL), _pick_search_ta(NULL), _pick_kb(NULL),
       _pick_title(NULL), _pick_action(0), _prow_count(0),
       _chat_screen(NULL), _chat_title(NULL), _chat_history(NULL), _chat_sb(NULL),

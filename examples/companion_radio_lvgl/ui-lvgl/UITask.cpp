@@ -3904,22 +3904,32 @@ void UITask::loop() {
 
   // Rebuild the contacts/channels lists when the backend publishes a new snapshot
   // (contact add/remove/rename/favourite, or prefs changed over BLE/serial).
-  // Throttle: a busy network churns contacts, and rebuildContactsList is heavy
-  // (filter + sort + table cells, copying contacts out of PSRAM). Rebuilding on
-  // every publish would hitch input when a tap lands mid-rebuild, so cap it to
-  // ~1/sec. The version stays stale until the throttle elapses, so nothing is lost.
+  // A snapshot change (contact add/remove/rename/favourite, prefs, channels) just
+  // MARKS the lists pending -- it does not rebuild here. rebuildContactsList is
+  // heavy (filter + sort + table cells, copying contacts out of PSRAM); rebuilding
+  // an off-screen list is exactly what hitches input while you're elsewhere.
   uint32_t sv = mproxy::snapshotVersion();
-  if (sv != _last_snap_version && now - _contacts_rebuilt_ms >= 1000) {
+  if (sv != _last_snap_version) {
     _last_snap_version = sv;
     if (const NodePrefs* p = mproxy::prefsSnap()) *_node_prefs = *p;  // pick up backend-side pref edits
-    rebuildContactsList();
-    rebuildChannelsList();
+    _contacts_pending = true;
+    _channels_pending = true;
   }
 
-  // "Latest message" re-sort depends on the message store (not the snapshot), so
-  // still rebuild on the dirty flag set when a message arrives/sends.
-  if (_contacts_dirty && now - _contacts_rebuilt_ms >= 3000) {
-    rebuildContactsList();
+  // Service a pending rebuild only when that list's tab is actually on screen
+  // (home screen + that tab active), lightly throttled so churn-while-viewing
+  // doesn't jank the scroll. Switching to a tab services it within one frame.
+  // Tabs: 0 = Contacts, 1 = Channels, 2 = Settings. _contacts_dirty is the
+  // message-store "latest" re-sort (independent of the snapshot).
+  if (lv_scr_act() == _home_screen && _tabview) {
+    int tab = (int)lv_tabview_get_tab_act(_tabview);
+    if (tab == 0 && (_contacts_pending || _contacts_dirty) && now - _contacts_rebuilt_ms >= 800) {
+      _contacts_pending = false;
+      rebuildContactsList();   // also clears _contacts_dirty + sets _contacts_rebuilt_ms
+    } else if (tab == 1 && _channels_pending) {
+      _channels_pending = false;
+      rebuildChannelsList();
+    }
   }
 
   lv_timer_handler();
