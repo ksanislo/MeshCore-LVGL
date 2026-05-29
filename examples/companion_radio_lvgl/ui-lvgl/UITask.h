@@ -182,6 +182,19 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_lat_ta;
   lv_obj_t*       _set_lon_ta;
   lv_obj_t*       _set_sharepos;        // "share position" checkbox
+  // Telemetry policy (who may request our base/location/environment telemetry).
+  lv_obj_t*       _set_telem_base_dd;
+  lv_obj_t*       _set_telem_loc_dd;
+  lv_obj_t*       _set_telem_env_dd;
+  // Advanced section.
+  lv_obj_t*       _set_autoadd_chk;     // auto-add heard contacts (inverse of manual_add_contacts)
+  lv_obj_t*       _set_autoadd_hops_dd; // auto-add max hops
+  lv_obj_t*       _set_rxboost_chk;     // SX126x RX boosted gain (reboot to apply)
+  lv_obj_t*       _set_multiack_ta;     // extra ACK transmit count
+  lv_obj_t*       _set_rxdelay_ta;      // RX delay base (seconds)
+  lv_obj_t*       _set_airtime_ta;      // airtime budget factor
+  lv_obj_t*       _set_gps_chk;         // enable optional UART GPS (reboot to apply)
+  lv_obj_t*       _set_gps_interval_ta; // GPS auto-update interval (seconds)
   lv_obj_t*       _confirm_popup;       // share-position warning modal (top layer)
 
   // Reusable info modal (telemetry response now; repeater status/CLI later).
@@ -368,6 +381,15 @@ class UITask : public AbstractUITask {
   static void set_tz_ta_event_cb(lv_event_t* e);
   static void set_clock_cb(lv_event_t* e);
   static void set_history_cb(lv_event_t* e);
+  // Phase-1 additions: telemetry policy + advanced toggles + share-me.
+  static void set_telem_cb(lv_event_t* e);          // user_data 0/1/2 = base/loc/env
+  static void set_autoadd_cb(lv_event_t* e);
+  static void set_autoadd_hops_cb(lv_event_t* e);
+  static void set_rxboost_cb(lv_event_t* e);
+  static void set_advnum_ta_event_cb(lv_event_t* e); // multiack / rxdelay / airtime / gps-interval fields
+  void      commitAdvNumbers();
+  static void set_gps_cb(lv_event_t* e);             // enable optional UART GPS
+  static void set_shareme_cb(lv_event_t* e);         // export own contact as QR
   void      showSharePosWarning();
   static void set_copykey_cb(lv_event_t* e);
   static void set_pos_ta_event_cb(lv_event_t* e);
@@ -420,7 +442,12 @@ public:
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
       _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_history_chk(NULL), _set_kb(NULL),
       _set_active_ta(NULL), _set_key_ta(NULL),
-      _set_lat_ta(NULL), _set_lon_ta(NULL), _set_sharepos(NULL), _confirm_popup(NULL),
+      _set_lat_ta(NULL), _set_lon_ta(NULL), _set_sharepos(NULL),
+      _set_telem_base_dd(NULL), _set_telem_loc_dd(NULL), _set_telem_env_dd(NULL),
+      _set_autoadd_chk(NULL), _set_autoadd_hops_dd(NULL), _set_rxboost_chk(NULL),
+      _set_multiack_ta(NULL), _set_rxdelay_ta(NULL), _set_airtime_ta(NULL),
+      _set_gps_chk(NULL), _set_gps_interval_ta(NULL),
+      _confirm_popup(NULL),
       _info_popup(NULL), _info_title_lbl(NULL), _info_body_lbl(NULL),
       _qr_screen(NULL), _qr_code(NULL), _qr_name_lbl(NULL), _qr_key_lbl(NULL),
       _qr_return_screen(NULL),

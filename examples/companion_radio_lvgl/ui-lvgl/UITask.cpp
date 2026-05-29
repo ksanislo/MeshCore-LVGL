@@ -3230,6 +3230,14 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_sharepos, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_sharepos, set_sharepos_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  // Export our own contact as a scannable QR (reuses the share-QR screen).
+  lv_obj_t* shareme = lv_btn_create(body);
+  lv_obj_set_width(shareme, LV_PCT(100));
+  lv_obj_add_event_cb(shareme, set_shareme_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* sml = lv_label_create(shareme);
+  lv_label_set_text(sml, LV_SYMBOL_DOWNLOAD " Share my contact (QR)");
+  lv_obj_center(sml);
+
   // ===== Radio (edit fields, then a single Apply) =====
   // Header row: "Radio" title on the left, a "Preset" button on the right.
   lv_obj_t* rhdr = lv_obj_create(body);
@@ -3276,6 +3284,51 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_dropdown_set_options(_set_path_dd, "1 byte\n2 bytes\n3 bytes");
   lv_obj_set_width(_set_path_dd, LV_PCT(100));
   lv_obj_add_event_cb(_set_path_dd, set_pathmode_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  // ===== Telemetry policy (who may request our telemetry) =====
+  addSettingsSection(body, "Telemetry");
+  static const char* TELEM_OPTS = "Deny\nAllow (flagged)\nAllow all";  // -> TELEM_MODE_DENY/ALLOW_FLAGS/ALLOW_ALL
+  _set_telem_base_dd = makeDropdownField(body, "Base (device status)", TELEM_OPTS);
+  lv_obj_set_user_data(_set_telem_base_dd, (void*)(intptr_t)0);
+  lv_obj_add_event_cb(_set_telem_base_dd, set_telem_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  _set_telem_loc_dd = makeDropdownField(body, "Location (GPS)", TELEM_OPTS);
+  lv_obj_set_user_data(_set_telem_loc_dd, (void*)(intptr_t)1);
+  lv_obj_add_event_cb(_set_telem_loc_dd, set_telem_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  _set_telem_env_dd = makeDropdownField(body, "Environment (sensors)", TELEM_OPTS);
+  lv_obj_set_user_data(_set_telem_env_dd, (void*)(intptr_t)2);
+  lv_obj_add_event_cb(_set_telem_env_dd, set_telem_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  // ===== Advanced (mesh behaviour) =====
+  addSettingsSection(body, "Advanced");
+  _set_autoadd_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_autoadd_chk, "Auto-add heard contacts");
+  lv_obj_set_style_text_color(_set_autoadd_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_autoadd_chk, set_autoadd_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  lv_obj_t* fah = makeField(body, "Auto-add max hops");
+  _set_autoadd_hops_dd = lv_dropdown_create(fah);   // index 0..4 maps 1:1 to autoadd_max_hops
+  lv_dropdown_set_options(_set_autoadd_hops_dd, "No limit\nDirect only\nUp to 1 hop\nUp to 2 hops\nUp to 3 hops");
+  lv_obj_set_width(_set_autoadd_hops_dd, LV_PCT(100));
+  lv_obj_add_event_cb(_set_autoadd_hops_dd, set_autoadd_hops_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  _set_rxboost_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_rxboost_chk, "RX boosted gain (reboot to apply)");
+  lv_obj_set_style_text_color(_set_rxboost_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_rxboost_chk, set_rxboost_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  _set_multiack_ta = makeNumberField(body, "Extra ACK count (multi-ack)", set_advnum_ta_event_cb);
+  _set_rxdelay_ta  = makeNumberField(body, "RX delay base (s)", set_advnum_ta_event_cb);
+  _set_airtime_ta  = makeNumberField(body, "Airtime factor", set_advnum_ta_event_cb);
+
+#if ENV_INCLUDE_GPS
+  // ===== GPS (optional module on the rear UART plug) =====
+  addSettingsSection(body, "GPS");
+  _set_gps_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_gps_chk, "Enable GPS (UART plug; reboot to apply)");
+  lv_obj_set_style_text_color(_set_gps_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_gps_chk, set_gps_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  _set_gps_interval_ta = makeNumberField(body, "GPS update interval (s)", set_advnum_ta_event_cb);
+#endif
 
   // ===== Display =====
   addSettingsSection(body, "Display");
@@ -3406,6 +3459,32 @@ void UITask::populateSettings() {
     if (_node_prefs->persist_history != 0) lv_obj_add_state(_set_history_chk, LV_STATE_CHECKED);  // 0xFF/1 = on
     else                                   lv_obj_clear_state(_set_history_chk, LV_STATE_CHECKED);
   }
+
+  // Telemetry policy dropdowns (mode value maps 1:1 to the dropdown index).
+  if (_set_telem_base_dd) lv_dropdown_set_selected(_set_telem_base_dd, _node_prefs->telemetry_mode_base <= 2 ? _node_prefs->telemetry_mode_base : 0);
+  if (_set_telem_loc_dd)  lv_dropdown_set_selected(_set_telem_loc_dd,  _node_prefs->telemetry_mode_loc  <= 2 ? _node_prefs->telemetry_mode_loc  : 0);
+  if (_set_telem_env_dd)  lv_dropdown_set_selected(_set_telem_env_dd,  _node_prefs->telemetry_mode_env  <= 2 ? _node_prefs->telemetry_mode_env  : 0);
+
+  // Advanced
+  if (_set_autoadd_chk) {
+    if (!_node_prefs->manual_add_contacts) lv_obj_add_state(_set_autoadd_chk, LV_STATE_CHECKED);  // auto-add on == manual off
+    else                                   lv_obj_clear_state(_set_autoadd_chk, LV_STATE_CHECKED);
+  }
+  if (_set_autoadd_hops_dd) lv_dropdown_set_selected(_set_autoadd_hops_dd, _node_prefs->autoadd_max_hops <= 4 ? _node_prefs->autoadd_max_hops : 0);
+  if (_set_rxboost_chk) {
+    if (_node_prefs->rx_boosted_gain) lv_obj_add_state(_set_rxboost_chk, LV_STATE_CHECKED);
+    else                              lv_obj_clear_state(_set_rxboost_chk, LV_STATE_CHECKED);
+  }
+  char nb[24];
+  if (_set_multiack_ta) { snprintf(nb, sizeof(nb), "%u", _node_prefs->multi_acks);    lv_textarea_set_text(_set_multiack_ta, nb); }
+  if (_set_rxdelay_ta)  { snprintf(nb, sizeof(nb), "%g", _node_prefs->rx_delay_base);  lv_textarea_set_text(_set_rxdelay_ta, nb); }
+  if (_set_airtime_ta)  { snprintf(nb, sizeof(nb), "%g", _node_prefs->airtime_factor); lv_textarea_set_text(_set_airtime_ta, nb); }
+
+  if (_set_gps_chk) {
+    if (_node_prefs->gps_enabled) lv_obj_add_state(_set_gps_chk, LV_STATE_CHECKED);
+    else                          lv_obj_clear_state(_set_gps_chk, LV_STATE_CHECKED);
+  }
+  if (_set_gps_interval_ta) { snprintf(nb, sizeof(nb), "%u", _node_prefs->gps_interval); lv_textarea_set_text(_set_gps_interval_ta, nb); }
 }
 
 void UITask::commitNodeName() {
@@ -3639,6 +3718,94 @@ void UITask::set_history_cb(lv_event_t* e) {
     _instance->rebuildChatHistory();
   _instance->_contacts_dirty = true;        // "latest" sort reads the store
 #endif
+}
+
+void UITask::set_telem_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  lv_obj_t* dd = lv_event_get_target(e);
+  int which = (int)(intptr_t)lv_obj_get_user_data(dd);
+  uint8_t v = (uint8_t)lv_dropdown_get_selected(dd);   // 0/1/2 = Deny/Allow-flagged/Allow-all
+  if      (which == 0) _instance->_node_prefs->telemetry_mode_base = v;
+  else if (which == 1) _instance->_node_prefs->telemetry_mode_loc  = v;
+  else                 _instance->_node_prefs->telemetry_mode_env  = v;
+  pushPrefs();
+}
+
+void UITask::set_autoadd_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  _instance->_node_prefs->manual_add_contacts = on ? 0 : 1;  // auto-add on => manual add off
+  pushPrefs();
+}
+
+void UITask::set_autoadd_hops_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  _instance->_node_prefs->autoadd_max_hops = (uint8_t)lv_dropdown_get_selected(lv_event_get_target(e));
+  pushPrefs();
+}
+
+void UITask::set_rxboost_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  _instance->_node_prefs->rx_boosted_gain = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
+  pushPrefs();   // applied at radio init; nudge the user to reboot
+  _instance->showToast("Saved (reboot to apply RX gain)");
+}
+
+// Shared focus/commit handler for the Advanced numeric fields (multi-ack, RX delay, airtime).
+void UITask::set_advnum_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    _instance->_set_active_ta = ta;
+    lv_keyboard_set_textarea(_instance->_set_kb, ta);
+    lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
+    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_set_kb);
+    _instance->raiseFieldForKb(_instance->_tab_settings, _instance->_set_kb, ta);
+  } else if (code == LV_EVENT_DEFOCUSED) {
+    _instance->commitAdvNumbers();
+  }
+}
+
+void UITask::commitAdvNumbers() {
+  if (!_node_prefs) return;
+  if (_set_multiack_ta) {
+    int v = atoi(lv_textarea_get_text(_set_multiack_ta));
+    if (v < 0) v = 0; if (v > 5) v = 5;
+    _node_prefs->multi_acks = (uint8_t)v;
+  }
+  if (_set_rxdelay_ta) {
+    float v = atof(lv_textarea_get_text(_set_rxdelay_ta));
+    if (v < 0) v = 0; if (v > 20.0f) v = 20.0f;     // matches MyMesh::begin() clamp
+    _node_prefs->rx_delay_base = v;
+  }
+  if (_set_airtime_ta) {
+    float v = atof(lv_textarea_get_text(_set_airtime_ta));
+    if (v < 0) v = 0; if (v > 9.0f) v = 9.0f;        // matches MyMesh::begin() clamp
+    _node_prefs->airtime_factor = v;
+  }
+  if (_set_gps_interval_ta) {
+    long v = atol(lv_textarea_get_text(_set_gps_interval_ta));
+    if (v < 0) v = 0; if (v > 86400) v = 86400;      // matches MyMesh::begin() clamp (<=24h)
+    _node_prefs->gps_interval = (uint32_t)v;
+  }
+  pushPrefs();
+}
+
+void UITask::set_gps_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  _instance->_node_prefs->gps_enabled = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
+  pushPrefs();   // GPS is started from prefs at boot (applyGpsPrefs); apply on reboot
+  _instance->showToast("Saved (reboot to apply GPS)");
+}
+
+void UITask::set_shareme_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance || !_instance->_node_prefs) return;
+  _instance->openShareQR(mproxy::selfPubKey(), ADV_TYPE_CHAT,
+                         _instance->_node_prefs->node_name, _instance->_home_screen);
 }
 
 void UITask::set_tz_ta_event_cb(lv_event_t* e) {
