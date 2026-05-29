@@ -234,7 +234,15 @@ private:
     bool isChannelMsg() const;
   };
   int offline_queue_len;
+#ifdef ENABLE_PSRAM_OFFLINE_QUEUE
+  // Opt-in: the offline store-and-forward queue (large at big OFFLINE_QUEUE_SIZE,
+  // touched only on queue/dequeue -- not the per-packet path) lives in PSRAM,
+  // allocated once in begin(). Index-based access, so source-compatible with the
+  // static array. See helpers/MeshPSRAM.h.
+  Frame* offline_queue;
+#else
   Frame offline_queue[OFFLINE_QUEUE_SIZE];
+#endif
 
   struct AckTableEntry {
     unsigned long msg_sent;
