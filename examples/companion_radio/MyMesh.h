@@ -25,6 +25,7 @@
 
 #include "DataStore.h"
 #include "NodePrefs.h"
+#include "NodeStats.h"
 
 #include <RTClib.h>
 #include <helpers/ArduinoHelpers.h>
@@ -185,6 +186,7 @@ public:
   }
   void saveContacts() { _store->saveContacts(this); }  // public: on-device UI edits contacts
   void saveChannels() { _store->saveChannels(this); }  // public: on-device UI adds channels
+  void getNodeStats(NodeStats& s);                     // public: on-device node-info screen
   // Persist a single edited contact in place (crash-safe vs the full rewrite).
   // Use for field edits only (add/remove change indices -> use saveContacts()).
   bool saveContact(const ContactInfo& c) {

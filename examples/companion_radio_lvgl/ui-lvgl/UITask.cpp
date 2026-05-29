@@ -3353,6 +3353,112 @@ void UITask::newchan_kb_event_cb(lv_event_t* e) {
   }
 }
 
+// ===== Node-info / status screen =========================================
+
+void UITask::buildNodeInfoScreen() {
+  if (_nodeinfo_screen) return;
+  _nodeinfo_screen = lv_obj_create(NULL);
+  styleAsDarkScreen(_nodeinfo_screen);
+  lv_obj_set_style_pad_all(_nodeinfo_screen, 0, 0);
+
+  lv_obj_t* bar = lv_obj_create(_nodeinfo_screen);
+  lv_obj_set_size(bar, _screen_w, HEADER_H);
+  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
+  lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(bar, 0, 0);
+  lv_obj_set_style_radius(bar, 0, 0);
+  lv_obj_set_style_pad_all(bar, 6, 0);
+  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t* back = lv_btn_create(bar);
+  lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_shadow_width(back, 0, 0);
+  lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_add_event_cb(back, nodeinfo_back_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* bl = lv_label_create(back);
+  lv_label_set_text(bl, LV_SYMBOL_LEFT);
+  lv_obj_set_style_text_color(bl, lv_color_hex(FG_HEX), 0);
+  lv_obj_t* bt = lv_label_create(bar);
+  lv_label_set_text(bt, "Node Info");
+  lv_obj_set_style_text_color(bt, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(bt, &lv_font_montserrat_20, 0);
+  lv_obj_align(bt, LV_ALIGN_LEFT_MID, 40, 0);
+
+  lv_obj_t* body = lv_obj_create(_nodeinfo_screen);
+  lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
+  lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
+  lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(body, 0, 0);
+  lv_obj_set_style_pad_all(body, 12, 0);
+
+  _nodeinfo_lbl = lv_label_create(body);
+  lv_obj_set_width(_nodeinfo_lbl, LV_PCT(100));
+  lv_label_set_long_mode(_nodeinfo_lbl, LV_LABEL_LONG_WRAP);
+  lv_obj_set_style_text_color(_nodeinfo_lbl, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(_nodeinfo_lbl, &lv_font_montserrat_14, 0);
+  lv_label_set_text(_nodeinfo_lbl, "");
+}
+
+void UITask::refreshNodeInfo() {
+  if (!_nodeinfo_lbl) return;
+  NodeStats st;
+  mproxy::getStats(st);
+
+  uint32_t up = st.uptime_secs;
+  uint32_t d = up / 86400, h = (up % 86400) / 3600, m = (up % 3600) / 60, sec = up % 60;
+  uint32_t freeRam = heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024;
+  uint32_t minRam  = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024;
+  uint32_t freePs  = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024;
+
+  char keyhex[2 * PUB_KEY_SIZE + 1] = "";
+  if (mproxy::selfPubKey()) mesh::Utils::toHex(keyhex, mproxy::selfPubKey(), PUB_KEY_SIZE);
+
+  const NodePrefs* p = _node_prefs;
+  char buf[700];
+  int n = 0;
+  n += snprintf(buf + n, sizeof(buf) - n, "Name: %s\n", p ? p->node_name : "?");
+  n += snprintf(buf + n, sizeof(buf) - n, "Key: %.16s...\n", keyhex);
+  if (p) n += snprintf(buf + n, sizeof(buf) - n, "Radio: %g MHz  SF%u  BW%g  CR%u  %ddBm\n",
+                       p->freq, p->sf, p->bw, p->cr, (int)p->tx_power_dbm);
+  n += snprintf(buf + n, sizeof(buf) - n, "Uptime: %ud %uh %um %us\n", d, h, m, sec);
+  n += snprintf(buf + n, sizeof(buf) - n, "Free RAM: %u KB (min %u)\n", freeRam, minRam);
+  n += snprintf(buf + n, sizeof(buf) - n, "Free PSRAM: %u KB\n", freePs);
+  n += snprintf(buf + n, sizeof(buf) - n, "TX flood/direct: %u / %u\n", st.sent_flood, st.sent_direct);
+  n += snprintf(buf + n, sizeof(buf) - n, "RX flood/direct: %u / %u\n", st.recv_flood, st.recv_direct);
+  n += snprintf(buf + n, sizeof(buf) - n, "PHY sent/recv/err: %u / %u / %u\n", st.pkts_sent, st.pkts_recv, st.recv_errors);
+  n += snprintf(buf + n, sizeof(buf) - n, "Last RSSI: %d dBm  SNR: %.2f dB\n", (int)st.last_rssi, st.last_snr_q4 / 4.0);
+  n += snprintf(buf + n, sizeof(buf) - n, "Noise floor: %d\n", (int)st.noise_floor);
+  n += snprintf(buf + n, sizeof(buf) - n, "Airtime TX/RX: %us / %us\n", st.tx_air_secs, st.rx_air_secs);
+  n += snprintf(buf + n, sizeof(buf) - n, "Queue: %u   ErrFlags: 0x%02X", st.queue_len, st.err_flags);
+  lv_label_set_text(_nodeinfo_lbl, buf);
+}
+
+void UITask::openNodeInfo() {
+  buildNodeInfoScreen();
+  refreshNodeInfo();
+  if (!_nodeinfo_timer) _nodeinfo_timer = lv_timer_create(nodeinfo_timer_cb, 1000, this);
+  else                  lv_timer_resume(_nodeinfo_timer);
+  lv_scr_load(_nodeinfo_screen);
+}
+
+void UITask::nodeinfo_timer_cb(lv_timer_t* t) {
+  UITask* self = static_cast<UITask*>(t->user_data);
+  if (self) self->refreshNodeInfo();
+}
+
+void UITask::nodeinfo_back_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  if (_instance->_nodeinfo_timer) lv_timer_pause(_instance->_nodeinfo_timer);  // stop refresh when hidden
+  lv_scr_load(_instance->_home_screen);
+}
+
+void UITask::open_nodeinfo_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->openNodeInfo();
+}
+
 // ===== Settings tab ======================================================
 
 // A section heading (accent label with an underline divider) in the settings list.
@@ -3424,6 +3530,14 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_pad_all(body, 12, 0);
   lv_obj_set_style_pad_row(body, 8, 0);
   lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);  // tab page scrolls by default
+
+  // Node info / status screen (read-only health: uptime, RAM, packets, RSSI, ...).
+  lv_obj_t* ninfo = lv_btn_create(body);
+  lv_obj_set_width(ninfo, LV_PCT(100));
+  lv_obj_add_event_cb(ninfo, open_nodeinfo_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* nil = lv_label_create(ninfo);
+  lv_label_set_text(nil, LV_SYMBOL_LIST " Node Info");
+  lv_obj_center(nil);
 
   // ===== Public Info =====
   addSettingsSection(body, "Public Info");

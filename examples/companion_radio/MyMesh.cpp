@@ -2194,6 +2194,26 @@ void MyMesh::checkSerialInterface() {
   }
 }
 
+// Fill a NodeStats from the live dispatcher / radio / packet-manager counters --
+// same sources as the CMD_GET_STATS BLE path, for the on-device node-info screen.
+void MyMesh::getNodeStats(NodeStats& s) {
+  s.uptime_secs  = _ms->getMillis() / 1000;
+  s.err_flags    = _err_flags;
+  s.queue_len    = (uint8_t)_mgr->getOutboundTotal();
+  s.noise_floor  = (int16_t)_radio->getNoiseFloor();
+  s.last_rssi    = (int8_t)radio_driver.getLastRSSI();
+  s.last_snr_q4  = (int8_t)(radio_driver.getLastSNR() * 4);   // 0.25 dB units
+  s.tx_air_secs  = getTotalAirTime() / 1000;
+  s.rx_air_secs  = getReceiveAirTime() / 1000;
+  s.pkts_recv    = radio_driver.getPacketsRecv();
+  s.pkts_sent    = radio_driver.getPacketsSent();
+  s.recv_errors  = radio_driver.getPacketsRecvErrors();
+  s.sent_flood   = getNumSentFlood();
+  s.sent_direct  = getNumSentDirect();
+  s.recv_flood   = getNumRecvFlood();
+  s.recv_direct  = getNumRecvDirect();
+}
+
 void MyMesh::loop() {
   BaseChatMesh::loop();
 

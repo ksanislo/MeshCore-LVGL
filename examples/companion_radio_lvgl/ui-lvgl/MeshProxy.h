@@ -18,6 +18,7 @@
 #include <helpers/ContactInfo.h>
 #include <helpers/ChannelDetails.h>
 #include "../../companion_radio/NodePrefs.h"
+#include "../../companion_radio/NodeStats.h"
 #include "MessageStore.h"          // CHAT_MSG_TEXT_MAX / CHAT_PEER_NAME_MAX
 
 #ifndef MAX_CONTACTS
@@ -107,6 +108,7 @@ bool init();                       // alloc snapshot (PSRAM) + queues; call once
 // ---- Backend side (runs where `the_mesh` lives) ----------------------------
 void drainCommands(MyMesh& mesh);      // execute all queued commands
 bool publishIfChanged(MyMesh& mesh);   // rebuild + publish snapshot if anything changed; returns true if published
+void updateStats(MyMesh& mesh);        // refresh the live node-stats buffer (call each backend loop)
 void pushEvent(const UiEvent& ev);     // enqueue a cooked callback result
 
 // ---- UI side ---------------------------------------------------------------
@@ -119,6 +121,7 @@ int  getNumContacts();
 bool getContactByIdx(int idx, ContactInfo& out);
 const ContactInfo* lookupContactByPubKey(const uint8_t* key, int prefix_len);
 bool getChannel(int idx, ChannelDetails& out);
+void getStats(NodeStats& out);     // latest node/radio counters (display-only, lock-protected copy)
 bool getNameOverride(const uint8_t* pubkey, char* out, size_t cap);
 const NodePrefs* prefsSnap();      // current published prefs (UI seeds its working copy from this)
 uint32_t rtcSeconds();             // live device clock (ESP32 internal RTC; safe cross-core)

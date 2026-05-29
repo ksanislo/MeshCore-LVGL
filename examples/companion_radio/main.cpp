@@ -298,6 +298,7 @@ static void meshTask(void*) {
     mproxy::drainCommands(the_mesh);    // execute UI-posted commands against the_mesh
     the_mesh.loop();                    // process mesh; the 5 callbacks enqueue events
     mproxy::publishIfChanged(the_mesh); // republish the snapshot if anything changed
+    mproxy::updateStats(the_mesh);      // refresh live node-info counters (display-only)
     vTaskDelay(1);                      // yield a tick so idle/watchdog run
   }
 }

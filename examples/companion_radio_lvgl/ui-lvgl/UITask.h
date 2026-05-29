@@ -220,6 +220,11 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _newchan_err;
   lv_obj_t*       _newchan_kb;
 
+  // Node-info / status screen (read-only, periodically refreshed). Lazily built.
+  lv_obj_t*       _nodeinfo_screen;
+  lv_obj_t*       _nodeinfo_lbl;
+  lv_timer_t*     _nodeinfo_timer;
+
   // LVGL display + input. Resolution is read from the LGFX device after
   // setRotation, so this UITask doesn't care whether the variant chose
   // portrait or landscape.
@@ -419,6 +424,14 @@ class UITask : public AbstractUITask {
   bool      createChannelFromForm();
   void      openShareChannelQR(int idx);        // channel -> meshcore://channel/add QR
   static void kebab_chanshare_cb(lv_event_t* e); // channel chat kebab "Share"
+
+  // Node-info / status screen
+  void      buildNodeInfoScreen();
+  void      openNodeInfo();
+  void      refreshNodeInfo();
+  static void open_nodeinfo_cb(lv_event_t* e);
+  static void nodeinfo_back_cb(lv_event_t* e);
+  static void nodeinfo_timer_cb(lv_timer_t* t);
   static void newchan_open_cb(lv_event_t* e);   // "+ New channel" list entry
   static void newchan_back_cb(lv_event_t* e);
   static void newchan_save_cb(lv_event_t* e);
@@ -472,6 +485,7 @@ public:
       _qr_return_screen(NULL),
       _newchan_screen(NULL), _newchan_name_ta(NULL), _newchan_key_ta(NULL),
       _newchan_err(NULL), _newchan_kb(NULL),
+      _nodeinfo_screen(NULL), _nodeinfo_lbl(NULL), _nodeinfo_timer(NULL),
       _screen_w(0), _screen_h(0),
       _kb_scroll(NULL), _kb_scroll_pad(0),
       _buf1(NULL), _buf2(NULL), _msgs(&_rammsgs), _sd_off_ts(0),

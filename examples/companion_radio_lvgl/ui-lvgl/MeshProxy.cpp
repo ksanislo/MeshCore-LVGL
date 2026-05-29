@@ -37,6 +37,12 @@ static QueueHandle_t s_ev_q   = nullptr;
 static uint32_t s_last_sig    = 0;
 static uint32_t s_last_check_ms = 0;
 
+// Live node/radio stats: refreshed by the backend each loop, read by the UI's
+// node-info screen. Kept OUT of the snapshot signature (these change every second
+// and would otherwise force constant republishes). Guarded by s_snap_mtx; the data
+// is display-only so the tiny critical section is plenty.
+static NodeStats s_stats = {};
+
 // Buffer the UI reads from: the pinned one during a pass, else the published one.
 static inline const MeshSnapshot* readBuf() {
   return s_ui_cur ? s_ui_cur : s_buf[s_published];
@@ -253,6 +259,15 @@ void pushEvent(const UiEvent& ev) {
   if (s_ev_q) xQueueSend(s_ev_q, &ev, 0);
 }
 
+void updateStats(MyMesh& mesh) {
+  NodeStats t;
+  mesh.getNodeStats(t);                 // reads dispatcher/radio counters (backend core)
+  if (!s_snap_mtx) { s_stats = t; return; }
+  xSemaphoreTake(s_snap_mtx, portMAX_DELAY);
+  s_stats = t;
+  xSemaphoreGive(s_snap_mtx);
+}
+
 // ---- UI side ---------------------------------------------------------------
 void beginUiRead() {
   if (!s_snap_mtx) return;
@@ -300,6 +315,13 @@ bool getChannel(int idx, ChannelDetails& out) {
   if (!s || idx < 0 || idx >= MAX_GROUP_CHANNELS) return false;
   out = s->channels[idx];
   return true;
+}
+
+void getStats(NodeStats& out) {
+  if (!s_snap_mtx) { out = s_stats; return; }
+  xSemaphoreTake(s_snap_mtx, portMAX_DELAY);
+  out = s_stats;
+  xSemaphoreGive(s_snap_mtx);
 }
 
 bool getNameOverride(const uint8_t* pubkey, char* out, size_t cap) {
