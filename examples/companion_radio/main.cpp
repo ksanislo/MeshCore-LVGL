@@ -1,6 +1,11 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #include "MyMesh.h"
+#ifdef MESH_PROXY
+  // Dual-core split (CrowPanel LVGL companion): the UI talks to the mesh backend
+  // only through MeshProxy (snapshot + command/event queues). See MeshProxy.h.
+  #include "MeshProxy.h"
+#endif
 
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
@@ -104,6 +109,10 @@ MyMesh the_mesh(radio_driver, fast_rng, rtc_clock, tables, store
 void halt() {
   while (1) ;
 }
+
+#ifdef MESH_PROXY
+static void meshTask(void*);   // backend loop, pinned to core 0 (defined below)
+#endif
 
 void setup() {
   Serial.begin(115200);
@@ -217,16 +226,44 @@ void setup() {
   the_mesh.applyGpsPrefs();
 #endif
 
+#ifdef MESH_PROXY
+  if (!mproxy::init()) Serial.println("MeshProxy: init failed (PSRAM/queue alloc)");
+  mproxy::publishIfChanged(the_mesh);   // seed the first snapshot before the UI reads it
+#endif
+
 #ifdef DISPLAY_CLASS
   ui_task.begin(disp, &sensors, the_mesh.getNodePrefs());  // still want to pass this in as dependency, as prefs might be moved
 #endif
+
+#ifdef MESH_PROXY
+  // Start the backend last: the first snapshot is already published and the UI is
+  // initialized, so the task can churn immediately without the UI reading a blank.
+  xTaskCreatePinnedToCore(meshTask, "mesh", 16384, nullptr, 1, nullptr, 0);  // core 0
+#endif
 }
 
+#ifdef MESH_PROXY
+// The mesh/radio backend runs on its OWN FreeRTOS task pinned to core 0, so its
+// CPU-bound crypto (Ed25519/AES) runs in parallel with LVGL on core 1 instead of
+// blocking it. The UI talks to it only through MeshProxy: commands in, snapshot +
+// events out. Only the HSPI bus is shared (serialized by the Phase-A mutex).
+static void meshTask(void*) {
+  for (;;) {
+    mproxy::drainCommands(the_mesh);    // execute UI-posted commands against the_mesh
+    the_mesh.loop();                    // process mesh; the 5 callbacks enqueue events
+    mproxy::publishIfChanged(the_mesh); // republish the snapshot if anything changed
+    vTaskDelay(1);                      // yield a tick so idle/watchdog run
+  }
+}
+#endif
+
 void loop() {
-  the_mesh.loop();
+#ifndef MESH_PROXY
+  the_mesh.loop();   // single-core builds keep the mesh on the Arduino loop
+#endif
   sensors.loop();
 #ifdef DISPLAY_CLASS
-  ui_task.loop();
+  ui_task.loop();    // LVGL render + input + event drain, on core 1
 #endif
   rtc_clock.tick();
 }

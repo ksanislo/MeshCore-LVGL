@@ -69,6 +69,11 @@ void sd_bus_to_sd();
 void sd_bus_to_lora();
 bool sd_card_begin();
 #endif
+
+// Shared HSPI mutex (LoRa radio + SD). Take across any SD bus access span; the
+// radio takes it per SPI transaction via its HAL. See target.cpp.
+void hspi_lock();
+void hspi_unlock();
 extern CrowPanelRTCClock rtc_clock;
 extern EnvironmentSensorManager sensors;
 

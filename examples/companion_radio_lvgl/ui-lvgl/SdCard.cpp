@@ -11,14 +11,19 @@
 extern void sd_bus_to_sd();
 extern void sd_bus_to_lora();
 extern bool sd_card_begin();
+// Shared HSPI mutex (LoRa + SD), defined in the variant's target.cpp. Held
+// across the whole SD bus span so a re-pin never races the radio on the other
+// core. See target.cpp.
+extern void hspi_lock();
+extern void hspi_unlock();
 
 namespace SdSvc {
 
 static bool     s_mounted = false;
 static uint32_t s_retry_ms = 0;   // last (re)mount attempt
 
-Lock::Lock()  { sd_bus_to_sd(); }
-Lock::~Lock() { sd_bus_to_lora(); }
+Lock::Lock()  { hspi_lock(); sd_bus_to_sd(); }
+Lock::~Lock() { sd_bus_to_lora(); hspi_unlock(); }
 
 bool ready() { return s_mounted; }
 
@@ -143,6 +148,10 @@ static const EmojiEntry* findEntry(const EmojiIndex* idx, uint32_t cp) {
 static void* fs_open(lv_fs_drv_t* drv, const char* path, lv_fs_mode_t mode) {
   (void)drv; (void)mode;
   if (!ensureMounted()) return nullptr;
+  // Hold the HSPI mutex for the whole open..close span (released in fs_close, or
+  // on each failure path below). LVGL keeps the handle open across read/seek, so
+  // we can't use the RAII Lock here -- the lock must outlive this function.
+  hspi_lock();
   sd_bus_to_sd();
 
   int size; uint32_t cp;
@@ -151,10 +160,10 @@ static void* fs_open(lv_fs_drv_t* drv, const char* path, lv_fs_mode_t mode) {
     snprintf(bpath, sizeof(bpath), "/emoji/%d.bin", size);
     SdFsHandle* h = new SdFsHandle();
     h->f = sd.open(bpath, O_RDONLY);
-    if (!h->f.isOpen()) { delete h; sd_bus_to_lora(); return nullptr; }
+    if (!h->f.isOpen()) { delete h; sd_bus_to_lora(); hspi_unlock(); return nullptr; }
     EmojiIndex* idx = ensureIndex(size, h->f);
     const EmojiEntry* e = idx ? findEntry(idx, cp) : nullptr;
-    if (!e) { h->f.close(); delete h; sd_bus_to_lora(); return nullptr; }
+    if (!e) { h->f.close(); delete h; sd_bus_to_lora(); hspi_unlock(); return nullptr; }
     h->f.seekSet(e->off);
     h->base = e->off; h->len = e->len; h->pos = 0;
     return h;
@@ -162,7 +171,7 @@ static void* fs_open(lv_fs_drv_t* drv, const char* path, lv_fs_mode_t mode) {
 
   SdFsHandle* h = new SdFsHandle();
   h->f = sd.open(path, O_RDONLY);   // path is "/..." (drive letter already stripped)
-  if (!h->f.isOpen()) { delete h; sd_bus_to_lora(); return nullptr; }
+  if (!h->f.isOpen()) { delete h; sd_bus_to_lora(); hspi_unlock(); return nullptr; }
   h->base = 0; h->len = FULL; h->pos = 0;
   return h;
 }
@@ -172,6 +181,7 @@ static lv_fs_res_t fs_close(lv_fs_drv_t* drv, void* fp) {
   h->f.close();
   delete h;
   sd_bus_to_lora();
+  hspi_unlock();   // balances the hspi_lock() in fs_open
   return LV_FS_RES_OK;
 }
 static lv_fs_res_t fs_read(lv_fs_drv_t* drv, void* fp, void* buf, uint32_t btr, uint32_t* br) {

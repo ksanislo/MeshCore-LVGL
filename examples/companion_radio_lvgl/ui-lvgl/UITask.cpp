@@ -1,19 +1,22 @@
 #include "UITask.h"
 #include "meshcore_assets.h"
-#include "MyMesh.h"
+#include "MeshProxy.h"                  // UI talks to the backend only through this
 #include <helpers/AdvertDataHelpers.h>  // ADV_TYPE_*
+#include <helpers/ContactInfo.h>        // ContactInfo (read-model copies)
 #include <Utils.h>                      // mesh::Utils::toHex
 #include <esp_heap_caps.h>
 #include <ctype.h>                      // tolower (case-insensitive search)
 #include <strings.h>                    // strcasecmp (A-Z contact sort)
 
-// main.cpp owns the_mesh; we read contacts/channels via the base class.
-extern MyMesh the_mesh;
+// Dual-core shared-nothing boundary: the UI NEVER calls `the_mesh` directly.
+// Reads come from a published snapshot, writes go out as commands, and the mesh
+// callbacks arrive as events -- all via mproxy (MeshProxy.h). See that header.
 
-// Radio param setters live in the variant's target.cpp (same calls the BLE
-// CMD_SET_RADIO_* handlers use). Forward-declared to avoid pulling target.h.
-void radio_set_params(float freq, float bw, uint8_t sf, uint8_t cr);
-void radio_set_tx_power(int8_t dbm);
+// Upper TX-power bound for the radio-settings validation (was pulled in via
+// MyMesh.h, which the UI no longer includes). LORA_TX_POWER is a build flag.
+#ifndef MAX_LORA_TX_POWER
+  #define MAX_LORA_TX_POWER LORA_TX_POWER
+#endif
 
 // Backlight brightness hook. A variant that supports dimming provides a strong
 // definition (e.g. CrowPanelBoard's LEDC writer); others fall back to this no-op.
@@ -321,26 +324,12 @@ static void formatLastSeen(char* out, size_t cap, uint32_t lastmod_secs, uint32_
 static constexpr uint8_t CONTACT_FLAG_FAVOURITE = 0x01;  // matches firmware
 static constexpr uint32_t FAV_HEX = 0xFBBF24;            // amber-400 accent
 
-// Cheap change-detect over the contact set. Captures add/remove (count),
-// favourite toggles + edits (flags), renames (name) and identity (pubkey).
-// Deliberately excludes lastmod so routine RF adverts don't trigger rebuilds.
-uint32_t UITask::contactsSignature() {
-  uint32_t sig = 2166136261u;  // FNV-ish
-  ContactsIterator it;
-  ContactInfo c;
-  int n = 0;
-  while (it.hasNext(&the_mesh, c)) {
-    n++;
-    sig = (sig ^ c.flags) * 16777619u;
-    for (int i = 0; i < 4; i++) sig = (sig ^ c.id.pub_key[i]) * 16777619u;
-    for (const char* p = c.name; *p; p++) sig = (sig ^ (uint8_t)*p) * 16777619u;
-  }
-  return sig ^ (uint32_t)(n << 1);
-}
+// (contactsSignature() moved to the backend — see mproxy::publishIfChanged in
+// MeshProxy.cpp. The UI now rebuilds when the snapshot version changes.)
 
 // Local nickname if one is set for this contact, else the advert name.
 const char* UITask::displayName(const uint8_t* pubkey, const char* realname, char* buf, size_t cap) {
-  if (pubkey && the_mesh.getNameOverride(pubkey, buf, cap) && buf[0]) return buf;
+  if (pubkey && mproxy::getNameOverride(pubkey, buf, cap) && buf[0]) return buf;
   strncpy(buf, realname ? realname : "", cap - 1);
   buf[cap - 1] = 0;
   return buf;
@@ -395,8 +384,8 @@ int UITask::crow_cmp(const void* pa, const void* pb) {
   if (a->fav != b->fav) return (int)b->fav - (int)a->fav;  // favourites first, then order within each group
   if (s_contacts_order == 0) {
     ContactInfo ca, cb;
-    the_mesh.getContactByIdx(a->idx, ca);
-    the_mesh.getContactByIdx(b->idx, cb);
+    mproxy::getContactByIdx(a->idx, ca);
+    mproxy::getContactByIdx(b->idx, cb);
     return nameCmpLNS(ca.name, cb.name);
   }
   if (a->heard != b->heard) return (b->heard > a->heard) ? 1 : -1;
@@ -407,14 +396,13 @@ void UITask::rebuildContactsList() {
   if (!_contacts_table) return;
   _contacts_dirty = false;
   _contacts_rebuilt_ms = millis();
-  _contacts_sig = contactsSignature();  // keep poll baseline in sync
 
   // Build the filtered display set (indices only -- no per-contact widgets).
   _crow_count = 0;
-  int total = the_mesh.getNumContacts();
+  int total = mproxy::getNumContacts();
   for (int i = 0; i < total && _crow_count < CONTACTS_MAX_ROWS; i++) {
     ContactInfo c;
-    if (!the_mesh.getContactByIdx(i, c)) continue;
+    if (!mproxy::getContactByIdx(i, c)) continue;
     if (!contactPasses(c)) continue;
     _crows[_crow_count].idx = (uint16_t)i;
     // Sort key: latest message time for "Latest Messages", else last-heard.
@@ -429,17 +417,17 @@ void UITask::rebuildContactsList() {
   if (_crow_count == 0) {
     lv_table_set_row_cnt(_contacts_table, 1);
     lv_table_set_cell_value(_contacts_table, 0, 0,
-        the_mesh.getNumContacts() > 0 ? "No contacts match." : "No contacts yet. Waiting for adverts...");
+        mproxy::getNumContacts() > 0 ? "No contacts match." : "No contacts yet. Waiting for adverts...");
     lv_table_set_cell_value(_contacts_table, 0, 1, "");
     sb_update(_contacts_table, _contacts_sb);   // nothing to scroll -> hide thumb
     return;
   }
 
-  uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+  uint32_t now = mproxy::rtcSeconds();
   lv_table_set_row_cnt(_contacts_table, _crow_count);
   for (int r = 0; r < _crow_count; r++) {
     ContactInfo c;
-    if (!the_mesh.getContactByIdx(_crows[r].idx, c)) continue;
+    if (!mproxy::getContactByIdx(_crows[r].idx, c)) continue;
     char dn[CHAT_PEER_NAME_MAX];
     displayName(c.id.pub_key, c.name, dn, sizeof(dn));
     char clean[CHAT_PEER_NAME_MAX + 4];
@@ -462,7 +450,7 @@ void UITask::contacts_table_cb(lv_event_t* e) {
   lv_table_get_selected_cell(lv_event_get_target(e), &row, &col);
   if (row == LV_TABLE_CELL_NONE || (int)row >= _instance->_crow_count) return;
   ContactInfo c;
-  if (!the_mesh.getContactByIdx(_instance->_crows[row].idx, c)) return;
+  if (!mproxy::getContactByIdx(_instance->_crows[row].idx, c)) return;
   _instance->_chat_is_channel = false;
   memcpy(_instance->_chat_pubkey, c.id.pub_key, 6);
   _instance->openChat(c.name);
@@ -635,7 +623,7 @@ void UITask::contacts_order_pick_cb(lv_event_t* e) {
   _instance->_contacts_order = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
   if (_instance->_node_prefs) {
     _instance->_node_prefs->contacts_order = (uint8_t)_instance->_contacts_order;
-    the_mesh.savePrefs();
+    pushPrefs();
   }
   _instance->refreshContactsFilterChecks();
   _instance->rebuildContactsList();
@@ -646,7 +634,7 @@ void UITask::contacts_filt_pick_cb(lv_event_t* e) {
   _instance->_contacts_filt = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
   if (_instance->_node_prefs) {
     _instance->_node_prefs->contacts_filter = (uint8_t)_instance->_contacts_filt;
-    the_mesh.savePrefs();
+    pushPrefs();
   }
   _instance->refreshContactsFilterChecks();
   _instance->rebuildContactsList();
@@ -657,7 +645,7 @@ void UITask::channel_clicked_cb(lv_event_t* e) {
   lv_obj_t* btn = lv_event_get_target(e);
   int idx = (int)(intptr_t)lv_obj_get_user_data(btn);
   ChannelDetails ch;
-  if (the_mesh.getChannel(idx, ch) && ch.name[0]) {
+  if (mproxy::getChannel(idx, ch) && ch.name[0]) {
     _instance->_chat_is_channel = true;
     _instance->_chat_channel_idx = idx;
     _instance->openChat(ch.name);
@@ -672,7 +660,7 @@ void UITask::rebuildChannelsList() {
   // slots with no name. The Public channel is added on every boot (MyMesh).
   for (int idx = 0; idx < MAX_GROUP_CHANNELS; idx++) {
     ChannelDetails ch;
-    if (!the_mesh.getChannel(idx, ch) || ch.name[0] == 0) continue;
+    if (!mproxy::getChannel(idx, ch) || ch.name[0] == 0) continue;
 
     char cname[CHAT_PEER_NAME_MAX + 4];
     sanitizeForFont(ch.name, cname, sizeof(cname));
@@ -867,8 +855,8 @@ int UITask::prow_cmp(const void* pa, const void* pb) {
   const ContactDispRow* b = (const ContactDispRow*)pb;
   if (a->fav != b->fav) return (int)b->fav - (int)a->fav;  // favourites first, then A-Z
   ContactInfo ca, cb;
-  the_mesh.getContactByIdx(a->idx, ca);
-  the_mesh.getContactByIdx(b->idx, cb);
+  mproxy::getContactByIdx(a->idx, ca);
+  mproxy::getContactByIdx(b->idx, cb);
   return nameCmpLNS(ca.name, cb.name);
 }
 
@@ -951,10 +939,10 @@ void UITask::buildContactPickerScreen() {
 void UITask::rebuildPicker() {
   if (!_pick_table) return;
   _prow_count = 0;
-  int total = the_mesh.getNumContacts();
+  int total = mproxy::getNumContacts();
   for (int i = 0; i < total && _prow_count < CONTACTS_MAX_ROWS; i++) {
     ContactInfo c;
-    if (!the_mesh.getContactByIdx(i, c)) continue;
+    if (!mproxy::getContactByIdx(i, c)) continue;
     if (_pick_filter[0] && !containsCI(c.name, _pick_filter)) continue;
     _prows[_prow_count].idx = (uint16_t)i;
     _prows[_prow_count].heard = c.last_advert_timestamp;
@@ -970,7 +958,7 @@ void UITask::rebuildPicker() {
   lv_table_set_row_cnt(_pick_table, _prow_count);
   for (int r = 0; r < _prow_count; r++) {
     ContactInfo c;
-    if (!the_mesh.getContactByIdx(_prows[r].idx, c)) continue;
+    if (!mproxy::getContactByIdx(_prows[r].idx, c)) continue;
     char dn[CHAT_PEER_NAME_MAX];
     displayName(c.id.pub_key, c.name, dn, sizeof(dn));
     char clean[CHAT_PEER_NAME_MAX + 4];
@@ -1046,26 +1034,21 @@ void UITask::pick_table_cb(lv_event_t* e) {
   lv_table_get_selected_cell(lv_event_get_target(e), &row, &col);
   if (row == LV_TABLE_CELL_NONE || (int)row >= _instance->_prow_count) return;
   ContactInfo pick;
-  if (!the_mesh.getContactByIdx(_instance->_prows[row].idx, pick)) return;
+  if (!mproxy::getContactByIdx(_instance->_prows[row].idx, pick)) return;
   int action = _instance->_pick_action;
   _instance->closeContactPicker();
   if (action == 1) {  // share the viewed contact (cinfo) to the picked recipient
     ContactInfo* viewed = _instance->cinfoContact();
-    ContactInfo* recip = the_mesh.lookupContactByPubKey(pick.id.pub_key, PUB_KEY_SIZE);
-    if (viewed && recip) {
+    if (viewed) {
       char hex[2 * PUB_KEY_SIZE + 1];
       mesh::Utils::toHex(hex, viewed->id.pub_key, PUB_KEY_SIZE);
       char ref[2 * PUB_KEY_SIZE + 48];
       snprintf(ref, sizeof(ref), "<%s:%u:%s>", hex, (unsigned)viewed->type, viewed->name);
-      uint32_t now = the_mesh.getRTCClock()->getCurrentTimeUnique();
-      uint32_t ack = 0, to = 0;
-      if (the_mesh.sendMessage(*recip, now, 0, ref, ack, to) != MSG_SEND_FAILED) {
-        const char* me = (_instance->_node_prefs && _instance->_node_prefs->node_name[0])
-                             ? _instance->_node_prefs->node_name : "Me";
-        char key[CHAT_PEER_NAME_MAX];
-        convKey(recip->id.pub_key, false, key, sizeof(key));
-        _instance->storeAppend(true, key, me, ref, now);
-      }
+      const char* me = (_instance->_node_prefs && _instance->_node_prefs->node_name[0])
+                           ? _instance->_node_prefs->node_name : "Me";
+      char key[CHAT_PEER_NAME_MAX];
+      convKey(pick.id.pub_key, false, key, sizeof(key));
+      _instance->postSend(false, pick.id.pub_key, -1, key, me, ref);
       _instance->showToast("Contact shared");
     }
   } else if (action == 2) {  // insert the picked contact's ref into compose
@@ -1103,7 +1086,7 @@ void UITask::insert_myinfo_cb(lv_event_t* e) {
   if (!_instance) return;
   const char* nm = (_instance->_node_prefs && _instance->_node_prefs->node_name[0])
                        ? _instance->_node_prefs->node_name : "Me";
-  _instance->insertContactRef(the_mesh.self_id.pub_key, ADV_TYPE_CHAT, nm);
+  _instance->insertContactRef(mproxy::selfPubKey(), ADV_TYPE_CHAT, nm);
   _instance->closeInsertPopup();
 }
 
@@ -1131,9 +1114,10 @@ static void encodeMentions(const char* in, char* out, size_t cap) {
     if (*p == '@' && p[1] != '[') {
       const char* nm = p + 1;
       size_t bestlen = 0;
-      ContactsIterator it;
+      int total = mproxy::getNumContacts();
       ContactInfo c;
-      while (it.hasNext(&the_mesh, c)) {
+      for (int i = 0; i < total; i++) {
+        if (!mproxy::getContactByIdx(i, c)) continue;
         size_t nl = strlen(c.name);
         if (nl > bestlen && strncmp(nm, c.name, nl) == 0 && isBoundary(nm[nl])) bestlen = nl;
       }
@@ -1178,10 +1162,11 @@ void UITask::resetKbScroll() {
 }
 
 void UITask::storeAppend(bool outgoing, const char* key, const char* sender,
-                         const char* text, uint32_t ts, uint8_t status, uint32_t ack, uint32_t expiry_ms) {
-  _rammsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms);  // always: recent ring
+                         const char* text, uint32_t ts, uint8_t status, uint32_t ack, uint32_t expiry_ms,
+                         uint32_t cli) {
+  _rammsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms, cli);  // always: recent ring
 #ifdef HAS_SD_CARD
-  if (_msgs == &_sdmsgs) _sdmsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms);
+  if (_msgs == &_sdmsgs) _sdmsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms, cli);
 #endif
 }
 
@@ -1194,6 +1179,54 @@ void UITask::convKey(const uint8_t* key6, bool is_channel, char* out, size_t cap
   }
 }
 
+// ---- command-posting helpers (UI core -> backend, via MeshProxy) ------------
+void UITask::pushPrefs() {
+  if (!_instance || !_instance->_node_prefs) return;
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::UpdatePrefs;
+  c.prefs = *_instance->_node_prefs;
+  mproxy::postCommand(c);
+}
+void UITask::pushRadio() {
+  if (!_instance || !_instance->_node_prefs) return;
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::ApplyRadio;
+  c.prefs = *_instance->_node_prefs;
+  mproxy::postCommand(c);
+}
+void UITask::pushAdvert() {
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::Advert;
+  mproxy::postCommand(c);
+}
+void UITask::postPubkeyCmd(mproxy::CmdKind kind, const uint8_t* pk) {
+  mproxy::MeshCmd c{};
+  c.kind = kind;
+  memcpy(c.pubkey, pk, PUB_KEY_SIZE);
+  mproxy::postCommand(c);
+}
+
+// Optimistic async send. Appends a SENDING bubble with a fresh client token and
+// posts CMD_Send; the backend replies EV_SendResult with the real ack/timeout
+// (resolved in drainEvents via setByClientToken). Returns the token.
+uint32_t UITask::postSend(bool is_channel, const uint8_t* pubkey6, int channel_idx,
+                          const char* conv_key, const char* sender, const char* text) {
+  uint32_t token = ++_send_seq;
+  if (token == 0) token = ++_send_seq;   // 0 means "no token"
+  storeAppend(true, conv_key, sender, text, mproxy::rtcSeconds(),
+              MSG_STATUS_SENDING, 0, millis() + 8000, token);  // provisional expiry until EV_SendResult
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::Send;
+  c.token = token;
+  c.is_channel = is_channel;
+  c.channel_idx = channel_idx;
+  if (pubkey6) memcpy(c.pubkey, pubkey6, 6);
+  strncpy(c.text, text, sizeof(c.text) - 1);
+  c.text[sizeof(c.text) - 1] = 0;
+  mproxy::postCommand(c);
+  return token;
+}
+
 void UITask::sendCurrentMessage() {
   if (!_chat_input) return;
   const char* raw = lv_textarea_get_text(_chat_input);
@@ -1201,59 +1234,47 @@ void UITask::sendCurrentMessage() {
 
   char encoded[CHAT_MSG_TEXT_MAX + 32];
   encodeMentions(raw, encoded, sizeof(encoded));
-  const char* text = encoded;
 
   const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
-  uint32_t now = the_mesh.getRTCClock()->getCurrentTimeUnique();
-  bool sent = false;
-  uint32_t ack = 0, timeout = 0;
-  ContactInfo* c = NULL;
-
-  if (_chat_is_channel) {
-    ChannelDetails ch;
-    if (the_mesh.getChannel(_chat_channel_idx, ch)) {
-      sent = the_mesh.sendGroupMessage(now, ch.channel, me, text, strlen(text));
-    }
-  } else {
-    c = the_mesh.lookupContactByPubKey(_chat_pubkey, 6);
-    if (c) sent = the_mesh.sendMessage(*c, now, 0, text, ack, timeout) != MSG_SEND_FAILED;
-  }
-
-  if (sent) {
-    if (c && ack) {
-      // Direct message with an expected ACK: track delivery (sending -> delivered/failed).
-      the_mesh.addExpectedAck(ack, c);
-      storeAppend(true, _chat_key, me, text, now, MSG_STATUS_SENDING, ack, millis() + timeout + 2000);
-    } else {
-      storeAppend(true, _chat_key, me, text, now);  // channel / no-ack: no delivery tracking
-    }
-    lv_textarea_set_text(_chat_input, "");
-    rebuildChatHistory();
-  }
+  // Async send: the backend does sendMessage/sendGroupMessage + addExpectedAck and
+  // replies EV_SendResult with the real ack. The bubble shows immediately.
+  postSend(_chat_is_channel, _chat_is_channel ? nullptr : _chat_pubkey,
+           _chat_channel_idx, _chat_key, me, encoded);
+  lv_textarea_set_text(_chat_input, "");
+  rebuildChatHistory();
 }
 
+// Runs on the backend thread (called from the_mesh.loop()): just enqueue.
 void UITask::msgDelivered(uint32_t ack) {
-  if (_msgs->setStatusByAck(ack, MSG_STATUS_DELIVERED) && _chat_screen)
-    rebuildChatHistory();
+  mproxy::UiEvent ev{};
+  ev.kind = mproxy::EvKind::Delivered;
+  ev.ack  = ack;
+  mproxy::pushEvent(ev);
 }
 
 void UITask::resendMessage(const ChatMessage* m) {
   if (!m || _chat_is_channel) return;
-  ContactInfo* c = the_mesh.lookupContactByPubKey(_chat_pubkey, 6);
-  if (!c) return;
   char text[CHAT_MSG_TEXT_MAX];
   strncpy(text, m->text, sizeof(text) - 1);
   text[sizeof(text) - 1] = 0;
-  uint32_t now = the_mesh.getRTCClock()->getCurrentTimeUnique();
-  uint32_t ack = 0, timeout = 0;
-  if (the_mesh.sendMessage(*c, now, 0, text, ack, timeout) == MSG_SEND_FAILED || !ack) return;
-  the_mesh.addExpectedAck(ack, c);
-  // Re-arm the existing entry in place (back to "sending") -- no duplicate bubble.
-  if (!_msgs->requeue(m, ack, millis() + timeout + 2000)) {
-    // The original scrolled out of the buffer; fall back to a fresh entry.
+  // Re-arm the existing bubble in place with a fresh token (no duplicate); the
+  // backend resends and replies EV_SendResult. If it scrolled out, append fresh.
+  uint32_t token = ++_send_seq;
+  if (token == 0) token = ++_send_seq;
+  if (!_msgs->requeue(m, 0, millis() + 8000, token)) {
     const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
-    storeAppend(true, _chat_key, me, text, now, MSG_STATUS_SENDING, ack, millis() + timeout + 2000);
+    storeAppend(true, _chat_key, me, text, mproxy::rtcSeconds(),
+                MSG_STATUS_SENDING, 0, millis() + 8000, token);
   }
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::Send;
+  c.token = token;
+  c.is_channel = false;
+  c.channel_idx = -1;
+  memcpy(c.pubkey, _chat_pubkey, 6);
+  strncpy(c.text, text, sizeof(c.text) - 1);
+  c.text[sizeof(c.text) - 1] = 0;
+  mproxy::postCommand(c);
   rebuildChatHistory();
 }
 
@@ -1432,9 +1453,10 @@ void UITask::attachMentions(lv_obj_t* bubble, const char* text) {
       char nm[CHAT_PEER_NAME_MAX];
       memcpy(nm, at + 2, nlen);
       nm[nlen] = 0;
-      ContactsIterator it;
+      int total = mproxy::getNumContacts();
       ContactInfo c;
-      while (it.hasNext(&the_mesh, c)) {
+      for (int ci = 0; ci < total; ci++) {
+        if (!mproxy::getContactByIdx(ci, c)) continue;
         if ((int)strlen(c.name) == nlen && strncmp(c.name, nm, nlen) == 0) {
           bool dup = false;
           for (int i = 0; i < t.count; i++)
@@ -1471,7 +1493,7 @@ void UITask::mention_pick_cb(lv_event_t* e) {
   uint32_t key = (uint32_t)(uintptr_t)lv_obj_get_user_data(lv_event_get_target(e));
   uint8_t pfx[4];
   memcpy(pfx, &key, 4);
-  ContactInfo* c = the_mesh.lookupContactByPubKey(pfx, 4);
+  const ContactInfo* c = mproxy::lookupContactByPubKey(pfx, 4);
   _instance->closeMenuPopup();
   if (c) _instance->openContactInfo(c->id.pub_key, _instance->_chat_screen);
 }
@@ -1572,7 +1594,7 @@ void UITask::buildContactCard(lv_obj_t* bubble, const ChatMessage* m,
   lv_obj_set_style_text_font(kl, &lv_font_montserrat_12, 0);
 
   // Tap a card for a known contact (either direction) -> open Contact Info.
-  if (the_mesh.lookupContactByPubKey(pubkey, PUB_KEY_SIZE)) {
+  if (mproxy::lookupContactByPubKey(pubkey, PUB_KEY_SIZE)) {
     lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_user_data(bubble, (void*)m);
     lv_obj_add_event_cb(bubble, [](lv_event_t* ev) {
@@ -1585,7 +1607,7 @@ void UITask::buildContactCard(lv_obj_t* bubble, const ChatMessage* m,
   }
 
   if (!m->outgoing) {
-    if (the_mesh.lookupContactByPubKey(pubkey, PUB_KEY_SIZE)) {
+    if (mproxy::lookupContactByPubKey(pubkey, PUB_KEY_SIZE)) {
       lv_obj_t* in = lv_label_create(bubble);
       lv_label_set_text(in, LV_SYMBOL_OK " In contacts (tap to open)");
       lv_obj_set_style_text_color(in, lv_color_hex(0x34D399), 0);
@@ -1609,15 +1631,15 @@ void UITask::add_contact_cb(lv_event_t* e) {
   char name[CHAT_PEER_NAME_MAX];
   if (!parseContactRef(m->text, pk, type, name, sizeof(name))) return;
 
-  ContactInfo c;
-  memset(&c, 0, sizeof(c));
+  mproxy::MeshCmd cmd{};
+  cmd.kind = mproxy::CmdKind::AddContact;
+  ContactInfo& c = cmd.contact;
   memcpy(c.id.pub_key, pk, PUB_KEY_SIZE);
   c.type = type;
   strncpy(c.name, name, sizeof(c.name) - 1);
   c.out_path_len = OUT_PATH_UNKNOWN;
-  c.lastmod = the_mesh.getRTCClock()->getCurrentTime();
-  the_mesh.addContact(c);
-  _instance->rebuildChatHistory();  // re-render: Add button -> "In contacts"
+  c.lastmod = mproxy::rtcSeconds();
+  mproxy::postCommand(cmd);   // backend adds it; the snapshot + list refresh on next publish
 }
 
 // Format helpers for chat timestamps. Inputs are already UTC + the local offset.
@@ -1667,7 +1689,7 @@ void UITask::rebuildChatHistory() {
   }
 
   int  tzoff = _node_prefs ? _node_prefs->tz_offset_minutes * 60 : 0;
-  long now_day = ((long)the_mesh.getRTCClock()->getCurrentTime() + tzoff) / 86400;
+  long now_day = ((long)mproxy::rtcSeconds() + tzoff) / 86400;
 
   char last_sender[CHAT_PEER_NAME_MAX] = "";
   bool last_outgoing = false;
@@ -1938,7 +1960,7 @@ void UITask::openChat(const char* peer_name) {
   // Stable per-conversation storage key (pubkey for contacts, channel secret for channels).
   if (_chat_is_channel) {
     ChannelDetails ch;
-    if (the_mesh.getChannel(_chat_channel_idx, ch)) convKey(ch.channel.secret, true, _chat_key, sizeof(_chat_key));
+    if (mproxy::getChannel(_chat_channel_idx, ch)) convKey(ch.channel.secret, true, _chat_key, sizeof(_chat_key));
     else _chat_key[0] = 0;
   } else {
     convKey(_chat_pubkey, false, _chat_key, sizeof(_chat_key));
@@ -1950,7 +1972,12 @@ void UITask::openChat(const char* peer_name) {
 
 void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs) {
   _sensors = sensors;
-  _node_prefs = node_prefs;
+  // UI-owned working copy of prefs; edits push CMD_UpdatePrefs and the snapshot
+  // refreshes it on change (e.g. BLE companion edits). _node_prefs always points
+  // here so existing read/write sites are unchanged.
+  if (node_prefs) _node_prefs_store = *node_prefs;
+  _node_prefs = &_node_prefs_store;
+  _last_snap_version = mproxy::snapshotVersion();
   _instance = this;
 
 #ifdef HAS_SD_CARD
@@ -2047,8 +2074,12 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _last_tick_ms = millis();
 }
 
+// Runs on the backend thread: enqueue the new offline-queue count for the UI.
 void UITask::msgRead(int msgcount) {
-  _msgcount = msgcount;
+  mproxy::UiEvent ev{};
+  ev.kind = mproxy::EvKind::MsgCount;
+  ev.msgcount = msgcount;
+  mproxy::pushEvent(ev);
 }
 
 // True if `name` matches a configured channel (vs a contact).
@@ -2056,15 +2087,17 @@ static bool nameIsChannel(const char* name) {
   if (!name) return false;
   for (int idx = 0; idx < MAX_GROUP_CHANNELS; idx++) {
     ChannelDetails ch;
-    if (the_mesh.getChannel(idx, ch) && ch.name[0] &&
+    if (mproxy::getChannel(idx, ch) && ch.name[0] &&
         strncmp(ch.name, name, sizeof(ch.name)) == 0) return true;
   }
   return false;
 }
 
+// Runs on the backend thread. Cook the message (conv-key, channel split) using
+// the backend's hookKey + snapshot, then enqueue; the UI core stores + renders
+// it in drainEvents(). No store/LVGL work here.
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
   (void)path_len;
-  _msgcount = msgcount;
 
   // For channel messages the wire text is "<sender>: <msg>" and from_name is
   // the channel name. Split out the real sender. For DMs the sender is the
@@ -2084,31 +2117,31 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
     }
   }
 
-  char key[CHAT_PEER_NAME_MAX];
-  convKey(the_mesh.hookKey(), the_mesh.hookIsChannel(), key, sizeof(key));
-  storeAppend(false, key, sender, body, the_mesh.getRTCClock()->getCurrentTime());
-
-  // If this conversation's chat is currently open, refresh it live.
-  if (_chat_screen && strncmp(key, _chat_key, CHAT_PEER_NAME_MAX) == 0) {
-    rebuildChatHistory();
-  }
-
-  // Don't repaint the list on every packet -- mark dirty and let loop()
-  // rebuild at most once every few seconds. Avoids repaint storms under
-  // mesh traffic. (Selective per-row updates are the eventual fix.)
-  _contacts_dirty = true;
+  mproxy::UiEvent ev{};
+  ev.kind = mproxy::EvKind::Msg;
+  ev.outgoing = false;
+  convKey(mproxy::hookKey(), mproxy::hookIsChannel(), ev.conv_key, sizeof(ev.conv_key));
+  strncpy(ev.sender, sender ? sender : "", sizeof(ev.sender) - 1);
+  strncpy(ev.text,   body   ? body   : "", sizeof(ev.text) - 1);
+  ev.ts = mproxy::rtcSeconds();
+  ev.msgcount = msgcount;
+  mproxy::pushEvent(ev);
 }
 
+// Backend thread: a message we sent via a *connected companion app* (not the
+// on-device compose, which uses CMD_Send). Mirror it into on-device history.
 void UITask::sentMsg(const char* peer, const char* text) {
   (void)peer;  // keyed by identity (stashed by MyMesh), not the display name
   const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
-  char key[CHAT_PEER_NAME_MAX];
-  convKey(the_mesh.hookKey(), the_mesh.hookIsChannel(), key, sizeof(key));
-  storeAppend(true, key, me, text, the_mesh.getRTCClock()->getCurrentTime());
-
-  if (_chat_screen && strncmp(key, _chat_key, CHAT_PEER_NAME_MAX) == 0) {
-    rebuildChatHistory();
-  }
+  mproxy::UiEvent ev{};
+  ev.kind = mproxy::EvKind::Msg;
+  ev.outgoing = true;
+  convKey(mproxy::hookKey(), mproxy::hookIsChannel(), ev.conv_key, sizeof(ev.conv_key));
+  strncpy(ev.sender, me, sizeof(ev.sender) - 1);
+  strncpy(ev.text, text ? text : "", sizeof(ev.text) - 1);
+  ev.ts = mproxy::rtcSeconds();
+  ev.msgcount = -1;   // unchanged
+  mproxy::pushEvent(ev);
 }
 
 void UITask::notify(UIEventType t) {
@@ -2117,8 +2150,10 @@ void UITask::notify(UIEventType t) {
 
 // ===== Contact Info page =================================================
 
+// The Contact-Info page works on a UI-owned copy loaded at openContactInfo
+// (edits mutate it optimistically + post a command). NULL if the contact is gone.
 ContactInfo* UITask::cinfoContact() {
-  return the_mesh.lookupContactByPubKey(_cinfo_pubkey, PUB_KEY_SIZE);
+  return _cinfo_valid ? &_cinfo_c : nullptr;
 }
 
 void UITask::cinfo_toast_timer_cb(lv_timer_t* t) {
@@ -2373,9 +2408,8 @@ void UITask::populateContactInfo() {
   ContactInfo* c = cinfoContact();
   if (!c) { lv_scr_load(_cinfo_return_screen ? _cinfo_return_screen : _home_screen); return; }
 
-  char ov[CHAT_PEER_NAME_MAX];
-  bool overridden = the_mesh.getNameOverride(c->id.pub_key, ov, sizeof(ov)) && ov[0];
-  const char* shown = overridden ? ov : c->name;
+  bool overridden = _cinfo_override[0];
+  const char* shown = overridden ? _cinfo_override : c->name;
   char nm[CHAT_PEER_NAME_MAX + 4];
   sanitizeForFont(shown[0] ? shown : "(unnamed)", nm, sizeof(nm));
   lv_label_set_text(_cinfo_title, nm);
@@ -2415,7 +2449,7 @@ void UITask::populateContactInfo() {
   lv_label_set_text(_cinfo_type_lbl, c->type <= 4 ? TYPE_NAMES[c->type] : "Unknown");
 
   char lh[16];
-  formatLastSeen(lh, sizeof(lh), c->last_advert_timestamp, the_mesh.getRTCClock()->getCurrentTime());
+  formatLastSeen(lh, sizeof(lh), c->last_advert_timestamp, mproxy::rtcSeconds());
   lv_label_set_text(_cinfo_lastheard, lh);
 
   if (_cinfo_telem) {
@@ -2423,7 +2457,7 @@ void UITask::populateContactInfo() {
     lv_label_set_text(_cinfo_telem, have ? _telem_text : "(tap Telem to request)");
   }
 
-  int hashSize = the_mesh.getNodePrefs()->path_hash_mode + 1;
+  int hashSize = (_node_prefs ? _node_prefs->path_hash_mode : 0) + 1;
   if (hashSize < 1) hashSize = 1;
   // A zero/empty out_path is a direct (0-hop) route -- the phone app stores a
   // full zero-filled path for "direct", which we'd otherwise show as N zero hops.
@@ -2457,6 +2491,12 @@ void UITask::populateContactInfo() {
 
 void UITask::openContactInfo(const uint8_t* pubkey, lv_obj_t* return_screen) {
   memcpy(_cinfo_pubkey, pubkey, PUB_KEY_SIZE);
+  // Load a UI-owned working copy from the snapshot (edits are optimistic + posted).
+  const ContactInfo* src = mproxy::lookupContactByPubKey(pubkey, PUB_KEY_SIZE);
+  _cinfo_valid = (src != nullptr);
+  if (src) _cinfo_c = *src;
+  _cinfo_override[0] = 0;
+  mproxy::getNameOverride(pubkey, _cinfo_override, sizeof(_cinfo_override));
   _cinfo_return_screen = return_screen;
   buildContactInfoScreen();
   _cinfo_active_ta = NULL;
@@ -2473,16 +2513,26 @@ void UITask::commitCinfoField(lv_obj_t* ta) {
     // Edit a local nickname override (not the contact's advert name). Blank or
     // a value equal to the advert name clears the override.
     const char* entered = lv_textarea_get_text(ta);
-    if (!entered[0] || strcmp(entered, c->name) == 0) the_mesh.setNameOverride(c->id.pub_key, "");
-    else the_mesh.setNameOverride(c->id.pub_key, entered);
-    populateContactInfo();   // refresh title + real-name hint
-    rebuildContactsList();   // reflect the new display name in the list
+    bool clear = (!entered[0] || strcmp(entered, c->name) == 0);
+    strncpy(_cinfo_override, clear ? "" : entered, sizeof(_cinfo_override) - 1);  // optimistic
+    _cinfo_override[sizeof(_cinfo_override) - 1] = 0;
+    mproxy::MeshCmd cmd{};
+    cmd.kind = mproxy::CmdKind::SetNameOvr;
+    memcpy(cmd.pubkey, _cinfo_pubkey, PUB_KEY_SIZE);
+    strncpy(cmd.name, clear ? "" : entered, sizeof(cmd.name) - 1);
+    cmd.name[sizeof(cmd.name) - 1] = 0;
+    mproxy::postCommand(cmd);
+    populateContactInfo();   // refresh title + real-name hint (list refreshes on next publish)
   } else if (ta == _cinfo_lat_ta || ta == _cinfo_lon_ta) {
     const char* lats = lv_textarea_get_text(_cinfo_lat_ta);
     const char* lons = lv_textarea_get_text(_cinfo_lon_ta);
     if (lats[0] == 0 && lons[0] == 0) { c->gps_lat = 0; c->gps_lon = 0; }
     else { c->gps_lat = (int32_t)lround(atof(lats) * 1e6); c->gps_lon = (int32_t)lround(atof(lons) * 1e6); }
-    the_mesh.saveContact(*c);
+    mproxy::MeshCmd cmd{};
+    cmd.kind = mproxy::CmdKind::SaveGps;
+    memcpy(cmd.pubkey, _cinfo_pubkey, PUB_KEY_SIZE);
+    cmd.gps_lat = c->gps_lat; cmd.gps_lon = c->gps_lon;
+    mproxy::postCommand(cmd);
   }
 }
 
@@ -2499,8 +2549,8 @@ void UITask::cinfo_fav_cb(lv_event_t* e) {
   if (!_instance) return;
   ContactInfo* c = _instance->cinfoContact();
   if (!c) return;
-  c->flags ^= CONTACT_FLAG_FAVOURITE;
-  the_mesh.saveContact(*c);
+  c->flags ^= CONTACT_FLAG_FAVOURITE;   // optimistic; backend applies + persists
+  postPubkeyCmd(mproxy::CmdKind::ToggleFav, _instance->_cinfo_pubkey);
   _instance->populateContactInfo();
 }
 
@@ -2509,10 +2559,10 @@ void UITask::cinfo_telemetry_cb(lv_event_t* e) {
   if (!_instance) return;
   ContactInfo* c = _instance->cinfoContact();
   if (!c) return;
-  // requestTelemetry records the pending tag so the reply is matched and routed
-  // back to telemetryResponse() (a bare sendRequest wouldn't be matched).
-  bool ok = the_mesh.requestTelemetry(*c);
-  _instance->showToast(ok ? "Telemetry requested..." : "Telemetry send failed");
+  // Backend's requestTelemetry records the pending tag so the reply is matched
+  // and routed back to telemetryResponse() (a bare request wouldn't be matched).
+  postPubkeyCmd(mproxy::CmdKind::ReqTelem, _instance->_cinfo_pubkey);
+  _instance->showToast("Telemetry requested...");
 }
 
 void UITask::cinfo_clearpath_cb(lv_event_t* e) {
@@ -2520,8 +2570,8 @@ void UITask::cinfo_clearpath_cb(lv_event_t* e) {
   if (!_instance) return;
   ContactInfo* c = _instance->cinfoContact();
   if (!c) return;
-  the_mesh.resetPathTo(*c);
-  the_mesh.saveContact(*c);
+  c->out_path_len = OUT_PATH_UNKNOWN;   // optimistic
+  postPubkeyCmd(mproxy::CmdKind::ResetPath, _instance->_cinfo_pubkey);
   _instance->populateContactInfo();
 }
 
@@ -2576,7 +2626,7 @@ void UITask::cinfo_copykey_cb(lv_event_t* e) {
 void UITask::cinfo_name_clicked_cb(lv_event_t* e) {
   (void)e;
   if (!_instance || _instance->_chat_is_channel) return;
-  ContactInfo* c = the_mesh.lookupContactByPubKey(_instance->_chat_pubkey, 6);
+  const ContactInfo* c = mproxy::lookupContactByPubKey(_instance->_chat_pubkey, 6);
   if (c) _instance->openContactInfo(c->id.pub_key, _instance->_chat_screen);
 }
 
@@ -2642,7 +2692,7 @@ void UITask::share_zerohop_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   ContactInfo* c = _instance->cinfoContact();
-  if (c) the_mesh.shareContactZeroHop(*c);
+  if (c) postPubkeyCmd(mproxy::CmdKind::ShareZhop, _instance->_cinfo_pubkey);
   _instance->closeMenuPopup();
   _instance->showToast("Shared (zero-hop)");
 }
@@ -2798,7 +2848,7 @@ void UITask::kebab_details_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   _instance->closeMenuPopup();
-  ContactInfo* c = the_mesh.lookupContactByPubKey(_instance->_chat_pubkey, 6);
+  const ContactInfo* c = mproxy::lookupContactByPubKey(_instance->_chat_pubkey, 6);
   if (c) _instance->openContactInfo(c->id.pub_key, _instance->_chat_screen);
 }
 
@@ -2819,7 +2869,7 @@ void UITask::kebab_search_cb(lv_event_t* e) {
 void UITask::kebab_share_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
-  ContactInfo* c = the_mesh.lookupContactByPubKey(_instance->_chat_pubkey, 6);
+  const ContactInfo* c = mproxy::lookupContactByPubKey(_instance->_chat_pubkey, 6);
   if (!c) { _instance->closeMenuPopup(); return; }
   memcpy(_instance->_cinfo_pubkey, c->id.pub_key, PUB_KEY_SIZE);
   _instance->closeMenuPopup();
@@ -2830,7 +2880,7 @@ void UITask::kebab_share_cb(lv_event_t* e) {
 void UITask::kebab_setpath_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
-  ContactInfo* c = the_mesh.lookupContactByPubKey(_instance->_chat_pubkey, 6);
+  const ContactInfo* c = mproxy::lookupContactByPubKey(_instance->_chat_pubkey, 6);
   if (!c) { _instance->closeMenuPopup(); return; }
   memcpy(_instance->_cinfo_pubkey, c->id.pub_key, PUB_KEY_SIZE);
   _instance->closeMenuPopup();
@@ -2841,10 +2891,7 @@ void UITask::kebab_resetpath_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   _instance->closeMenuPopup();
-  ContactInfo* c = the_mesh.lookupContactByPubKey(_instance->_chat_pubkey, 6);
-  if (!c) return;
-  the_mesh.resetPathTo(*c);
-  the_mesh.saveContact(*c);
+  postPubkeyCmd(mproxy::CmdKind::ResetPath, _instance->_chat_pubkey);
   _instance->showToast("Path reset to flood");
 }
 
@@ -2945,7 +2992,7 @@ void UITask::buildPathEditorScreen() {
 }
 
 void UITask::populatePathEditor() {
-  lv_dropdown_set_selected(_path_size_dd, the_mesh.getNodePrefs()->path_hash_mode);
+  lv_dropdown_set_selected(_path_size_dd, _node_prefs ? _node_prefs->path_hash_mode : 0);
   lv_obj_add_flag(_path_err, LV_OBJ_FLAG_HIDDEN);
   ContactInfo* c = cinfoContact();
   char buf[3 * MAX_PATH_SIZE + 1] = "";
@@ -2963,13 +3010,22 @@ bool UITask::savePathEditor() {
   const char* txt = lv_textarea_get_text(_path_ta);
   bool empty = true;
   for (const char* p = txt; *p; p++) if (*p != ' ' && *p != ',') { empty = false; break; }
-  if (empty) { the_mesh.resetPathTo(*c); the_mesh.saveContact(*c); return true; }
+  if (empty) {
+    c->out_path_len = OUT_PATH_UNKNOWN;   // optimistic
+    postPubkeyCmd(mproxy::CmdKind::ResetPath, _cinfo_pubkey);
+    return true;
+  }
   uint8_t buf[MAX_PATH_SIZE];
   int n = parseHexCsv(txt, buf, MAX_PATH_SIZE);
   if (n < 0) { lv_label_set_text(_path_err, "Bad path (use aa,bb,cc)"); lv_obj_clear_flag(_path_err, LV_OBJ_FLAG_HIDDEN); return false; }
   memcpy(c->out_path, buf, n);
-  c->out_path_len = (uint8_t)n;
-  the_mesh.saveContact(*c);
+  c->out_path_len = (uint8_t)n;          // optimistic
+  mproxy::MeshCmd cmd{};
+  cmd.kind = mproxy::CmdKind::SetPath;
+  memcpy(cmd.pubkey, _cinfo_pubkey, PUB_KEY_SIZE);
+  memcpy(cmd.path, buf, n);
+  cmd.path_len = (uint8_t)n;
+  mproxy::postCommand(cmd);
   return true;
 }
 
@@ -3251,7 +3307,7 @@ void UITask::populateSettings() {
 
   if (_set_key_ta) {
     char hex[2 * PUB_KEY_SIZE + 1];
-    mesh::Utils::toHex(hex, the_mesh.self_id.pub_key, PUB_KEY_SIZE);
+    mesh::Utils::toHex(hex, mproxy::selfPubKey(), PUB_KEY_SIZE);
     lv_textarea_set_text(_set_key_ta, hex);
     lv_textarea_set_cursor_pos(_set_key_ta, 0);  // show the start, not the tail
   }
@@ -3314,8 +3370,8 @@ void UITask::commitNodeName() {
   if (strncmp(nm, _node_prefs->node_name, sizeof(_node_prefs->node_name)) == 0) return;  // unchanged
   strncpy(_node_prefs->node_name, nm, sizeof(_node_prefs->node_name) - 1);
   _node_prefs->node_name[sizeof(_node_prefs->node_name) - 1] = 0;
-  the_mesh.savePrefs();
-  the_mesh.advert();  // re-broadcast identity with the new name
+  pushPrefs();
+  pushAdvert();  // re-broadcast identity with the new name
   showToast("Name saved & advertised");
 }
 
@@ -3335,9 +3391,7 @@ void UITask::applyRadioSettings() {
   _node_prefs->sf = (uint8_t)sf;
   _node_prefs->cr = (uint8_t)cr;
   _node_prefs->tx_power_dbm = (int8_t)txp;
-  the_mesh.savePrefs();
-  radio_set_params(_node_prefs->freq, _node_prefs->bw, _node_prefs->sf, _node_prefs->cr);
-  radio_set_tx_power(_node_prefs->tx_power_dbm);
+  pushRadio();   // backend applies radio params to the SX1262 + persists (CMD_ApplyRadio)
   showToast("Radio settings applied");
 }
 
@@ -3428,7 +3482,7 @@ void UITask::set_radio_apply_cb(lv_event_t* e) {
 void UITask::set_pathmode_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   _instance->_node_prefs->path_hash_mode = (uint8_t)lv_dropdown_get_selected(lv_event_get_target(e));
-  the_mesh.savePrefs();
+  pushPrefs();
   _instance->showToast("Path hash mode saved");
 }
 
@@ -3443,7 +3497,7 @@ void UITask::set_bright_cb(lv_event_t* e) {
   } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
     if (_instance->_node_prefs) {
       _instance->_node_prefs->display_brightness = duty;
-      the_mesh.savePrefs();
+      pushPrefs();
     }
   }
 }
@@ -3452,7 +3506,7 @@ void UITask::set_rot_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   uint16_t sel = lv_dropdown_get_selected(lv_event_get_target(e));  // 0..3
   _instance->_node_prefs->display_rotation = (uint8_t)(sel + 1);    // 1-based; 0 = unset
-  the_mesh.savePrefs();
+  pushPrefs();
   _instance->showToast("Rotation saved (restart to apply)");
 }
 
@@ -3466,7 +3520,7 @@ void UITask::set_copykey_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   char hex[2 * PUB_KEY_SIZE + 1];
-  mesh::Utils::toHex(hex, the_mesh.self_id.pub_key, PUB_KEY_SIZE);
+  mesh::Utils::toHex(hex, mproxy::selfPubKey(), PUB_KEY_SIZE);
   _instance->copyToClipboard(hex);
   _instance->showToast("Public key copied");
 }
@@ -3483,7 +3537,7 @@ void UITask::commitPosition() {
   if (!_sensors || !_set_lat_ta || !_set_lon_ta) return;
   _sensors->node_lat = atof(lv_textarea_get_text(_set_lat_ta));
   _sensors->node_lon = atof(lv_textarea_get_text(_set_lon_ta));
-  the_mesh.savePrefs();
+  pushPrefs();
 }
 
 void UITask::commitTz() {
@@ -3492,20 +3546,20 @@ void UITask::commitTz() {
   if (m < -720) m = -720;   // UTC-12:00
   if (m > 840) m = 840;     // UTC+14:00
   _node_prefs->tz_offset_minutes = (int16_t)m;
-  the_mesh.savePrefs();
+  pushPrefs();
 }
 
 void UITask::set_clock_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   _instance->_node_prefs->clock_12h = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
-  the_mesh.savePrefs();
+  pushPrefs();
 }
 
 void UITask::set_history_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
   _instance->_node_prefs->persist_history = on ? 1 : 0;
-  the_mesh.savePrefs();
+  pushPrefs();
 #ifdef HAS_SD_CARD
   // Apply live: swap the active store, mounting/unmounting the card. The RAM ring
   // keeps being fed either way (storeAppend), so the recent view never blanks; on
@@ -3517,7 +3571,7 @@ void UITask::set_history_cb(lv_event_t* e) {
     _instance->_sd_off_ts = 0;
     _instance->_msgs = &_instance->_sdmsgs;
   } else {
-    _instance->_sd_off_ts = the_mesh.getRTCClock()->getCurrentTime();  // mark for backfill
+    _instance->_sd_off_ts = mproxy::rtcSeconds();  // mark for backfill
     _instance->_msgs = &_instance->_rammsgs;
     _instance->_sdmsgs.end();               // unmount so the card can be pulled
   }
@@ -3569,8 +3623,8 @@ void UITask::set_sharepos_cb(lv_event_t* e) {
     _instance->showSharePosWarning();   // confirm before broadcasting location
   } else {
     _instance->_node_prefs->advert_loc_policy = ADVERT_LOC_NONE;
-    the_mesh.savePrefs();
-    the_mesh.advert();
+    pushPrefs();
+    pushAdvert();
     _instance->showToast("Position sharing off");
   }
 }
@@ -3648,8 +3702,8 @@ void UITask::sharepos_confirm_cb(lv_event_t* e) {
   (void)e;
   if (!_instance || !_instance->_node_prefs) return;
   _instance->_node_prefs->advert_loc_policy = ADVERT_LOC_SHARE;
-  the_mesh.savePrefs();
-  the_mesh.advert();
+  pushPrefs();
+  pushAdvert();
   if (_instance->_confirm_popup) lv_obj_add_flag(_instance->_confirm_popup, LV_OBJ_FLAG_HIDDEN);
   _instance->showToast("Position sharing on");
 }
@@ -3780,23 +3834,21 @@ void UITask::telemetryResponse(const uint8_t* pubkey, const char* from_name,
     if (line[0]) o += snprintf(text + o, sizeof(text) - o, "%s%s", o ? ", " : "", line);
   }
 
-  // GPS telemetry updates the contact's stored position.
-  ContactInfo* c = the_mesh.lookupContactByPubKey(pubkey, PUB_KEY_SIZE);
-  if (c && have_gps && (glat6 || glon6)) {
-    c->gps_lat = glat6;
-    c->gps_lon = glon6;
-    the_mesh.saveContact(*c);
+  // This runs on the backend thread. The GPS write goes out as a command; the
+  // readings go to the UI core as an event (no LVGL here). See drainEvents().
+  if (have_gps && (glat6 || glon6)) {
+    mproxy::MeshCmd cmd{};
+    cmd.kind = mproxy::CmdKind::SaveGps;
+    memcpy(cmd.pubkey, pubkey, 6);
+    cmd.gps_lat = glat6; cmd.gps_lon = glon6;
+    mproxy::postCommand(cmd);
   }
-
-  // Stash the readings for the Contact Info page (no auto-popup).
-  memcpy(_telem_pubkey, pubkey, 6);
-  strncpy(_telem_text, o ? text : "(no readings)", sizeof(_telem_text) - 1);
-  _telem_text[sizeof(_telem_text) - 1] = 0;
-
-  // Live-refresh the info page if it's open for this contact.
-  if (_cinfo_screen && lv_scr_act() == _cinfo_screen && memcmp(_cinfo_pubkey, pubkey, 6) == 0)
-    populateContactInfo();
-  showToast("Telemetry received");
+  mproxy::UiEvent ev{};
+  ev.kind = mproxy::EvKind::Telem;
+  memcpy(ev.pubkey, pubkey, 6);
+  strncpy(ev.telem_text, o ? text : "(no readings)", sizeof(ev.telem_text) - 1);
+  ev.telem_text[sizeof(ev.telem_text) - 1] = 0;
+  mproxy::pushEvent(ev);
 }
 
 void UITask::loop() {
@@ -3808,9 +3860,14 @@ void UITask::loop() {
     _last_tick_ms = now;
   }
 
-  // Live header clock (1 Hz). getCurrentTime() is the internal RTC -- no bus traffic.
+  // Pin the published snapshot for this UI pass, then apply backend events
+  // (new/sent msgs, delivery, telemetry) to the store/LVGL on this (UI) core.
+  mproxy::beginUiRead();
+  drainEvents();
+
+  // Live header clock (1 Hz). rtcSeconds() is the internal RTC -- no bus traffic.
   if (_clock_label) {
-    uint32_t secs = the_mesh.getRTCClock()->getCurrentTime();
+    uint32_t secs = mproxy::rtcSeconds();
     if (secs != _clock_last) {
       _clock_last = secs;
       time_t t = (time_t)secs + (_node_prefs ? _node_prefs->tz_offset_minutes * 60 : 0);
@@ -3845,17 +3902,69 @@ void UITask::loop() {
     lv_label_set_text(_sending_lbl, dots[_dot_frame]);
   }
 
-  // Throttled contacts refresh (set dirty by newMsg).
+  // Rebuild the contacts/channels lists when the backend publishes a new snapshot
+  // (contact add/remove/rename/favourite, or prefs changed over BLE/serial).
+  // Throttle: a busy network churns contacts, and rebuildContactsList is heavy
+  // (filter + sort + table cells, copying contacts out of PSRAM). Rebuilding on
+  // every publish would hitch input when a tap lands mid-rebuild, so cap it to
+  // ~1/sec. The version stays stale until the throttle elapses, so nothing is lost.
+  uint32_t sv = mproxy::snapshotVersion();
+  if (sv != _last_snap_version && now - _contacts_rebuilt_ms >= 1000) {
+    _last_snap_version = sv;
+    if (const NodePrefs* p = mproxy::prefsSnap()) *_node_prefs = *p;  // pick up backend-side pref edits
+    rebuildContactsList();
+    rebuildChannelsList();
+  }
+
+  // "Latest message" re-sort depends on the message store (not the snapshot), so
+  // still rebuild on the dirty flag set when a message arrives/sends.
   if (_contacts_dirty && now - _contacts_rebuilt_ms >= 3000) {
     rebuildContactsList();
   }
 
-  // Poll for contact-set changes made over BLE/serial (add/remove/favourite/
-  // rename) -- the companion frame handler doesn't notify the UI.
-  if (now - _contacts_check_ms >= 1500) {
-    _contacts_check_ms = now;
-    if (contactsSignature() != _contacts_sig) rebuildContactsList();
-  }
-
   lv_timer_handler();
+  mproxy::endUiRead();
+}
+
+// Drain the backend->UI event queue and apply each event on the UI core.
+void UITask::drainEvents() {
+  mproxy::UiEvent ev;
+  while (mproxy::pollEvent(ev)) {
+    switch (ev.kind) {
+      case mproxy::EvKind::Msg: {
+        if (ev.msgcount >= 0) _msgcount = ev.msgcount;
+        storeAppend(ev.outgoing, ev.conv_key, ev.sender, ev.text, ev.ts);
+        if (_chat_screen && strncmp(ev.conv_key, _chat_key, CHAT_PEER_NAME_MAX) == 0)
+          rebuildChatHistory();
+        _contacts_dirty = true;   // "latest message" sort may have changed
+        break;
+      }
+      case mproxy::EvKind::SendResult: {
+        // Fill the optimistic bubble's real ack/expiry, or fail it.
+        uint8_t status = ev.ok ? (ev.ack ? MSG_STATUS_SENDING : MSG_STATUS_NONE) : MSG_STATUS_FAILED;
+        uint32_t expiry = (ev.ok && ev.ack) ? millis() + ev.timeout + 2000 : 0;
+        _msgs->setByClientToken(ev.token, status, ev.ack, expiry);
+        if (!ev.ok) showToast("Send failed");
+        if (_chat_screen) rebuildChatHistory();
+        break;
+      }
+      case mproxy::EvKind::Delivered: {
+        if (_msgs->setStatusByAck(ev.ack, MSG_STATUS_DELIVERED) && _chat_screen)
+          rebuildChatHistory();
+        break;
+      }
+      case mproxy::EvKind::Telem: {
+        memcpy(_telem_pubkey, ev.pubkey, 6);
+        strncpy(_telem_text, ev.telem_text, sizeof(_telem_text) - 1);
+        _telem_text[sizeof(_telem_text) - 1] = 0;
+        if (_cinfo_screen && lv_scr_act() == _cinfo_screen && memcmp(_cinfo_pubkey, ev.pubkey, 6) == 0)
+          populateContactInfo();
+        showToast("Telemetry received");
+        break;
+      }
+      case mproxy::EvKind::MsgCount:
+        _msgcount = ev.msgcount;
+        break;
+    }
+  }
 }

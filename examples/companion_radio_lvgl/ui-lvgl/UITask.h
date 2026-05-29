@@ -6,6 +6,7 @@
 #include "../../companion_radio/AbstractUITask.h"
 #include "../../companion_radio/NodePrefs.h"
 #include "MessageStore.h"
+#include "MeshProxy.h"   // mproxy:: snapshot reads + command/event mailboxes
 #ifdef HAS_SD_CARD
   #include "SdMessageStore.h"
 #endif
@@ -16,7 +17,10 @@
 
 class UITask : public AbstractUITask {
   LGFX_Device*    _lgfx;
-  NodePrefs*      _node_prefs;
+  NodePrefs*      _node_prefs;       // -> _node_prefs_store (UI-owned working copy)
+  NodePrefs       _node_prefs_store; // seeded from the snapshot; edits push CMD_UpdatePrefs
+  uint32_t        _last_snap_version;// last mproxy snapshot version the UI rebuilt from
+  uint32_t        _send_seq;         // monotonic client send-token (async send correlation)
   SensorManager*  _sensors;
   bool            _started;
   uint32_t        _last_tick_ms;
@@ -80,7 +84,7 @@ class UITask : public AbstractUITask {
   // the SD store when persistence is active.
   void storeAppend(bool outgoing, const char* key, const char* sender,
                    const char* text, uint32_t ts,
-                   uint8_t status = 0, uint32_t ack = 0, uint32_t expiry_ms = 0);
+                   uint8_t status = 0, uint32_t ack = 0, uint32_t expiry_ms = 0, uint32_t cli = 0);
   lv_obj_t*       _chat_screen;
   lv_obj_t*       _chat_title;          // contact name in the chat top bar
   lv_obj_t*       _chat_history;        // scrollable message container (the VSA band)
@@ -127,6 +131,12 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _cinfo_kb;
   lv_obj_t*       _cinfo_active_ta;     // textarea currently being edited
   uint8_t         _cinfo_pubkey[32];    // full key of the contact being viewed
+  // UI-owned working copy of the viewed contact (loaded from the snapshot at
+  // openContactInfo). The Contact-Info page reads/edits this copy for instant
+  // feedback; edits also push a CMD_* the backend applies to the real contact.
+  ContactInfo     _cinfo_c;
+  bool            _cinfo_valid;
+  char            _cinfo_override[CHAT_PEER_NAME_MAX];  // local nickname (optimistic)
   lv_obj_t*       _cinfo_return_screen; // where back goes
 
   // Latest telemetry readings, stashed for the Contact Info page (one contact's
@@ -207,8 +217,21 @@ class UITask : public AbstractUITask {
   // Display name = local override if set, else the contact's advert name.
   const char* displayName(const uint8_t* pubkey, const char* realname, char* buf, size_t cap);
   bool      contactPasses(const struct ContactInfo& c);
-  uint32_t  contactsSignature();
   void      rebuildChannelsList();
+  // Drain the backend→UI event queue (new/sent msgs, delivery, telemetry) and
+  // apply each to the message store / LVGL. Runs at the top of loop(), UI core.
+  void      drainEvents();
+  // Optimistic async send: append a SENDING bubble with a fresh client token and
+  // post CMD_Send; the backend replies EV_SendResult with the real ack. Returns
+  // the token. `pubkey6` (contact) or `channel_idx` selects the recipient.
+  uint32_t  postSend(bool is_channel, const uint8_t* pubkey6, int channel_idx,
+                     const char* conv_key, const char* sender, const char* text);
+  // Command-posting helpers (UI → backend). Static so the LVGL event callbacks
+  // (which only have _instance) can call them uniformly. All read _instance.
+  static void pushPrefs();   // CMD_UpdatePrefs from _node_prefs (persist settings)
+  static void pushRadio();   // CMD_ApplyRadio from _node_prefs (apply + persist radio)
+  static void pushAdvert();  // CMD_Advert (re-broadcast self)
+  static void postPubkeyCmd(mproxy::CmdKind kind, const uint8_t* pk);  // fav/path/telem/share
   static void channel_clicked_cb(lv_event_t* e);
   static void contacts_table_cb(lv_event_t* e);
   static void contacts_table_draw_cb(lv_event_t* e);
@@ -394,8 +417,10 @@ public:
       _qr_return_screen(NULL),
       _screen_w(0), _screen_h(0),
       _kb_scroll(NULL), _kb_scroll_pad(0),
-      _buf1(NULL), _buf2(NULL), _msgs(&_rammsgs), _sd_off_ts(0) {
+      _buf1(NULL), _buf2(NULL), _msgs(&_rammsgs), _sd_off_ts(0),
+      _last_snap_version(0), _send_seq(0), _cinfo_valid(false) {
         _chat_peer[0] = 0;
+        _cinfo_override[0] = 0;
         _chat_key[0] = 0;
         _search_filter[0] = 0;
         _clipboard[0] = 0;

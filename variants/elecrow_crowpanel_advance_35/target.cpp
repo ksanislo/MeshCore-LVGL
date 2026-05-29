@@ -8,6 +8,44 @@ CrowPanelBoard board;
 
 static SPIClass lora_spi(HSPI);
 
+// ---- Shared HSPI ownership --------------------------------------------------
+// The LoRa radio and the SD card share ONE HSPI controller (lora_spi), on
+// different pins. Today the firmware is single-threaded so accesses never
+// overlap; once the mesh/radio moves to its own core (core 0) the UI core can
+// drive the SD while the mesh core drives the radio. This mutex serializes the
+// two so a re-pin (sd_bus_to_*) never lands mid radio-transaction.
+//
+// Radio side: a custom RadioLibHal (HspiLockHal, below) takes/gives this mutex
+// per SPI transaction. SD side: SdSvc::Lock / the lv_fs driver take it around
+// the whole open..close span via hspi_lock()/hspi_unlock(). The RX path is
+// ISR-flag-based and does no SPI, so the mutex is never used from an ISR.
+static SemaphoreHandle_t hspi_mutex = nullptr;
+
+static void hspi_mutex_ensure() {
+  if (!hspi_mutex) hspi_mutex = xSemaphoreCreateMutex();
+}
+void hspi_lock()   { if (hspi_mutex) xSemaphoreTake(hspi_mutex, portMAX_DELAY); }
+void hspi_unlock() { if (hspi_mutex) xSemaphoreGive(hspi_mutex); }
+
+// RadioLib HAL that brackets each SPI transaction with the shared HSPI mutex.
+// Thin subclass: the base does the real SPI work; we only add the lock around
+// it. Holds are brief (one transaction, ~µs uncontended), so radio timing is
+// unaffected. Confined to the variant -- no edits to shared src/ or RadioLib.
+class HspiLockHal : public ArduinoHal {
+public:
+  HspiLockHal(SPIClass& spi, SPISettings settings) : ArduinoHal(spi, settings) {}
+  void spiBeginTransaction() override {
+    hspi_lock();
+    ArduinoHal::spiBeginTransaction();
+  }
+  void spiEndTransaction() override {
+    ArduinoHal::spiEndTransaction();
+    hspi_unlock();
+  }
+};
+
+static HspiLockHal lora_hal(lora_spi, RADIOLIB_DEFAULT_SPI_SETTINGS);
+
 #ifdef HAS_SD_CARD
 // Shared SD filesystem (SdFat, FAT16/32 + exFAT). Consumers (message store, and
 // later emoji/map/sound caches) use this handle. The card shares the LoRa HSPI
@@ -17,6 +55,8 @@ static SPIClass lora_spi(HSPI);
 // end() first: begin() won't re-pin an already-initialized bus (it just warns).
 SdFs sd;
 
+// NOTE: callers must hold hspi_lock() across the sd_bus_to_sd()..sd_bus_to_lora()
+// span (SdSvc::Lock and the lv_fs driver do) so a re-pin never races the radio.
 void sd_bus_to_sd()   { lora_spi.end(); lora_spi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS); }
 void sd_bus_to_lora() { lora_spi.end(); lora_spi.begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI); }
 
@@ -29,7 +69,7 @@ bool sd_card_begin() {
   return ok;
 }
 #endif  // HAS_SD_CARD
-RADIO_CLASS radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, lora_spi);
+RADIO_CLASS radio = new Module(&lora_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 
 WRAPPER_CLASS radio_driver(radio, board);
 
@@ -41,6 +81,7 @@ EnvironmentSensorManager sensors;
 #endif
 
 bool radio_init() {
+  hspi_mutex_ensure();   // before any radio/SD SPI transaction can take it
   rtc_clock.begin();
 
   lora_spi.begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI);

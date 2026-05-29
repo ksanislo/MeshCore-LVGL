@@ -27,6 +27,8 @@ struct ChatMessage {
   uint8_t  status;     // MSG_STATUS_* (delivery state for outgoing direct msgs)
   uint32_t ack;        // expected ACK value (to match a delivery confirmation)
   uint32_t expiry_ms;  // millis() deadline after which a SENDING msg is FAILED (0 = none)
+  uint32_t cli;        // client send-token: correlates an optimistic outgoing bubble
+                       // with its async EV_SEND_RESULT (0 = none). RAM-only, not persisted.
 };
 
 class MessageStore {
@@ -41,16 +43,21 @@ public:
 
   virtual void append(bool outgoing, const char* peer, const char* sender,
                       const char* text, uint32_t ts,
-                      uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0) = 0;
+                      uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0,
+                      uint32_t cli = 0) = 0;
 
   // Mark the (most recent) SENDING message with this ack as `status`. Returns true if found.
   virtual bool setStatusByAck(uint32_t ack, uint8_t status) = 0;
+  // Resolve an optimistic outgoing bubble by its client token (set the real ack +
+  // expiry once the backend confirms the send, or FAILED if it didn't). Finds the
+  // most-recent SENDING message with this `cli`. Returns true if found.
+  virtual bool setByClientToken(uint32_t cli, uint8_t status, uint32_t ack, uint32_t expiry_ms) = 0;
   // Move any SENDING message past its expiry deadline to `fail_status`. Returns true if any changed.
   virtual bool expireSending(uint32_t now_ms, uint8_t fail_status) = 0;
 
   // Re-arm an existing (e.g. failed) message in place for a resend: set it back to
-  // SENDING with a new ack/expiry, no new entry. Returns false if `m` isn't current.
-  virtual bool requeue(const ChatMessage* m, uint32_t ack, uint32_t expiry_ms) = 0;
+  // SENDING with a new ack/expiry/token, no new entry. Returns false if `m` isn't current.
+  virtual bool requeue(const ChatMessage* m, uint32_t ack, uint32_t expiry_ms, uint32_t cli = 0) = 0;
 
   // Fill `out` with pointers to this peer's messages, oldest-first, up to `max`.
   // Returns the number written. Pointers stay valid until the next append.
@@ -79,13 +86,15 @@ class RamMessageStore : public MessageStore {
 public:
   void append(bool outgoing, const char* peer, const char* sender,
               const char* text, uint32_t ts,
-              uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0) override {
+              uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0,
+              uint32_t cli = 0) override {
     ChatMessage& m = _buf[_head];
     m.outgoing = outgoing;
     m.timestamp = ts;
     m.status = status;
     m.ack = ack;
     m.expiry_ms = expiry_ms;
+    m.cli = cli;
     copyBounded(m.peer, peer, CHAT_PEER_NAME_MAX);
     copyBounded(m.sender, sender, CHAT_PEER_NAME_MAX);
     copyBounded(m.text, text, CHAT_MSG_TEXT_MAX);
@@ -117,6 +126,21 @@ public:
     return false;
   }
 
+  bool setByClientToken(uint32_t cli, uint8_t status, uint32_t ack, uint32_t expiry_ms) override {
+    if (!cli) return false;
+    for (int k = 0; k < _count; k++) {
+      int i = (_head - 1 - k + CAP) % CAP;
+      if (_buf[i].cli == cli && _buf[i].status == MSG_STATUS_SENDING) {
+        _buf[i].status = status;
+        _buf[i].ack = ack;
+        _buf[i].expiry_ms = expiry_ms;
+        _buf[i].cli = 0;   // resolved
+        return true;
+      }
+    }
+    return false;
+  }
+
   bool expireSending(uint32_t now_ms, uint8_t fail_status) override {
     bool changed = false;
     for (int i = 0; i < _count; i++) {
@@ -129,12 +153,13 @@ public:
     return changed;
   }
 
-  bool requeue(const ChatMessage* m, uint32_t ack, uint32_t expiry_ms) override {
+  bool requeue(const ChatMessage* m, uint32_t ack, uint32_t expiry_ms, uint32_t cli = 0) override {
     for (int i = 0; i < _count; i++) {
       if (&_buf[i] == m) {  // still the same live slot
         _buf[i].status = MSG_STATUS_SENDING;
         _buf[i].ack = ack;
         _buf[i].expiry_ms = expiry_ms;
+        _buf[i].cli = cli;
         return true;
       }
     }

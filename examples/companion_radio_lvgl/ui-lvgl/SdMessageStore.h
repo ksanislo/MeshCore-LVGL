@@ -62,7 +62,7 @@ class SdMessageStore : public MessageStore {
 
   // Append into the linear RAM buffer (drops the oldest when full).
   void pushBuf(bool outgoing, const char* sender, const char* text, uint32_t ts,
-               uint8_t status, uint32_t ack, uint32_t expiry_ms) {
+               uint8_t status, uint32_t ack, uint32_t expiry_ms, uint32_t cli = 0) {
     if (_count == CAP) {
       for (int i = 1; i < CAP; i++) _buf[i - 1] = _buf[i];
       _count--;
@@ -73,6 +73,7 @@ class SdMessageStore : public MessageStore {
     m.status = status;
     m.ack = ack;
     m.expiry_ms = expiry_ms;
+    m.cli = cli;
     copyBounded(m.peer, _loaded, CHAT_PEER_NAME_MAX);
     copyBounded(m.sender, sender, CHAT_PEER_NAME_MAX);
     copyBounded(m.text, text, CHAT_MSG_TEXT_MAX);
@@ -115,7 +116,7 @@ class SdMessageStore : public MessageStore {
     if (!f_ts || !f_dir || !f_st || !f_snd) return;
     uint8_t status = (uint8_t)atoi(f_st);
     if (status == MSG_STATUS_SENDING) status = MSG_STATUS_NONE;  // not in-flight across reboot
-    pushBuf(atoi(f_dir) != 0, f_snd, f_txt, (uint32_t)strtoul(f_ts, nullptr, 10), status, 0, 0);
+    pushBuf(atoi(f_dir) != 0, f_snd, f_txt, (uint32_t)strtoul(f_ts, nullptr, 10), status, 0, 0, 0);
   }
 
 public:
@@ -186,6 +187,7 @@ public:
         m.status = MSG_STATUS_NONE;
         m.ack = 0;
         m.expiry_ms = 0;
+        m.cli = 0;
         copyBounded(m.peer, key, CHAT_PEER_NAME_MAX);
         copyBounded(m.sender, f_snd, CHAT_PEER_NAME_MAX);
         copyBounded(m.text, f_txt, CHAT_MSG_TEXT_MAX);
@@ -210,7 +212,8 @@ public:
 
   void append(bool outgoing, const char* peer, const char* sender,
               const char* text, uint32_t ts,
-              uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0) override {
+              uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0,
+              uint32_t cli = 0) override {
     if (ensure()) {
       // Build the whole record, then write it in one go and verify every byte
       // landed -- a full card silently short-writes, so check the count.
@@ -241,7 +244,7 @@ public:
       }
     }
     if (strncmp(peer, _loaded, CHAT_PEER_NAME_MAX) == 0)
-      pushBuf(outgoing, sender, text, ts, status, ack, expiry_ms);
+      pushBuf(outgoing, sender, text, ts, status, ack, expiry_ms, cli);
   }
 
   int messagesFor(const char* peer, const ChatMessage** out, int max) override {
@@ -268,6 +271,21 @@ public:
       int i = _count - 1 - k;
       if (_buf[i].ack == ack && _buf[i].status == MSG_STATUS_SENDING) {
         _buf[i].status = status;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool setByClientToken(uint32_t cli, uint8_t status, uint32_t ack, uint32_t expiry_ms) override {
+    if (!cli) return false;
+    for (int k = 0; k < _count; k++) {
+      int i = _count - 1 - k;
+      if (_buf[i].cli == cli && _buf[i].status == MSG_STATUS_SENDING) {
+        _buf[i].status = status;
+        _buf[i].ack = ack;
+        _buf[i].expiry_ms = expiry_ms;
+        _buf[i].cli = 0;   // resolved
         return true;
       }
     }
@@ -312,12 +330,13 @@ public:
     return ts;
   }
 
-  bool requeue(const ChatMessage* m, uint32_t ack, uint32_t expiry_ms) override {
+  bool requeue(const ChatMessage* m, uint32_t ack, uint32_t expiry_ms, uint32_t cli = 0) override {
     for (int i = 0; i < _count; i++)
       if (&_buf[i] == m) {
         _buf[i].status = MSG_STATUS_SENDING;
         _buf[i].ack = ack;
         _buf[i].expiry_ms = expiry_ms;
+        _buf[i].cli = cli;
         return true;
       }
     return false;
