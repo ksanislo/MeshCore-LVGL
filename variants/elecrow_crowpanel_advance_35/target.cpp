@@ -74,7 +74,14 @@ RADIO_CLASS radio = new Module(&lora_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET
 WRAPPER_CLASS radio_driver(radio, board);
 
 CrowPanelRTCClock rtc_clock;
+#if ENV_INCLUDE_GPS
+// Optional GPS on UART1 (routed to the rear plug's IO43/IO44 via setPins in
+// EnvironmentSensorManager::initBasicGPS). No-op if no module answers at boot.
+MicroNMEALocationProvider gps(Serial1, &rtc_clock);
+EnvironmentSensorManager sensors(gps);
+#else
 EnvironmentSensorManager sensors;
+#endif
 
 #ifdef DISPLAY_CLASS
   DISPLAY_CLASS display;

@@ -11,6 +11,9 @@
   #include "CrowPanelLGFX.h"
 #endif
 #include "helpers/sensors/EnvironmentSensorManager.h"
+#if ENV_INCLUDE_GPS
+  #include "helpers/sensors/MicroNMEALocationProvider.h"
+#endif
 
 // GT911 touch + BM8563 RTC share this I2C bus.
 #ifndef P_TOUCH_SDA

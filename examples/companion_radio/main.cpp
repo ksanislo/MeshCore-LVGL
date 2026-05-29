@@ -246,10 +246,19 @@ void setup() {
   #error "need to define filesystem"
 #endif
 
+#if defined(ELECROW_CROWPANEL_ADVANCE_35) && (ENV_INCLUDE_GPS == 1)
+  // CrowPanel has no on-board sensors, so sensors.begin() does nothing but the GPS
+  // boot-detect probe (a ~1s delay()). Skip it -- and the GPS bring-up -- unless GPS
+  // is actually enabled, so a unit with nothing on the rear UART plug never stalls.
+  if (the_mesh.getNodePrefs()->gps_enabled) {
+    sensors.begin();
+    the_mesh.applyGpsPrefs();
+  }
+#else
   sensors.begin();
-
-#if ENV_INCLUDE_GPS == 1
-  the_mesh.applyGpsPrefs();
+  #if ENV_INCLUDE_GPS == 1
+    the_mesh.applyGpsPrefs();
+  #endif
 #endif
 
 #ifdef MESH_PROXY
