@@ -37,7 +37,9 @@
 #define LV_CIRCLE_CACHE_SIZE            4
 #define LV_LAYER_SIMPLE_BUF_SIZE        (24 * 1024)
 #define LV_LAYER_SIMPLE_FALLBACK_BUF_SIZE (3 * 1024)
-#define LV_IMG_CACHE_DEF_SIZE           0
+// Cache decoded images so scrolling emoji aren't re-read from SD every frame.
+// Our emoji decoder preloads each glyph to RAM; the cache keeps ~this many live.
+#define LV_IMG_CACHE_DEF_SIZE           48
 #define LV_GRADIENT_MAX_STOPS           2
 #define LV_GRAD_CACHE_DEF_SIZE          0
 #define LV_DITHER_GRADIENT              0
