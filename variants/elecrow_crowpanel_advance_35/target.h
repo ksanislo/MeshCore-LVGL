@@ -55,6 +55,13 @@ public:
 
 extern CrowPanelBoard board;
 extern WRAPPER_CLASS radio_driver;
+
+#ifdef HAS_SD_CARD
+// SD card shares the LoRa HSPI bus (re-pinned per access). See target.cpp.
+void sd_bus_to_sd();
+void sd_bus_to_lora();
+bool sd_card_begin();
+#endif
 extern CrowPanelRTCClock rtc_clock;
 extern EnvironmentSensorManager sensors;
 

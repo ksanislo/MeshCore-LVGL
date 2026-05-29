@@ -47,6 +47,15 @@
   #define PIN_I2S_DOUT 12
 #endif
 
+// microSD slot (SPI). Wired to its own pin set, separate from the display (SPI2)
+// and LoRa (HSPI) buses.
+#ifndef PIN_SD_SCK
+  #define PIN_SD_SCK  5
+  #define PIN_SD_MISO 4
+  #define PIN_SD_MOSI 6
+  #define PIN_SD_CS   7
+#endif
+
 class CrowPanelBoard : public ESP32Board {
 public:
   void begin();

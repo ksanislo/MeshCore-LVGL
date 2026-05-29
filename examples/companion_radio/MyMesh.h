@@ -198,6 +198,13 @@ public:
     return false;
   }
 
+  // Stable conversation key of the message currently being handed to the UI
+  // (set right before each newMsg/sentMsg call): the contact pubkey prefix for a
+  // direct message, or the channel secret prefix for a channel message. Lets the
+  // on-device UI key chat history by identity instead of a mutable display name.
+  const uint8_t* hookKey() const { return _hook_key; }
+  bool hookIsChannel() const { return _hook_is_channel; }
+
   // Local display-name overrides, stored OUTSIDE the contact record (a small
   // RAM table persisted to /disp_names) so they survive advert name overwrites.
   // Presentation-only: identity, routing and chat keys still use the advert name.
@@ -269,6 +276,10 @@ private:
   static const int MAX_NAME_OVERRIDES = 32;
   NameOverride _name_ov[MAX_NAME_OVERRIDES];
   int _name_ov_count = 0;
+
+  uint8_t _hook_key[6] = {0};   // identity of the msg currently handed to the UI
+  bool _hook_is_channel = false;
+  void setHookKey(const uint8_t* k6, bool is_channel) { memcpy(_hook_key, k6, 6); _hook_is_channel = is_channel; }
 
   void writeOKFrame();
   void writeErrFrame(uint8_t err_code);

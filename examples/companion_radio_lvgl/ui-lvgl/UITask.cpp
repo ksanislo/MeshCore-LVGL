@@ -346,7 +346,7 @@ void UITask::rebuildContactsList() {
     _crows[_crow_count].idx = (uint16_t)i;
     // Sort key: latest message time for "Latest Messages", else last-heard.
     _crows[_crow_count].heard = (_contacts_order == 2)
-        ? _msgs.latestTimestampFor(c.name) : c.last_advert_timestamp;
+        ? _msgs->latestTimestampFor(c.name) : c.last_advert_timestamp;
     _crows[_crow_count].fav = (c.flags & CONTACT_FLAG_FAVOURITE) ? 1 : 0;
     _crow_count++;
   }
@@ -981,7 +981,9 @@ void UITask::pick_table_cb(lv_event_t* e) {
       if (the_mesh.sendMessage(*recip, now, 0, ref, ack, to) != MSG_SEND_FAILED) {
         const char* me = (_instance->_node_prefs && _instance->_node_prefs->node_name[0])
                              ? _instance->_node_prefs->node_name : "Me";
-        _instance->_msgs.append(true, recip->name, me, ref, now);
+        char key[CHAT_PEER_NAME_MAX];
+        convKey(recip->id.pub_key, false, key, sizeof(key));
+        _instance->_msgs->append(true, key, me, ref, now);
       }
       _instance->showToast("Contact shared");
     }
@@ -1067,6 +1069,15 @@ static void encodeMentions(const char* in, char* out, size_t cap) {
   out[o] = 0;
 }
 
+void UITask::convKey(const uint8_t* key6, bool is_channel, char* out, size_t cap) {
+  if (is_channel && cap > 16) {
+    out[0] = 'c'; out[1] = 'h'; out[2] = '_';
+    mesh::Utils::toHex(out + 3, key6, 6);   // "ch_" + 12 hex
+  } else {
+    mesh::Utils::toHex(out, key6, 6);        // 12 hex
+  }
+}
+
 void UITask::sendCurrentMessage() {
   if (!_chat_input) return;
   const char* raw = lv_textarea_get_text(_chat_input);
@@ -1096,9 +1107,9 @@ void UITask::sendCurrentMessage() {
     if (c && ack) {
       // Direct message with an expected ACK: track delivery (sending -> delivered/failed).
       the_mesh.addExpectedAck(ack, c);
-      _msgs.append(true, _chat_peer, me, text, now, MSG_STATUS_SENDING, ack, millis() + timeout + 2000);
+      _msgs->append(true, _chat_key, me, text, now, MSG_STATUS_SENDING, ack, millis() + timeout + 2000);
     } else {
-      _msgs.append(true, _chat_peer, me, text, now);  // channel / no-ack: no delivery tracking
+      _msgs->append(true, _chat_key, me, text, now);  // channel / no-ack: no delivery tracking
     }
     lv_textarea_set_text(_chat_input, "");
     rebuildChatHistory();
@@ -1106,7 +1117,7 @@ void UITask::sendCurrentMessage() {
 }
 
 void UITask::msgDelivered(uint32_t ack) {
-  if (_msgs.setStatusByAck(ack, MSG_STATUS_DELIVERED) && _chat_screen)
+  if (_msgs->setStatusByAck(ack, MSG_STATUS_DELIVERED) && _chat_screen)
     rebuildChatHistory();
 }
 
@@ -1122,10 +1133,10 @@ void UITask::resendMessage(const ChatMessage* m) {
   if (the_mesh.sendMessage(*c, now, 0, text, ack, timeout) == MSG_SEND_FAILED || !ack) return;
   the_mesh.addExpectedAck(ack, c);
   // Re-arm the existing entry in place (back to "sending") -- no duplicate bubble.
-  if (!_msgs.requeue(m, ack, millis() + timeout + 2000)) {
-    // The original scrolled out of the ring; fall back to a fresh entry.
+  if (!_msgs->requeue(m, ack, millis() + timeout + 2000)) {
+    // The original scrolled out of the buffer; fall back to a fresh entry.
     const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
-    _msgs.append(true, _chat_peer, me, text, now, MSG_STATUS_SENDING, ack, millis() + timeout + 2000);
+    _msgs->append(true, _chat_key, me, text, now, MSG_STATUS_SENDING, ack, millis() + timeout + 2000);
   }
   rebuildChatHistory();
 }
@@ -1440,7 +1451,7 @@ void UITask::rebuildChatHistory() {
   _sending_lbl = NULL;  // old label just got deleted; re-set if a sending msg renders
 
   const ChatMessage* all[CHAT_HISTORY_CAP];
-  int n = _msgs.messagesFor(_chat_peer, all, CHAT_HISTORY_CAP);
+  int n = _msgs->messagesFor(_chat_key, all, CHAT_HISTORY_CAP);
 
   bool filtering = _search_active && _search_filter[0];
   const ChatMessage* shown[CHAT_HISTORY_CAP];
@@ -1723,6 +1734,16 @@ void UITask::openChat(const char* peer_name) {
   char tname[CHAT_PEER_NAME_MAX + 4];
   sanitizeForFont(shown, tname, sizeof(tname));
   lv_label_set_text(_chat_title, tname);
+
+  // Stable per-conversation storage key (pubkey for contacts, channel secret for channels).
+  if (_chat_is_channel) {
+    ChannelDetails ch;
+    if (the_mesh.getChannel(_chat_channel_idx, ch)) convKey(ch.channel.secret, true, _chat_key, sizeof(_chat_key));
+    else _chat_key[0] = 0;
+  } else {
+    convKey(_chat_pubkey, false, _chat_key, sizeof(_chat_key));
+  }
+
   rebuildChatHistory();
   lv_scr_load(_chat_screen);
 }
@@ -1731,6 +1752,14 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _sensors = sensors;
   _node_prefs = node_prefs;
   _instance = this;
+
+#ifdef HAS_SD_CARD
+  // Use the persistent SD store only if the user enabled chat-history saving
+  // (default on); otherwise stay on the session-only RAM store. Chosen here at
+  // startup, so toggling the setting takes effect on the next restart.
+  if (!_node_prefs || _node_prefs->persist_history) _msgs = &_sdmsgs;
+#endif
+  _msgs->begin();  // mounts the SD card (SD store) or no-ops (RAM store)
 
   // Restore the saved contacts sort/filter (0xFF = unset -> keep code defaults).
   if (_node_prefs) {
@@ -1848,10 +1877,12 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
     }
   }
 
-  _msgs.append(false, from_name, sender, body, the_mesh.getRTCClock()->getCurrentTime());
+  char key[CHAT_PEER_NAME_MAX];
+  convKey(the_mesh.hookKey(), the_mesh.hookIsChannel(), key, sizeof(key));
+  _msgs->append(false, key, sender, body, the_mesh.getRTCClock()->getCurrentTime());
 
-  // If this peer's chat is currently open, refresh it live.
-  if (_chat_screen && from_name && strncmp(from_name, _chat_peer, CHAT_PEER_NAME_MAX) == 0) {
+  // If this conversation's chat is currently open, refresh it live.
+  if (_chat_screen && strncmp(key, _chat_key, CHAT_PEER_NAME_MAX) == 0) {
     rebuildChatHistory();
   }
 
@@ -1862,10 +1893,13 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
 }
 
 void UITask::sentMsg(const char* peer, const char* text) {
+  (void)peer;  // keyed by identity (stashed by MyMesh), not the display name
   const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
-  _msgs.append(true, peer, me, text, the_mesh.getRTCClock()->getCurrentTime());
+  char key[CHAT_PEER_NAME_MAX];
+  convKey(the_mesh.hookKey(), the_mesh.hookIsChannel(), key, sizeof(key));
+  _msgs->append(true, key, me, text, the_mesh.getRTCClock()->getCurrentTime());
 
-  if (_chat_screen && peer && strncmp(peer, _chat_peer, CHAT_PEER_NAME_MAX) == 0) {
+  if (_chat_screen && strncmp(key, _chat_key, CHAT_PEER_NAME_MAX) == 0) {
     rebuildChatHistory();
   }
 }
@@ -2610,7 +2644,7 @@ void UITask::kebab_clearhistory_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   _instance->closeMenuPopup();
-  _instance->_msgs.clearPeer(_instance->_chat_peer);
+  _instance->_msgs->clearPeer(_instance->_chat_key);
   _instance->rebuildChatHistory();
   _instance->showToast("History cleared");
 }
@@ -2983,6 +3017,13 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_clock_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_clock_chk, set_clock_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+#ifdef HAS_SD_CARD
+  _set_history_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_history_chk, "Save chat history (restart to apply)");
+  lv_obj_set_style_text_color(_set_history_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_history_chk, set_history_cb, LV_EVENT_VALUE_CHANGED, NULL);
+#endif
+
   // Shared on-screen keyboard for the settings textareas. Parented to the home
   // screen so it overlays the tabview; hidden until a field is focused.
   _set_kb = lv_keyboard_create(parent);
@@ -3047,6 +3088,10 @@ void UITask::populateSettings() {
   if (_set_clock_chk) {
     if (_node_prefs->clock_12h) lv_obj_add_state(_set_clock_chk, LV_STATE_CHECKED);
     else                        lv_obj_clear_state(_set_clock_chk, LV_STATE_CHECKED);
+  }
+  if (_set_history_chk) {
+    if (_node_prefs->persist_history != 0) lv_obj_add_state(_set_history_chk, LV_STATE_CHECKED);  // 0xFF/1 = on
+    else                                   lv_obj_clear_state(_set_history_chk, LV_STATE_CHECKED);
   }
 }
 
@@ -3241,6 +3286,12 @@ void UITask::set_clock_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   _instance->_node_prefs->clock_12h = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
   the_mesh.savePrefs();
+}
+
+void UITask::set_history_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  _instance->_node_prefs->persist_history = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
+  the_mesh.savePrefs();  // store choice is applied on next restart
 }
 
 void UITask::set_tz_ta_event_cb(lv_event_t* e) {
@@ -3539,9 +3590,20 @@ void UITask::loop() {
     }
   }
 
+#ifdef HAS_SD_CARD
+  // Surface SD persistence problems instead of silently dropping history.
+  static bool sd_warned = false;
+  static uint32_t sd_err_toast_ms = 0;
+  if (!sd_warned && now > 4000) { sd_warned = true; if (!_msgs->ready()) showToast("No SD card - history won't be saved"); }
+  if (_msgs->takeWriteError() && now - sd_err_toast_ms > 15000) {  // throttle: don't spam per message
+    sd_err_toast_ms = now;
+    showToast("SD write failed - message not saved");
+  }
+#endif
+
   // Outgoing send-status: fail any in-flight message past its deadline, then
   // animate the "sending" footer of the most recent in-flight message.
-  if (_msgs.expireSending(now, MSG_STATUS_FAILED) && _chat_screen) rebuildChatHistory();
+  if (_msgs->expireSending(now, MSG_STATUS_FAILED) && _chat_screen) rebuildChatHistory();
   if (_sending_lbl && now - _anim_ms >= 400) {
     _anim_ms = now;
     _dot_frame = (_dot_frame + 1) & 3;

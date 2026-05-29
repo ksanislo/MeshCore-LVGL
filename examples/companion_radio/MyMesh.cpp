@@ -467,6 +467,7 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   // we only want to show text messages on display, not cli data
   bool should_display = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN;
   if (should_display && _ui) {
+    setHookKey(from.id.pub_key, false);
     _ui->newMsg(path_len, from.name, text, offline_queue_len);
     if (!_serial->isConnected()) {
       _ui->notify(UIEventType::contactMessage);
@@ -576,7 +577,10 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   if (getChannel(channel_idx, channel_details)) {
     channel_name = channel_details.name;
   }
-  if (_ui) _ui->newMsg(path_len, channel_name, text, offline_queue_len);
+  if (_ui) {
+    setHookKey(channel.secret, true);
+    _ui->newMsg(path_len, channel_name, text, offline_queue_len);
+  }
 #endif
 }
 
@@ -1085,7 +1089,10 @@ void MyMesh::handleCmdFrame(size_t len) {
       } else {
         result = sendMessage(*recipient, msg_timestamp, attempt, text, expected_ack, est_timeout);
 #ifdef DISPLAY_CLASS
-        if (_ui && result != MSG_SEND_FAILED) _ui->sentMsg(recipient->name, text);
+        if (_ui && result != MSG_SEND_FAILED) {
+          setHookKey(recipient->id.pub_key, false);
+          _ui->sentMsg(recipient->name, text);
+        }
 #endif
       }
       // TODO: add expected ACK to table
@@ -1126,7 +1133,10 @@ void MyMesh::handleCmdFrame(size_t len) {
       bool success = getChannel(channel_idx, channel);
       if (success && sendGroupMessage(msg_timestamp, channel.channel, _prefs.node_name, text, len - i)) {
 #ifdef DISPLAY_CLASS
-        if (_ui) _ui->sentMsg(channel.name, text);
+        if (_ui) {
+          setHookKey(channel.channel.secret, true);
+          _ui->sentMsg(channel.name, text);
+        }
 #endif
         writeOKFrame();
       } else {

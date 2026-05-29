@@ -17,3 +17,6 @@ compile_commands.json
 .venv/
 venv/
 platformio.local.ini
+
+# local dev scratch (persistent across reboots; not committed)
+.devtmp/

@@ -6,6 +6,9 @@
 #include "../../companion_radio/AbstractUITask.h"
 #include "../../companion_radio/NodePrefs.h"
 #include "MessageStore.h"
+#ifdef HAS_SD_CARD
+  #include "SdMessageStore.h"
+#endif
 
 #ifndef CHAT_HISTORY_CAP
   #define CHAT_HISTORY_CAP 48
@@ -65,7 +68,11 @@ class UITask : public AbstractUITask {
 
   // Chat (conversation) screen. Three-band: fixed top bar / scrollable history
   // / fixed compose band (compose added with the keyboard step).
-  RamMessageStore<CHAT_HISTORY_CAP> _msgs;
+  RamMessageStore<CHAT_HISTORY_CAP> _rammsgs;   // session-only fallback
+#ifdef HAS_SD_CARD
+  SdMessageStore<CHAT_HISTORY_CAP> _sdmsgs;     // persistent (per-conversation files on SD)
+#endif
+  MessageStore* _msgs;   // -> _rammsgs or _sdmsgs, chosen at begin() from the setting
   lv_obj_t*       _chat_screen;
   lv_obj_t*       _chat_title;          // contact name in the chat top bar
   lv_obj_t*       _chat_history;        // scrollable message container (the VSA band)
@@ -74,7 +81,8 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _chat_keyboard;       // lv_keyboard, shown on input focus
   lv_obj_t*       _insert_popup;        // backdrop for the insert (+) menu
   lv_obj_t*       _insert_list;         // lv_list inside the popup
-  char            _chat_peer[CHAT_PEER_NAME_MAX];  // peer whose chat is open ("" = none)
+  char            _chat_peer[CHAT_PEER_NAME_MAX];  // display name of the open chat ("" = none)
+  char            _chat_key[CHAT_PEER_NAME_MAX];   // stable storage key (pubkey/secret hex)
   bool            _chat_is_channel;     // send via sendGroupMessage vs sendMessage
   uint8_t         _chat_pubkey[6];      // recipient prefix for contact sends
   int             _chat_channel_idx;    // channel slot for channel sends
@@ -141,6 +149,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_rot_dd;
   lv_obj_t*       _set_tz_ta;           // UTC offset (hours) for local-time display
   lv_obj_t*       _set_clock_chk;       // 12-hour clock toggle
+  lv_obj_t*       _set_history_chk;     // persist chat history to SD toggle
   lv_obj_t*       _set_kb;
   lv_obj_t*       _set_active_ta;       // settings textarea currently being edited
   lv_obj_t*       _set_key_ta;          // read-only self public key (scrolls horizontally)
@@ -207,6 +216,8 @@ class UITask : public AbstractUITask {
   void      rebuildChatHistory();
   void      layoutChatBody(bool keyboard_shown);
   void      sendCurrentMessage();
+  // Stable per-conversation storage key from a 6-byte id (pubkey or channel secret).
+  static void convKey(const uint8_t* key6, bool is_channel, char* out, size_t cap);
   void      resendMessage(const struct ChatMessage* m);
   static void chat_resend_cb(lv_event_t* e);
   void      ensureInsertPopup();
@@ -308,6 +319,7 @@ class UITask : public AbstractUITask {
   void      commitTz();
   static void set_tz_ta_event_cb(lv_event_t* e);
   static void set_clock_cb(lv_event_t* e);
+  static void set_history_cb(lv_event_t* e);
   void      showSharePosWarning();
   static void set_copykey_cb(lv_event_t* e);
   static void set_pos_ta_event_cb(lv_event_t* e);
@@ -357,15 +369,16 @@ public:
       _path_screen(NULL), _path_size_dd(NULL), _path_ta(NULL), _path_kb(NULL), _path_err(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
-      _set_rot_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_kb(NULL),
+      _set_rot_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_history_chk(NULL), _set_kb(NULL),
       _set_active_ta(NULL), _set_key_ta(NULL),
       _set_lat_ta(NULL), _set_lon_ta(NULL), _set_sharepos(NULL), _confirm_popup(NULL),
       _info_popup(NULL), _info_title_lbl(NULL), _info_body_lbl(NULL),
       _qr_screen(NULL), _qr_code(NULL), _qr_name_lbl(NULL), _qr_key_lbl(NULL),
       _qr_return_screen(NULL),
       _screen_w(0), _screen_h(0),
-      _buf1(NULL), _buf2(NULL) {
+      _buf1(NULL), _buf2(NULL), _msgs(&_rammsgs) {
         _chat_peer[0] = 0;
+        _chat_key[0] = 0;
         _search_filter[0] = 0;
         _clipboard[0] = 0;
         _contacts_filter[0] = 0;

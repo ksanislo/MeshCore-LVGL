@@ -33,6 +33,12 @@ class MessageStore {
 public:
   virtual ~MessageStore() {}
 
+  // Backing-store lifecycle/health. Default impls suit a pure-RAM store (always
+  // ready, nothing to mount, never fails); a persistent store overrides them.
+  virtual bool begin() { return true; }
+  virtual bool ready() const { return true; }
+  virtual bool takeWriteError() { return false; }
+
   virtual void append(bool outgoing, const char* peer, const char* sender,
                       const char* text, uint32_t ts,
                       uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0) = 0;
