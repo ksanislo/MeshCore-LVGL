@@ -37,10 +37,12 @@ public:
     Wire.beginTransmission(0x51);
     if (Wire.endTransmission() == 0 && _hw.begin(&Wire)) {
       _hw_ok = true;
-      if (!_hw.lostPower()) {
-        uint32_t t = _hw.now().unixtime();
-        if (t > 1700000000UL) _internal.setCurrentTime(t);  // seed live clock from battery RTC
-      }
+      bool lp = _hw.lostPower();
+      uint32_t t = _hw.now().unixtime();
+      Serial.printf("[RTC] begin: detected lostPower=%d hw_unix=%lu\n", (int)lp, (unsigned long)t);
+      if (!lp && t > 1700000000UL) _internal.setCurrentTime(t);  // seed live clock from battery RTC
+    } else {
+      Serial.println("[RTC] begin: NOT detected at 0x51");
     }
   }
   uint32_t getCurrentTime() override { return _internal.getCurrentTime(); }
@@ -49,6 +51,11 @@ public:
     if (_hw_ok) {
       Wire.begin(P_TOUCH_SDA, P_TOUCH_SCL);   // re-assert pins (touch reconfigures them per read)
       _hw.adjust(DateTime(time));             // keep the battery RTC in sync
+      uint32_t rb = _hw.now().unixtime();     // read back to verify the write actually landed
+      Serial.printf("[RTC] set: wrote=%lu readback=%lu %s\n", (unsigned long)time,
+                    (unsigned long)rb, (rb + 3 >= time && rb <= time + 3) ? "OK" : "MISMATCH");
+    } else {
+      Serial.printf("[RTC] set: hw not ok, internal only=%lu\n", (unsigned long)time);
     }
   }
 };

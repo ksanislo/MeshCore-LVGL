@@ -1236,6 +1236,9 @@ void MyMesh::handleCmdFrame(size_t len) {
     uint32_t secs;
     memcpy(&secs, &cmd_frame[1], 4);
     uint32_t curr = getRTCClock()->getCurrentTime();
+    Serial.printf("[RTC] BLE set-time: recv=%lu curr=%lu delta=%ld %s\n",
+                  (unsigned long)secs, (unsigned long)curr, (long)secs - (long)curr,
+                  (secs >= curr) ? "ACCEPT" : "REJECT");
     if (secs >= curr) {
       getRTCClock()->setCurrentTime(secs);
       writeOKFrame();
