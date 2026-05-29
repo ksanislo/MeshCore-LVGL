@@ -1069,6 +1069,33 @@ static void encodeMentions(const char* in, char* out, size_t cap) {
   out[o] = 0;
 }
 
+void UITask::raiseFieldForKb(lv_obj_t* scroll, lv_obj_t* kb, lv_obj_t* ta) {
+  if (!scroll || !kb || !ta) return;
+  resetKbScroll();   // undo any previous field's padding before re-applying
+  lv_obj_update_layout(kb);
+  lv_area_t ka, fa;
+  lv_obj_get_coords(kb, &ka);
+  lv_obj_get_coords(ta, &fa);
+  lv_coord_t over = fa.y2 + 3 - ka.y1;    // leave only ~3px between the field and the keyboard
+  if (over <= 0) return;                   // already clear of the keyboard -- leave it
+  _kb_scroll = scroll;
+  _kb_scroll_pad = lv_obj_get_style_pad_bottom(scroll, LV_PART_MAIN);
+  lv_obj_set_style_pad_bottom(scroll, _kb_scroll_pad + over, LV_PART_MAIN);  // room to scroll up
+  lv_obj_update_layout(scroll);
+  lv_obj_scroll_by(scroll, 0, -over, LV_ANIM_OFF);
+}
+
+void UITask::resetKbScroll() {
+  if (!_kb_scroll) return;
+  lv_obj_set_style_pad_bottom(_kb_scroll, _kb_scroll_pad, LV_PART_MAIN);
+  lv_obj_update_layout(_kb_scroll);
+  // Removing the padding shrinks the scrollable area; if we were scrolled into
+  // it, pull the content back down so there's no empty gap at the bottom.
+  lv_coord_t sb = lv_obj_get_scroll_bottom(_kb_scroll);
+  if (sb < 0) lv_obj_scroll_by(_kb_scroll, 0, -sb, LV_ANIM_OFF);
+  _kb_scroll = NULL;
+}
+
 void UITask::convKey(const uint8_t* key6, bool is_channel, char* out, size_t cap) {
   if (is_channel && cap > 16) {
     out[0] = 'c'; out[1] = 'h'; out[2] = '_';
@@ -2336,7 +2363,7 @@ void UITask::cinfo_ta_event_cb(lv_event_t* e) {
     lv_obj_clear_flag(_instance->_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(_instance->_cinfo_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_cinfo_kb);
-    lv_obj_scroll_to_view(ta, LV_ANIM_OFF);
+    _instance->raiseFieldForKb(_instance->_cinfo_body, _instance->_cinfo_kb, ta);
   } else if (code == LV_EVENT_DEFOCUSED) {
     _instance->commitCinfoField(ta);
   }
@@ -2351,6 +2378,7 @@ void UITask::cinfo_kb_event_cb(lv_event_t* e) {
       _instance->_cinfo_active_ta = NULL;
     }
     lv_obj_add_flag(_instance->_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
+    _instance->resetKbScroll();
   }
 }
 
@@ -2795,19 +2823,23 @@ void UITask::path_ta_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
-    lv_keyboard_set_textarea(_instance->_path_kb, lv_event_get_target(e));
+    lv_obj_t* ta = lv_event_get_target(e);
+    lv_keyboard_set_textarea(_instance->_path_kb, ta);
     lv_obj_clear_flag(_instance->_path_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(_instance->_path_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_path_kb);
-    lv_obj_scroll_to_view(lv_event_get_target(e), LV_ANIM_OFF);
+    // ta -> field column -> scrollable body
+    _instance->raiseFieldForKb(lv_obj_get_parent(lv_obj_get_parent(ta)), _instance->_path_kb, ta);
   }
 }
 
 void UITask::path_kb_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_event_code_t code = lv_event_get_code(e);
-  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
     lv_obj_add_flag(_instance->_path_kb, LV_OBJ_FLAG_HIDDEN);
+    _instance->resetKbScroll();
+  }
 }
 
 // ===== Settings tab ======================================================
@@ -3173,7 +3205,7 @@ void UITask::set_name_ta_event_cb(lv_event_t* e) {
     lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
-    lv_obj_scroll_to_view(ta, LV_ANIM_OFF);
+    _instance->raiseFieldForKb(_instance->_tab_settings, _instance->_set_kb, ta);
   } else if (code == LV_EVENT_DEFOCUSED) {
     _instance->commitNodeName();
   }
@@ -3190,7 +3222,7 @@ void UITask::set_radio_ta_event_cb(lv_event_t* e) {
     lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
-    lv_obj_scroll_to_view(ta, LV_ANIM_OFF);
+    _instance->raiseFieldForKb(_instance->_tab_settings, _instance->_set_kb, ta);
   }
 }
 
@@ -3204,6 +3236,7 @@ void UITask::set_kb_event_cb(lv_event_t* e) {
     else if (_instance->_set_active_ta == _instance->_set_tz_ta) _instance->commitTz();
     _instance->_set_active_ta = NULL;
     lv_obj_add_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    _instance->resetKbScroll();
   }
 }
 
@@ -3305,7 +3338,7 @@ void UITask::set_tz_ta_event_cb(lv_event_t* e) {
     lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
-    lv_obj_scroll_to_view(ta, LV_ANIM_OFF);
+    _instance->raiseFieldForKb(_instance->_tab_settings, _instance->_set_kb, ta);
   } else if (code == LV_EVENT_DEFOCUSED) {
     _instance->commitTz();
   }
@@ -3322,7 +3355,7 @@ void UITask::set_pos_ta_event_cb(lv_event_t* e) {
     lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
-    lv_obj_scroll_to_view(ta, LV_ANIM_OFF);
+    _instance->raiseFieldForKb(_instance->_tab_settings, _instance->_set_kb, ta);
   } else if (code == LV_EVENT_DEFOCUSED) {
     _instance->commitPosition();
   }

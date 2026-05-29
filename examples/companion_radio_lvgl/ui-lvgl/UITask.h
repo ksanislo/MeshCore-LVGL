@@ -215,6 +215,14 @@ class UITask : public AbstractUITask {
   void      openChat(const char* peer_name);
   void      rebuildChatHistory();
   void      layoutChatBody(bool keyboard_shown);
+  // When a bottom-docked keyboard `kb` is shown, scroll `scroll` so the focused
+  // field `ta` sits just above it (no-op if already clear of the keyboard).
+  // resetKbScroll() restores the container when the keyboard hides.
+  lv_obj_t*       _kb_scroll;        // container temporarily padded for the keyboard
+  lv_coord_t      _kb_scroll_pad;    // its original bottom padding
+  void      raiseFieldForKb(lv_obj_t* scroll, lv_obj_t* kb, lv_obj_t* ta);
+  void      resetKbScroll();
+
   void      sendCurrentMessage();
   // Stable per-conversation storage key from a 6-byte id (pubkey or channel secret).
   static void convKey(const uint8_t* key6, bool is_channel, char* out, size_t cap);
@@ -376,6 +384,7 @@ public:
       _qr_screen(NULL), _qr_code(NULL), _qr_name_lbl(NULL), _qr_key_lbl(NULL),
       _qr_return_screen(NULL),
       _screen_w(0), _screen_h(0),
+      _kb_scroll(NULL), _kb_scroll_pad(0),
       _buf1(NULL), _buf2(NULL), _msgs(&_rammsgs) {
         _chat_peer[0] = 0;
         _chat_key[0] = 0;
