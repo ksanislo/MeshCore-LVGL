@@ -31,6 +31,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _tab_channels;
   lv_obj_t*       _tab_settings;
   lv_obj_t*       _contacts_table;      // lv_table inside _tab_contacts (rows drawn, not objects)
+  lv_obj_t*       _contacts_sb;         // draggable scrollbar thumb for the contacts list
   lv_obj_t*       _contacts_search_ta;  // name search field
   lv_obj_t*       _contacts_kb;         // keyboard for the search field (overlays home screen)
   lv_obj_t*       _contacts_filter_btn; // opens the order/filter pop-out
@@ -58,6 +59,7 @@ class UITask : public AbstractUITask {
   // Used to choose a recipient (share) or a contact to insert into a message.
   lv_obj_t*       _pick_popup;
   lv_obj_t*       _pick_table;
+  lv_obj_t*       _pick_sb;             // draggable scrollbar thumb for the picker list
   lv_obj_t*       _pick_search_ta;
   lv_obj_t*       _pick_kb;
   lv_obj_t*       _pick_title;
@@ -82,6 +84,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _chat_screen;
   lv_obj_t*       _chat_title;          // contact name in the chat top bar
   lv_obj_t*       _chat_history;        // scrollable message container (the VSA band)
+  lv_obj_t*       _chat_sb;             // draggable scrollbar thumb for chat history
   lv_obj_t*       _chat_compose;        // fixed compose band (textarea + send)
   lv_obj_t*       _chat_input;          // lv_textarea
   lv_obj_t*       _chat_keyboard;       // lv_keyboard, shown on input focus
@@ -359,15 +362,15 @@ public:
       _header_label(NULL), _clock_label(NULL), _clock_last(0),
       _tabview(NULL),
       _tab_contacts(NULL), _tab_channels(NULL), _tab_settings(NULL),
-      _contacts_table(NULL), _contacts_search_ta(NULL), _contacts_kb(NULL),
+      _contacts_table(NULL), _contacts_sb(NULL), _contacts_search_ta(NULL), _contacts_kb(NULL),
       _contacts_filter_btn(NULL), _cfilt_popup(NULL), _cfilt_order_grp(NULL),
       _cfilt_filt_grp(NULL), _contacts_order(1), _contacts_filt(0),
       _channels_list(NULL), _status_label(NULL),
       _contacts_dirty(false), _contacts_rebuilt_ms(0),
       _contacts_sig(0), _contacts_check_ms(0), _crow_count(0),
-      _pick_popup(NULL), _pick_table(NULL), _pick_search_ta(NULL), _pick_kb(NULL),
+      _pick_popup(NULL), _pick_table(NULL), _pick_sb(NULL), _pick_search_ta(NULL), _pick_kb(NULL),
       _pick_title(NULL), _pick_action(0), _prow_count(0),
-      _chat_screen(NULL), _chat_title(NULL), _chat_history(NULL),
+      _chat_screen(NULL), _chat_title(NULL), _chat_history(NULL), _chat_sb(NULL),
       _chat_compose(NULL), _chat_input(NULL), _chat_keyboard(NULL),
       _insert_popup(NULL), _insert_list(NULL),
       _chat_is_channel(false), _chat_channel_idx(-1),

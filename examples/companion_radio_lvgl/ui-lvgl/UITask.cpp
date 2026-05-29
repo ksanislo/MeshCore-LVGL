@@ -73,6 +73,72 @@ static void styleAsDarkScreen(lv_obj_t* scr) {
   lv_obj_set_style_text_font(scr, withEmoji(&lv_font_montserrat_14), 0);
 }
 
+// ---- draggable scrollbar handle ------------------------------------------
+// LVGL's native scrollbar is draw-only. On this slow-to-repaint panel, a long
+// list (hundreds of contacts) is tedious to flick; a grabbable thumb turns a big
+// jump into one gesture. A thin floating thumb overlays the right edge of a
+// scrollable object: dragging it maps finger Y -> scroll offset, and the object's
+// own scrolling (flick) moves the thumb to match. content<->thumb are linked via
+// the thumb's user_data (content) and the content event's user_data (thumb), so
+// the content's own user_data is left untouched.
+static void sb_update(lv_obj_t* content, lv_obj_t* thumb) {
+  if (!content || !thumb) return;
+  lv_coord_t view_h = lv_obj_get_height(content);
+  lv_coord_t sy = lv_obj_get_scroll_y(content);
+  lv_coord_t total = sy + lv_obj_get_scroll_bottom(content);   // full scroll range
+  if (total <= 0 || view_h <= 0) { lv_obj_add_flag(thumb, LV_OBJ_FLAG_HIDDEN); return; }
+  lv_obj_clear_flag(thumb, LV_OBJ_FLAG_HIDDEN);
+  lv_coord_t content_h = view_h + total;
+  lv_coord_t th = (lv_coord_t)((int32_t)view_h * view_h / content_h);
+  if (th < 24) th = 24;
+  lv_coord_t max_y = view_h - th;
+  if (max_y < 0) max_y = 0;
+  lv_coord_t ty = (max_y > 0) ? (lv_coord_t)((int32_t)max_y * sy / total) : 0;
+  lv_obj_set_height(thumb, th);
+  lv_obj_set_pos(thumb, lv_obj_get_x(content) + lv_obj_get_width(content) - lv_obj_get_width(thumb) - 2,
+                 lv_obj_get_y(content) + ty);
+}
+static void sb_scroll_cb(lv_event_t* e) {
+  sb_update(lv_event_get_target(e), (lv_obj_t*)lv_event_get_user_data(e));
+}
+static void sb_drag_cb(lv_event_t* e) {
+  lv_obj_t* thumb = lv_event_get_target(e);
+  lv_obj_t* content = (lv_obj_t*)lv_obj_get_user_data(thumb);
+  lv_indev_t* indev = lv_indev_get_act();
+  if (!content || !indev) return;
+  lv_point_t p; lv_indev_get_point(indev, &p);
+  lv_area_t pa; lv_obj_get_coords(lv_obj_get_parent(thumb), &pa);
+  lv_coord_t view_h = lv_obj_get_height(content);
+  lv_coord_t th = lv_obj_get_height(thumb);
+  lv_coord_t max_y = view_h - th;
+  if (max_y <= 0) return;
+  lv_coord_t rel = (p.y - pa.y1) - lv_obj_get_y(content) - th / 2;   // center the thumb on the finger
+  if (rel < 0) rel = 0;
+  if (rel > max_y) rel = max_y;
+  lv_coord_t total = lv_obj_get_scroll_y(content) + lv_obj_get_scroll_bottom(content);
+  if (total <= 0) return;
+  lv_obj_scroll_to_y(content, (lv_coord_t)((int32_t)total * rel / max_y), LV_ANIM_OFF);
+  // scroll_to_y emits LV_EVENT_SCROLL -> sb_update repositions the thumb.
+}
+static lv_obj_t* attachScrollHandle(lv_obj_t* content) {
+  lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_OFF);   // hide the draw-only native bar
+  lv_obj_t* thumb = lv_obj_create(lv_obj_get_parent(content));
+  lv_obj_add_flag(thumb, LV_OBJ_FLAG_FLOATING);               // ignored by parent layout
+  lv_obj_clear_flag(thumb, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_size(thumb, 10, 24);
+  lv_obj_set_style_radius(thumb, 5, 0);
+  lv_obj_set_style_bg_color(thumb, lv_color_hex(0x6B7280), 0);
+  lv_obj_set_style_bg_opa(thumb, LV_OPA_60, 0);
+  lv_obj_set_style_border_width(thumb, 0, 0);
+  lv_obj_set_style_pad_all(thumb, 0, 0);
+  lv_obj_add_flag(thumb, LV_OBJ_FLAG_HIDDEN);                 // shown once there's range to scroll
+  lv_obj_set_user_data(thumb, content);
+  lv_obj_add_event_cb(thumb, sb_drag_cb, LV_EVENT_PRESSING, NULL);
+  lv_obj_add_event_cb(content, sb_scroll_cb, LV_EVENT_SCROLL, thumb);
+  lv_obj_add_event_cb(content, sb_scroll_cb, LV_EVENT_SIZE_CHANGED, thumb);
+  return thumb;
+}
+
 lv_obj_t* UITask::buildSplashScreen() {
   lv_obj_t* scr = lv_obj_create(NULL);
   styleAsDarkScreen(scr);
@@ -208,6 +274,7 @@ lv_obj_t* UITask::buildHomeScreen() {
   // not scrolling), then clears the selection -- so CLICKED would see CELL_NONE.
   lv_obj_add_event_cb(_contacts_table, contacts_table_cb, LV_EVENT_VALUE_CHANGED, NULL);
   lv_obj_add_event_cb(_contacts_table, contacts_table_draw_cb, LV_EVENT_DRAW_PART_BEGIN, NULL);
+  _contacts_sb = attachScrollHandle(_contacts_table);
 
   // Search keyboard (hidden; overlays the home screen, like the settings one).
   _contacts_kb = lv_keyboard_create(scr);
@@ -364,6 +431,7 @@ void UITask::rebuildContactsList() {
     lv_table_set_cell_value(_contacts_table, 0, 0,
         the_mesh.getNumContacts() > 0 ? "No contacts match." : "No contacts yet. Waiting for adverts...");
     lv_table_set_cell_value(_contacts_table, 0, 1, "");
+    sb_update(_contacts_table, _contacts_sb);   // nothing to scroll -> hide thumb
     return;
   }
 
@@ -384,6 +452,8 @@ void UITask::rebuildContactsList() {
     lv_table_set_cell_value(_contacts_table, r, 1, ago);
   }
   lv_obj_scroll_to_y(_contacts_table, 0, LV_ANIM_OFF);
+  lv_obj_update_layout(_contacts_table);   // refresh scroll range -> resize/show the drag thumb
+  sb_update(_contacts_table, _contacts_sb);
 }
 
 void UITask::contacts_table_cb(lv_event_t* e) {
@@ -734,6 +804,7 @@ void UITask::layoutChatBody(bool keyboard_shown) {
 
   lv_obj_update_layout(_chat_history);
   if (was_at_bottom) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
+  sb_update(_chat_history, _chat_sb);
 }
 
 // ---- Insert (+) menu: share contact refs into the compose field ----------
@@ -867,6 +938,7 @@ void UITask::buildContactPickerScreen() {
   lv_table_set_col_cnt(_pick_table, 1);
   lv_table_set_col_width(_pick_table, 0, _screen_w - 8);
   lv_obj_add_event_cb(_pick_table, pick_table_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  _pick_sb = attachScrollHandle(_pick_table);
   lv_obj_add_event_cb(_pick_table, pick_table_draw_cb, LV_EVENT_DRAW_PART_BEGIN, NULL);
 
   _pick_kb = lv_keyboard_create(_pick_popup);
@@ -908,6 +980,8 @@ void UITask::rebuildPicker() {
     lv_table_set_cell_value(_pick_table, r, 0, cell);
   }
   lv_obj_scroll_to_y(_pick_table, 0, LV_ANIM_OFF);
+  lv_obj_update_layout(_pick_table);
+  sb_update(_pick_table, _pick_sb);
 }
 
 void UITask::openContactPicker(int action) {
@@ -1712,6 +1786,8 @@ void UITask::rebuildChatHistory() {
   }
 
   lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
+  lv_obj_update_layout(_chat_history);
+  sb_update(_chat_history, _chat_sb);
 }
 
 void UITask::openChat(const char* peer_name) {
@@ -1799,6 +1875,7 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_set_style_pad_all(_chat_history, 8, 0);
     lv_obj_set_style_pad_row(_chat_history, 6, 0);
     lv_obj_set_flex_flow(_chat_history, LV_FLEX_FLOW_COLUMN);
+    _chat_sb = attachScrollHandle(_chat_history);
 
     // Fixed compose band: textarea (grows) + send button.
     _chat_compose = lv_obj_create(_chat_screen);
