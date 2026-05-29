@@ -135,6 +135,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_bright_slider;
   lv_obj_t*       _set_rot_dd;
   lv_obj_t*       _set_tz_ta;           // UTC offset (hours) for local-time display
+  lv_obj_t*       _set_clock_chk;       // 12-hour clock toggle
   lv_obj_t*       _set_kb;
   lv_obj_t*       _set_active_ta;       // settings textarea currently being edited
   lv_obj_t*       _set_key_ta;          // read-only self public key (scrolls horizontally)
@@ -299,6 +300,7 @@ class UITask : public AbstractUITask {
   void      commitPosition();
   void      commitTz();
   static void set_tz_ta_event_cb(lv_event_t* e);
+  static void set_clock_cb(lv_event_t* e);
   void      showSharePosWarning();
   static void set_copykey_cb(lv_event_t* e);
   static void set_pos_ta_event_cb(lv_event_t* e);
@@ -347,7 +349,8 @@ public:
       _path_screen(NULL), _path_size_dd(NULL), _path_ta(NULL), _path_kb(NULL), _path_err(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
-      _set_rot_dd(NULL), _set_tz_ta(NULL), _set_kb(NULL), _set_active_ta(NULL), _set_key_ta(NULL),
+      _set_rot_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_kb(NULL),
+      _set_active_ta(NULL), _set_key_ta(NULL),
       _set_lat_ta(NULL), _set_lon_ta(NULL), _set_sharepos(NULL), _confirm_popup(NULL),
       _info_popup(NULL), _info_title_lbl(NULL), _info_body_lbl(NULL),
       _qr_screen(NULL), _qr_code(NULL), _qr_name_lbl(NULL), _qr_key_lbl(NULL),

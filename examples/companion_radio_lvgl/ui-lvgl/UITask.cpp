@@ -1376,40 +1376,84 @@ void UITask::add_contact_cb(lv_event_t* e) {
   _instance->rebuildChatHistory();  // re-render: Add button -> "In contacts"
 }
 
+// Format helpers for chat timestamps. Inputs are already UTC + the local offset.
+static void fmtClockTime(uint32_t local_secs, char* out, size_t cap, bool h12) {
+  time_t t = (time_t)local_secs;
+  struct tm tmv;
+  gmtime_r(&t, &tmv);
+  if (h12) {
+    strftime(out, cap, "%I:%M %p", &tmv);
+    if (out[0] == '0') memmove(out, out + 1, strlen(out) + 1);  // "02:30 PM" -> "2:30 PM"
+  } else {
+    strftime(out, cap, "%H:%M", &tmv);
+  }
+}
+static void fmtDateLabel(uint32_t local_secs, long now_day, char* out, size_t cap) {
+  long day = (long)local_secs / 86400;
+  if (day == now_day)     { strncpy(out, "Today", cap - 1);     out[cap - 1] = 0; return; }
+  if (day == now_day - 1) { strncpy(out, "Yesterday", cap - 1); out[cap - 1] = 0; return; }
+  time_t t = (time_t)local_secs;
+  struct tm tmv;
+  gmtime_r(&t, &tmv);
+  strftime(out, cap, "%a, %b %d", &tmv);
+}
+
 void UITask::rebuildChatHistory() {
   if (!_chat_history) return;
   lv_obj_clean(_chat_history);
 
-  const ChatMessage* msgs[CHAT_HISTORY_CAP];
-  int n = _msgs.messagesFor(_chat_peer, msgs, CHAT_HISTORY_CAP);
+  const ChatMessage* all[CHAT_HISTORY_CAP];
+  int n = _msgs.messagesFor(_chat_peer, all, CHAT_HISTORY_CAP);
 
-  if (n == 0) {
+  bool filtering = _search_active && _search_filter[0];
+  const ChatMessage* shown[CHAT_HISTORY_CAP];
+  int sn = 0;
+  for (int i = 0; i < n; i++) {
+    if (filtering && !containsCI(all[i]->text, _search_filter)) continue;
+    shown[sn++] = all[i];
+  }
+
+  if (sn == 0) {
     lv_obj_t* empty = lv_label_create(_chat_history);
-    lv_label_set_text(empty, "No messages yet.");
+    lv_label_set_text(empty, filtering ? "No matches." : "No messages yet.");
     lv_obj_set_style_text_color(empty, lv_color_hex(DIM_HEX), 0);
     lv_obj_center(empty);
     return;
   }
 
+  int  tzoff = _node_prefs ? _node_prefs->tz_offset_minutes * 60 : 0;
+  long now_day = ((long)the_mesh.getRTCClock()->getCurrentTime() + tzoff) / 86400;
+
   char last_sender[CHAT_PEER_NAME_MAX] = "";
   bool last_outgoing = false;
+  long last_day = -999999;
   bool first = true;
-  bool filtering = _search_active && _search_filter[0];
-  int shown = 0;
 
-  for (int i = 0; i < n; i++) {
-    const ChatMessage* m = msgs[i];
-    if (filtering && !containsCI(m->text, _search_filter)) continue;
-    shown++;
+  for (int i = 0; i < sn; i++) {
+    const ChatMessage* m = shown[i];
+    long mday = ((long)m->timestamp + tzoff) / 86400;
 
-    // Incoming bubbles get a sender-name header, but only at the start of a
-    // run of consecutive messages from the same sender. Outgoing bubbles
-    // (ours) never show a name.
+    // Date separator (centered) whenever the calendar day changes.
+    if (m->timestamp != 0 && mday != last_day) {
+      char dl[32];
+      fmtDateLabel((uint32_t)((long)m->timestamp + tzoff), now_day, dl, sizeof(dl));
+      lv_obj_t* date = lv_label_create(_chat_history);
+      lv_label_set_text(date, dl);
+      lv_obj_set_width(date, LV_PCT(100));
+      lv_obj_set_style_text_align(date, LV_TEXT_ALIGN_CENTER, 0);
+      lv_obj_set_style_text_color(date, lv_color_hex(DIM_HEX), 0);
+      lv_obj_set_style_text_font(date, &lv_font_montserrat_12, 0);
+      lv_obj_set_style_pad_ver(date, 4, 0);
+      last_day = mday;
+      first = true;  // start a fresh sender run after a date break
+    }
+
+    // Incoming bubbles get a sender-name header at the start of a same-sender run.
     bool show_name = !m->outgoing &&
                      (first || last_outgoing ||
                       strncmp(last_sender, m->sender, CHAT_PEER_NAME_MAX) != 0);
     if (show_name) {
-      lv_obj_t* name = lv_label_create(_chat_history);  // flex child, left by default
+      lv_obj_t* name = lv_label_create(_chat_history);
       char sname[CHAT_PEER_NAME_MAX + 4];
       sanitizeForFont(m->sender[0] ? m->sender : "?", sname, sizeof(sname));
       lv_label_set_text(name, sname);
@@ -1417,8 +1461,7 @@ void UITask::rebuildChatHistory() {
       lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
     }
 
-    // Full-width row wrapper so we can left/right-align the bubble inside it
-    // (flex columns can't per-item cross-align).
+    // Full-width row wrapper so we can left/right-align the bubble inside it.
     lv_obj_t* row = lv_obj_create(_chat_history);
     lv_obj_set_width(row, LV_PCT(100));
     lv_obj_set_height(row, LV_SIZE_CONTENT);
@@ -1434,7 +1477,6 @@ void UITask::rebuildChatHistory() {
     lv_obj_set_style_border_width(bubble, 0, 0);
     lv_obj_set_style_radius(bubble, 10, 0);
     lv_obj_clear_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
-    // sent = blue, right-aligned; received = gray-700, left-aligned
     lv_obj_set_style_bg_color(bubble, lv_color_hex(m->outgoing ? 0x2563EB : 0x374151), 0);
     lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, 0);
     lv_obj_align(bubble, m->outgoing ? LV_ALIGN_TOP_RIGHT : LV_ALIGN_TOP_LEFT, 0, 0);
@@ -1445,7 +1487,31 @@ void UITask::rebuildChatHistory() {
       buildContactCard(bubble, m, cpk, ctype, cname);
     } else {
       addMessageText(bubble, m->text);
-      attachMentions(bubble, m->text);  // tappable if it @-mentions a known contact
+      attachMentions(bubble, m->text);
+    }
+
+    // Timestamp below the bubble, but collapse it within a burst: hide it when
+    // the next message is the same sender, same day, and within 5 minutes.
+    bool show_time = (m->timestamp != 0);
+    if (show_time && i + 1 < sn) {
+      const ChatMessage* nx = shown[i + 1];
+      long nday = ((long)nx->timestamp + tzoff) / 86400;
+      bool same_sender = (nx->outgoing == m->outgoing) &&
+                         strncmp(nx->sender, m->sender, CHAT_PEER_NAME_MAX) == 0;
+      if (same_sender && nday == mday && nx->timestamp >= m->timestamp &&
+          (nx->timestamp - m->timestamp) <= 300)
+        show_time = false;
+    }
+    if (show_time) {
+      char tbuf[12];
+      fmtClockTime((uint32_t)((long)m->timestamp + tzoff), tbuf, sizeof(tbuf),
+                   _node_prefs && _node_prefs->clock_12h);
+      lv_obj_t* tl = lv_label_create(_chat_history);
+      lv_label_set_text(tl, tbuf);
+      lv_obj_set_width(tl, LV_PCT(100));
+      lv_obj_set_style_text_align(tl, m->outgoing ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
+      lv_obj_set_style_text_color(tl, lv_color_hex(DIM_HEX), 0);
+      lv_obj_set_style_text_font(tl, &lv_font_montserrat_12, 0);
     }
 
     strncpy(last_sender, m->sender, CHAT_PEER_NAME_MAX - 1);
@@ -1454,15 +1520,6 @@ void UITask::rebuildChatHistory() {
     first = false;
   }
 
-  if (filtering && shown == 0) {
-    lv_obj_t* none = lv_label_create(_chat_history);
-    lv_label_set_text(none, "No matches.");
-    lv_obj_set_style_text_color(none, lv_color_hex(DIM_HEX), 0);
-    lv_obj_center(none);
-    return;
-  }
-
-  // Scroll to newest.
   lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
 }
 
@@ -2864,6 +2921,11 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   // half/quarter-hour zones, e.g. 5.5, 5.75, -3.5); stored as minutes.
   _set_tz_ta = makeNumberField(body, "UTC offset (hours)", set_tz_ta_event_cb);
 
+  _set_clock_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_clock_chk, "12-hour clock");
+  lv_obj_set_style_text_color(_set_clock_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_clock_chk, set_clock_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
   // Shared on-screen keyboard for the settings textareas. Parented to the home
   // screen so it overlays the tabview; hidden until a field is focused.
   _set_kb = lv_keyboard_create(parent);
@@ -2924,6 +2986,10 @@ void UITask::populateSettings() {
     char tb[16];
     snprintf(tb, sizeof(tb), "%g", _node_prefs->tz_offset_minutes / 60.0);
     lv_textarea_set_text(_set_tz_ta, tb);
+  }
+  if (_set_clock_chk) {
+    if (_node_prefs->clock_12h) lv_obj_add_state(_set_clock_chk, LV_STATE_CHECKED);
+    else                        lv_obj_clear_state(_set_clock_chk, LV_STATE_CHECKED);
   }
 }
 
@@ -3111,6 +3177,12 @@ void UITask::commitTz() {
   if (m < -720) m = -720;   // UTC-12:00
   if (m > 840) m = 840;     // UTC+14:00
   _node_prefs->tz_offset_minutes = (int16_t)m;
+  the_mesh.savePrefs();
+}
+
+void UITask::set_clock_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  _instance->_node_prefs->clock_12h = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
   the_mesh.savePrefs();
 }
 
@@ -3402,8 +3474,10 @@ void UITask::loop() {
       time_t t = (time_t)secs + (_node_prefs ? _node_prefs->tz_offset_minutes * 60 : 0);
       struct tm tmv;
       gmtime_r(&t, &tmv);  // gmtime of (UTC + offset) = local wall time
-      char buf[24];
-      strftime(buf, sizeof(buf), "%m-%d %H:%M:%S", &tmv);
+      char buf[28];
+      strftime(buf, sizeof(buf),
+               (_node_prefs && _node_prefs->clock_12h) ? "%m-%d %I:%M:%S %p" : "%m-%d %H:%M:%S",
+               &tmv);
       lv_label_set_text(_clock_label, buf);
     }
   }
