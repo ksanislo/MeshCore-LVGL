@@ -702,6 +702,7 @@ void UITask::rebuildChannelsList() {
     lv_obj_set_style_border_width(btn, 1, 0);
     lv_obj_set_user_data(btn, (void*)(intptr_t)idx);
     lv_obj_add_event_cb(btn, channel_clicked_cb, LV_EVENT_CLICKED, NULL);
+    // (long-press intentionally left unbound -- reserved for a future context menu)
   }
 }
 
@@ -2867,6 +2868,9 @@ void UITask::chat_kebab_cb(lv_event_t* e) {
     lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_LIST, "Details"), kebab_details_cb, LV_EVENT_CLICKED, NULL);
   }
   lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_EYE_OPEN, "Search"), kebab_search_cb, LV_EVENT_CLICKED, NULL);
+  if (s->_chat_is_channel) {
+    lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_UPLOAD, "Share"), kebab_chanshare_cb, LV_EVENT_CLICKED, NULL);
+  }
   if (!s->_chat_is_channel) {
     lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_UPLOAD, "Share"), kebab_share_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_EDIT, "Set Path"), kebab_setpath_cb, LV_EVENT_CLICKED, NULL);
@@ -3112,32 +3116,50 @@ void UITask::path_kb_event_cb(lv_event_t* e) {
 
 // ===== New-channel screen (create/join by name + base64 key) =============
 
-// Minimal base64 decoder used only to validate the entered channel key (16 or 32
-// bytes). Kept local so we don't pull base64.hpp's (non-inline) definitions into
-// this TU -- they're already compiled into BaseChatMesh and would clash at link.
-// The backend's addChannel() does the authoritative decode. Returns byte count,
-// or -1 on an invalid character / overflow.
-static int b64DecodedLen(const char* s, uint8_t* out, int outCap) {
-  int bits = 0, nbits = 0, n = 0;
+// Parse a hex string (MeshCore channel keys are hex, e.g. "4dd75e...") into bytes,
+// tolerating spaces/colons/dashes. Returns byte count, or -1 on a bad digit / odd
+// length / overflow. 16 bytes (32 hex) = 128-bit key, 32 bytes (64 hex) = 256-bit.
+static int hexToBytes(const char* s, uint8_t* out, int cap) {
+  int n = 0, hi = -1;
   for (const char* p = s; *p; p++) {
     char c = *p;
-    if (c == '=') break;                                   // padding -> end of data
-    if (c == ' ' || c == '\n' || c == '\r' || c == '\t') continue;
+    if (c == ' ' || c == ':' || c == '-' || c == '\n' || c == '\r' || c == '\t') continue;
     int v;
-    if      (c >= 'A' && c <= 'Z') v = c - 'A';
-    else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
-    else if (c >= '0' && c <= '9') v = c - '0' + 52;
-    else if (c == '+')             v = 62;
-    else if (c == '/')             v = 63;
-    else return -1;                                        // invalid char
-    bits = (bits << 6) | v; nbits += 6;
-    if (nbits >= 8) {
-      nbits -= 8;
-      if (n >= outCap) return -1;
-      out[n++] = (uint8_t)((bits >> nbits) & 0xFF);
-    }
+    if      (c >= '0' && c <= '9') v = c - '0';
+    else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+    else return -1;
+    if (hi < 0) hi = v;
+    else { if (n >= cap) return -1; out[n++] = (uint8_t)((hi << 4) | v); hi = -1; }
   }
-  return n;
+  return hi < 0 ? n : -1;   // dangling nibble -> odd length -> invalid
+}
+
+// Minimal URL-decode (for a channel name pulled from a meshcore:// URI): %XX + '+'.
+static void urlDecodeInto(const char* in, char* out, size_t cap) {
+  size_t o = 0;
+  for (const char* p = in; *p && o + 1 < cap; p++) {
+    if (*p == '+') { out[o++] = ' '; }
+    else if (*p == '%' && p[1] && p[2]) {
+      auto hx = [](char c)->int{ return (c>='0'&&c<='9')?c-'0':(c>='a'&&c<='f')?c-'a'+10:(c>='A'&&c<='F')?c-'A'+10:-1; };
+      int h = hx(p[1]), l = hx(p[2]);
+      if (h >= 0 && l >= 0) { out[o++] = (char)((h << 4) | l); p += 2; }
+      else out[o++] = *p;
+    } else out[o++] = *p;
+  }
+  out[o] = 0;
+}
+
+// Pull a "key=value" param's value (up to '&' / end) out of a query string.
+static bool uriParam(const char* uri, const char* key, char* out, size_t cap) {
+  char pat[24]; snprintf(pat, sizeof(pat), "%s=", key);
+  const char* s = strstr(uri, pat);
+  if (!s) return false;
+  s += strlen(pat);
+  size_t o = 0;
+  while (*s && *s != '&' && o + 1 < cap) out[o++] = *s++;
+  out[o] = 0;
+  return true;
 }
 
 void UITask::buildNewChannelScreen() {
@@ -3190,7 +3212,7 @@ void UITask::buildNewChannelScreen() {
   lv_obj_set_width(_newchan_name_ta, LV_PCT(100));
   lv_obj_add_event_cb(_newchan_name_ta, newchan_ta_event_cb, LV_EVENT_ALL, NULL);
 
-  lv_obj_t* fk = makeField(body, "Key (base64 PSK, e.g. izOH6cXN...)");
+  lv_obj_t* fk = makeField(body, "Key (hex) or paste meshcore:// link");
   _newchan_key_ta = lv_textarea_create(fk);
   lv_textarea_set_one_line(_newchan_key_ta, true);
   lv_obj_set_width(_newchan_key_ta, LV_PCT(100));
@@ -3216,29 +3238,80 @@ void UITask::openNewChannel() {
 }
 
 bool UITask::createChannelFromForm() {
-  const char* name = lv_textarea_get_text(_newchan_name_ta);
-  const char* key  = lv_textarea_get_text(_newchan_key_ta);
+  const char* nameIn = lv_textarea_get_text(_newchan_name_ta);
+  const char* keyIn  = lv_textarea_get_text(_newchan_key_ta);
   auto fail = [this](const char* m){
     lv_label_set_text(_newchan_err, m);
     lv_obj_clear_flag(_newchan_err, LV_OBJ_FLAG_HIDDEN);
   };
-  if (!name || !name[0]) { fail("Enter a channel name"); return false; }
-  if (!key  || !key[0])  { fail("Enter a base64 key");   return false; }
-  uint8_t tmp[64];
-  int len = b64DecodedLen(key, tmp, sizeof(tmp));
-  if (len != 16 && len != 32) { fail("Key must be base64 (16 or 32 bytes)"); return false; }
+
+  // The key field also accepts a pasted "meshcore://channel/add?name=..&secret=hex"
+  // link (the phone app's Share Channel format): pull name+secret out of it.
+  char name[32]; char keyhex[80];
+  snprintf(name, sizeof(name), "%s", nameIn ? nameIn : "");
+  snprintf(keyhex, sizeof(keyhex), "%s", keyIn ? keyIn : "");
+  if (keyIn && strstr(keyIn, "channel/add")) {
+    char sec[80], nm[64];
+    if (uriParam(keyIn, "secret", sec, sizeof(sec))) snprintf(keyhex, sizeof(keyhex), "%s", sec);
+    if ((!name[0]) && uriParam(keyIn, "name", nm, sizeof(nm))) urlDecodeInto(nm, name, sizeof(name));
+  }
+
+  if (!name[0])   { fail("Enter a channel name"); return false; }
+  if (!keyhex[0]) { fail("Enter a hex key");      return false; }
+  uint8_t secret[32];
+  int len = hexToBytes(keyhex, secret, sizeof(secret));
+  if (len != 16 && len != 32) { fail("Key must be hex (32 or 64 chars)"); return false; }
+
   mproxy::MeshCmd cmd{};
   cmd.kind = mproxy::CmdKind::AddChannel;
   strncpy(cmd.name, name, sizeof(cmd.name) - 1);   // channel name
-  strncpy(cmd.text, key,  sizeof(cmd.text) - 1);   // base64 PSK
+  memcpy(cmd.path, secret, len);                   // raw secret bytes
+  cmd.path_len = (uint8_t)len;
   mproxy::postCommand(cmd);
   showToast("Channel added");
-  return true;   // it appears in the list once the backend republishes the snapshot
+  return true;   // appears in the list once the backend republishes the snapshot
 }
 
 void UITask::newchan_open_cb(lv_event_t* e) {
   (void)e;
   if (_instance) _instance->openNewChannel();
+}
+
+// Long-press a channel -> show its shareable QR (meshcore://channel/add?...), matching
+// the phone app's "Share Channel" format so a phone can scan it to join.
+void UITask::openShareChannelQR(int idx) {
+  ChannelDetails ch;
+  if (!mproxy::getChannel(idx, ch) || ch.name[0] == 0) return;
+  buildShareQRScreen();
+  _qr_return_screen = _home_screen;
+
+  char sname[36];
+  sanitizeForFont(ch.name, sname, sizeof(sname));
+  lv_label_set_text(_qr_name_lbl, sname);
+
+  // 128-bit key unless the upper 16 secret bytes are non-zero (mirrors setChannel).
+  static const uint8_t zeros[16] = {0};
+  int slen = (memcmp(&ch.channel.secret[16], zeros, 16) == 0) ? 16 : 32;
+  char hex[2 * 32 + 1];
+  mesh::Utils::toHex(hex, ch.channel.secret, slen);
+  char ktrunc[24];
+  snprintf(ktrunc, sizeof(ktrunc), "<%.6s...%.6s>", hex, hex + 2 * slen - 6);
+  lv_label_set_text(_qr_key_lbl, ktrunc);
+
+  char ename[3 * 32 + 1];
+  urlEncode(ch.name, ename, sizeof(ename));
+  char uri[64 + sizeof(ename) + 2 * 32];
+  snprintf(uri, sizeof(uri), "meshcore://channel/add?name=%s&secret=%s", ename, hex);
+  lv_qrcode_update(_qr_code, uri, strlen(uri));
+  lv_scr_load(_qr_screen);
+}
+
+void UITask::kebab_chanshare_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  int idx = _instance->_chat_channel_idx;
+  _instance->closeMenuPopup();
+  _instance->openShareChannelQR(idx);
 }
 
 void UITask::newchan_back_cb(lv_event_t* e) {

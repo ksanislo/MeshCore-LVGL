@@ -193,11 +193,28 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
     case CmdKind::AddContact:
       mesh.addContact(cmd.contact);
       break;
-    case CmdKind::AddChannel:
-      // name = channel name, text = base64 PSK (validated UI-side). addChannel
-      // decodes/validates (16 or 32 bytes) + derives the hash; persist on success.
-      if (mesh.addChannel(cmd.name, cmd.text)) mesh.saveChannels();
+    case CmdKind::AddChannel: {
+      // name = channel name, path = raw secret bytes (path_len = 16 or 32, validated
+      // UI-side). loadChannels() fills slots via setChannel() WITHOUT tracking
+      // num_channels, so addChannel(num_channels) could clobber a loaded channel --
+      // append at the first free slot (empty name) instead. setChannel derives the
+      // hash (128- vs 256-bit by the trailing 16 bytes).
+      ChannelDetails probe;
+      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+        if (mesh.getChannel(i, probe) && probe.name[0] == 0) {
+          ChannelDetails nc;
+          memset(&nc, 0, sizeof(nc));
+          strncpy(nc.name, cmd.name, sizeof(nc.name) - 1);
+          uint8_t len = cmd.path_len;
+          if (len > sizeof(nc.channel.secret)) len = sizeof(nc.channel.secret);
+          memcpy(nc.channel.secret, cmd.path, len);
+          mesh.setChannel(i, nc);
+          mesh.saveChannels();
+          break;
+        }
+      }
       break;
+    }
     case CmdKind::ReqTelem: {
       ContactInfo* c = mesh.lookupContactByPubKey(cmd.pubkey, LOOKUP_PREFIX);
       if (c) mesh.requestTelemetry(*c);

@@ -213,7 +213,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _qr_key_lbl;
   lv_obj_t*       _qr_return_screen;
 
-  // New-channel screen (name + base64 key). Lazily built.
+  // New-channel screen (name + hex key / pasted link). Lazily built.
   lv_obj_t*       _newchan_screen;
   lv_obj_t*       _newchan_name_ta;
   lv_obj_t*       _newchan_key_ta;
@@ -417,6 +417,8 @@ class UITask : public AbstractUITask {
   void      buildNewChannelScreen();
   void      openNewChannel();
   bool      createChannelFromForm();
+  void      openShareChannelQR(int idx);        // channel -> meshcore://channel/add QR
+  static void kebab_chanshare_cb(lv_event_t* e); // channel chat kebab "Share"
   static void newchan_open_cb(lv_event_t* e);   // "+ New channel" list entry
   static void newchan_back_cb(lv_event_t* e);
   static void newchan_save_cb(lv_event_t* e);
