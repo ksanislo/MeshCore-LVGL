@@ -1,5 +1,6 @@
 #include <helpers/BaseChatMesh.h>
 #include <Utils.h>
+#include <helpers/MeshPSRAM.h>
 
 #ifndef SERVER_RESPONSE_DELAY
   #define SERVER_RESPONSE_DELAY   300
@@ -8,6 +9,21 @@
 #ifndef TXT_ACK_DELAY
   #define TXT_ACK_DELAY     200
 #endif
+
+void BaseChatMesh::begin() {
+#ifdef ENABLE_PSRAM_CONTACTS
+  // One-shot: allocate the contacts table in PSRAM (runs from setup() via the
+  // subclass begin() chain, so PSRAM is up). ps_malloc falls back to internal
+  // heap, so the worst case matches the old static array. Memory is left
+  // uninitialized -- matches the original (the ctor never zeroed it; reads are
+  // gated by num_contacts, and sort_array is rewritten before each use).
+  if (contacts == NULL) {
+    contacts   = (ContactInfo*) mesh_psram_alloc(sizeof(ContactInfo) * MAX_CONTACTS);
+    sort_array = (int*)         mesh_psram_alloc(sizeof(int) * MAX_CONTACTS);
+  }
+#endif
+  mesh::Mesh::begin();   // preserve the existing begin() chain
+}
 
 void BaseChatMesh::sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt, uint32_t delay_millis) {
   sendFlood(pkt, delay_millis);

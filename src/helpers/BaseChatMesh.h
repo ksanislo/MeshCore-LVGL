@@ -58,9 +58,18 @@ class BaseChatMesh : public mesh::Mesh {
 
   friend class ContactsIterator;
 
+#ifdef ENABLE_PSRAM_CONTACTS
+  // Opt-in: the large, rarely-mutated contacts table lives in PSRAM (allocated
+  // once in begin()), freeing internal SRAM. All access is index-based, so this
+  // is source-compatible with the static array below. See helpers/MeshPSRAM.h.
+  ContactInfo* contacts;
+  int num_contacts;
+  int* sort_array;
+#else
   ContactInfo contacts[MAX_CONTACTS];
   int num_contacts;
   int sort_array[MAX_CONTACTS];
+#endif
   int matching_peer_indexes[MAX_SEARCH_RESULTS];
   unsigned long txt_send_timeout;
 #ifdef MAX_GROUP_CHANNELS
@@ -77,8 +86,12 @@ class BaseChatMesh : public mesh::Mesh {
 protected:
   BaseChatMesh(mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::PacketManager& mgr, mesh::MeshTables& tables)
       : mesh::Mesh(radio, ms, rng, rtc, mgr, tables)
-  { 
+  {
     num_contacts = 0;
+  #ifdef ENABLE_PSRAM_CONTACTS
+    contacts = NULL;     // allocated in begin() (PSRAM not guaranteed up at static-init)
+    sort_array = NULL;
+  #endif
   #ifdef MAX_GROUP_CHANNELS
     memset(channels, 0, sizeof(channels));
     num_channels = 0;
@@ -87,6 +100,10 @@ protected:
     _pendingLoopback = NULL;
     memset(connections, 0, sizeof(connections));
   }
+
+  // Allocates the PSRAM-backed stores (when enabled) then chains the base Mesh
+  // begin(). Subclasses' begin() already call BaseChatMesh::begin().
+  void begin();
 
   void bootstrapRTCfromContacts();
   void resetContacts() { num_contacts = 0; }
