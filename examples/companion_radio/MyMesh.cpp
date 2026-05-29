@@ -2,6 +2,7 @@
 
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
+#include <helpers/MeshPSRAM.h>
 
 #define CMD_APP_START                 1
 #define CMD_SEND_TXT_MSG              2
@@ -859,6 +860,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _iter_started = false;
   _cli_rescue = false;
   offline_queue_len = 0;
+#ifdef ENABLE_PSRAM_OFFLINE_QUEUE
+  offline_queue = NULL;   // allocated in begin() (PSRAM not guaranteed up at static-init)
+#endif
   app_target_ver = 0;
   clearPendingReqs();
   next_ack_idx = 0;
@@ -890,6 +894,13 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
 
 void MyMesh::begin(bool has_display) {
   BaseChatMesh::begin();
+
+#ifdef ENABLE_PSRAM_OFFLINE_QUEUE
+  // One-shot PSRAM allocation of the offline queue (runs from setup(), PSRAM up).
+  // ps_malloc falls back to internal heap, so worst case matches the static array.
+  if (offline_queue == NULL)
+    offline_queue = (Frame*) mesh_psram_alloc(sizeof(Frame) * OFFLINE_QUEUE_SIZE);
+#endif
 
   if (!_store->loadMainIdentity(self_id)) {
     self_id = radio_new_identity(); // create new random identity
