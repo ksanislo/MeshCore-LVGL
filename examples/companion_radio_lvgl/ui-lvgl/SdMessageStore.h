@@ -140,6 +140,85 @@ public:
   bool begin() { _ok = false; _retry_ms = 0; return ensureMounted(); }
   bool ready() const { return _ok; }
 
+  // Preload the newest ~cap messages across all conversations into `dst` (the RAM
+  // ring), so disabling/ejecting the card keeps recent history on screen. Reads
+  // only each file's tail. Appends oldest-first so the ring keeps the newest set.
+  void preloadRecent(MessageStore* dst, int cap) {
+    if (!_ok || !dst || cap <= 0) return;
+    if (cap > CAP) cap = CAP;
+    ChatMessage* recent = (ChatMessage*)malloc(sizeof(ChatMessage) * cap);
+    if (!recent) return;
+    int rn = 0;  // recent[0..rn) sorted ascending by timestamp
+
+    auto consider = [&](const ChatMessage& m) {
+      if (rn == cap) {
+        if (m.timestamp <= recent[0].timestamp) return;  // not newer than what we keep
+        for (int i = 1; i < cap; i++) recent[i - 1] = recent[i];
+        rn = cap - 1;
+      }
+      int i = rn;
+      while (i > 0 && recent[i - 1].timestamp > m.timestamp) { recent[i] = recent[i - 1]; i--; }
+      recent[i] = m;
+      rn++;
+    };
+
+    sd_bus_to_sd();
+    FsFile dir = sd.open("/chat", O_RDONLY);
+    FsFile f;
+    char name[80];
+    char line[CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 32];
+    while (dir.isOpen() && f.openNext(&dir, O_RDONLY)) {
+      if (f.isDir()) { f.close(); continue; }
+      f.getName(name, sizeof(name));
+      char key[CHAT_PEER_NAME_MAX];
+      copyBounded(key, name, CHAT_PEER_NAME_MAX);
+      char* dot = strrchr(key, '.');
+      if (dot) *dot = 0;                       // strip ".log" -> conversation key
+      uint32_t sz = (uint32_t)f.size();
+      uint32_t tail = (uint32_t)cap * 96;      // enough bytes for ~cap records
+      if (sz > tail) { f.seek(sz - tail); f.readBytesUntil('\n', line, sizeof(line) - 1); }  // skip partial
+      while (f.available()) {
+        int len = f.readBytesUntil('\n', line, sizeof(line) - 1);
+        if (len <= 0) continue;
+        line[len] = 0;
+        char* save = nullptr;
+        char* f_ts  = strtok_r(line, "\t", &save);
+        char* f_dir = strtok_r(nullptr, "\t", &save);
+        char* f_st  = strtok_r(nullptr, "\t", &save);
+        char* f_snd = strtok_r(nullptr, "\t", &save);
+        char* f_txt = save ? save : (char*)"";
+        if (!f_ts || !f_dir || !f_st || !f_snd) continue;
+        uint32_t ts = (uint32_t)strtoul(f_ts, nullptr, 10);
+        if (!ts) continue;
+        if (rn == cap && ts <= recent[0].timestamp) continue;
+        ChatMessage m;
+        m.timestamp = ts;
+        m.outgoing = (atoi(f_dir) != 0);
+        m.status = MSG_STATUS_NONE;
+        m.ack = 0;
+        m.expiry_ms = 0;
+        copyBounded(m.peer, key, CHAT_PEER_NAME_MAX);
+        copyBounded(m.sender, f_snd, CHAT_PEER_NAME_MAX);
+        copyBounded(m.text, f_txt, CHAT_MSG_TEXT_MAX);
+        consider(m);
+      }
+      f.close();
+    }
+    if (dir.isOpen()) dir.close();
+    sd_bus_to_lora();
+
+    for (int i = 0; i < rn; i++)
+      dst->append(recent[i].outgoing, recent[i].peer, recent[i].sender, recent[i].text, recent[i].timestamp);
+    free(recent);
+  }
+
+  // Unmount (e.g. when the user disables history) so the card can be removed.
+  void end() {
+    if (_ok) { sd_bus_to_sd(); sd.end(); sd_bus_to_lora(); }
+    _ok = false;
+    _loaded[0] = 0;
+  }
+
   void append(bool outgoing, const char* peer, const char* sender,
               const char* text, uint32_t ts,
               uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0) override {

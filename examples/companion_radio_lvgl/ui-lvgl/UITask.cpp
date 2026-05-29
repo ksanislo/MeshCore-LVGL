@@ -983,7 +983,7 @@ void UITask::pick_table_cb(lv_event_t* e) {
                              ? _instance->_node_prefs->node_name : "Me";
         char key[CHAT_PEER_NAME_MAX];
         convKey(recip->id.pub_key, false, key, sizeof(key));
-        _instance->_msgs->append(true, key, me, ref, now);
+        _instance->storeAppend(true, key, me, ref, now);
       }
       _instance->showToast("Contact shared");
     }
@@ -1096,6 +1096,14 @@ void UITask::resetKbScroll() {
   _kb_scroll = NULL;
 }
 
+void UITask::storeAppend(bool outgoing, const char* key, const char* sender,
+                         const char* text, uint32_t ts, uint8_t status, uint32_t ack, uint32_t expiry_ms) {
+  _rammsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms);  // always: recent ring
+#ifdef HAS_SD_CARD
+  if (_msgs == &_sdmsgs) _sdmsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms);
+#endif
+}
+
 void UITask::convKey(const uint8_t* key6, bool is_channel, char* out, size_t cap) {
   if (is_channel && cap > 16) {
     out[0] = 'c'; out[1] = 'h'; out[2] = '_';
@@ -1134,9 +1142,9 @@ void UITask::sendCurrentMessage() {
     if (c && ack) {
       // Direct message with an expected ACK: track delivery (sending -> delivered/failed).
       the_mesh.addExpectedAck(ack, c);
-      _msgs->append(true, _chat_key, me, text, now, MSG_STATUS_SENDING, ack, millis() + timeout + 2000);
+      storeAppend(true, _chat_key, me, text, now, MSG_STATUS_SENDING, ack, millis() + timeout + 2000);
     } else {
-      _msgs->append(true, _chat_key, me, text, now);  // channel / no-ack: no delivery tracking
+      storeAppend(true, _chat_key, me, text, now);  // channel / no-ack: no delivery tracking
     }
     lv_textarea_set_text(_chat_input, "");
     rebuildChatHistory();
@@ -1163,7 +1171,7 @@ void UITask::resendMessage(const ChatMessage* m) {
   if (!_msgs->requeue(m, ack, millis() + timeout + 2000)) {
     // The original scrolled out of the buffer; fall back to a fresh entry.
     const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
-    _msgs->append(true, _chat_key, me, text, now, MSG_STATUS_SENDING, ack, millis() + timeout + 2000);
+    storeAppend(true, _chat_key, me, text, now, MSG_STATUS_SENDING, ack, millis() + timeout + 2000);
   }
   rebuildChatHistory();
 }
@@ -1781,12 +1789,16 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _instance = this;
 
 #ifdef HAS_SD_CARD
-  // Use the persistent SD store only if the user enabled chat-history saving
-  // (default on); otherwise stay on the session-only RAM store. Chosen here at
-  // startup, so toggling the setting takes effect on the next restart.
+  // Pick the initial store from the setting (default on). The Settings toggle
+  // can also switch it live at runtime (see set_history_cb).
   if (!_node_prefs || _node_prefs->persist_history) _msgs = &_sdmsgs;
 #endif
   _msgs->begin();  // mounts the SD card (SD store) or no-ops (RAM store)
+#ifdef HAS_SD_CARD
+  // Seed the RAM ring with recent history so disabling/ejecting the card later
+  // keeps recent messages visible without a gap.
+  if (_msgs == &_sdmsgs) _sdmsgs.preloadRecent(&_rammsgs, CHAT_HISTORY_CAP);
+#endif
 
   // Restore the saved contacts sort/filter (0xFF = unset -> keep code defaults).
   if (_node_prefs) {
@@ -1906,7 +1918,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
 
   char key[CHAT_PEER_NAME_MAX];
   convKey(the_mesh.hookKey(), the_mesh.hookIsChannel(), key, sizeof(key));
-  _msgs->append(false, key, sender, body, the_mesh.getRTCClock()->getCurrentTime());
+  storeAppend(false, key, sender, body, the_mesh.getRTCClock()->getCurrentTime());
 
   // If this conversation's chat is currently open, refresh it live.
   if (_chat_screen && strncmp(key, _chat_key, CHAT_PEER_NAME_MAX) == 0) {
@@ -1924,7 +1936,7 @@ void UITask::sentMsg(const char* peer, const char* text) {
   const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
   char key[CHAT_PEER_NAME_MAX];
   convKey(the_mesh.hookKey(), the_mesh.hookIsChannel(), key, sizeof(key));
-  _msgs->append(true, key, me, text, the_mesh.getRTCClock()->getCurrentTime());
+  storeAppend(true, key, me, text, the_mesh.getRTCClock()->getCurrentTime());
 
   if (_chat_screen && strncmp(key, _chat_key, CHAT_PEER_NAME_MAX) == 0) {
     rebuildChatHistory();
@@ -3051,7 +3063,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
 
 #ifdef HAS_SD_CARD
   _set_history_chk = lv_checkbox_create(body);
-  lv_checkbox_set_text(_set_history_chk, "Save chat history (restart to apply)");
+  lv_checkbox_set_text(_set_history_chk, "Save chat history");
   lv_obj_set_style_text_color(_set_history_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_history_chk, set_history_cb, LV_EVENT_VALUE_CHANGED, NULL);
 #endif
@@ -3323,8 +3335,29 @@ void UITask::set_clock_cb(lv_event_t* e) {
 
 void UITask::set_history_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
-  _instance->_node_prefs->persist_history = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
-  the_mesh.savePrefs();  // store choice is applied on next restart
+  bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  _instance->_node_prefs->persist_history = on ? 1 : 0;
+  the_mesh.savePrefs();
+#ifdef HAS_SD_CARD
+  // Apply live: swap the active store, mounting/unmounting the card. The RAM ring
+  // keeps being fed either way (storeAppend), so the recent view never blanks; on
+  // re-enable we backfill the card with anything that arrived while saving was off.
+  if (on) {
+    _instance->_sdmsgs.begin();             // (re)mount + reload from card
+    if (_instance->_sd_off_ts)
+      _instance->_rammsgs.replayInto(&_instance->_sdmsgs, _instance->_sd_off_ts);
+    _instance->_sd_off_ts = 0;
+    _instance->_msgs = &_instance->_sdmsgs;
+  } else {
+    _instance->_sd_off_ts = the_mesh.getRTCClock()->getCurrentTime();  // mark for backfill
+    _instance->_msgs = &_instance->_rammsgs;
+    _instance->_sdmsgs.end();               // unmount so the card can be pulled
+  }
+  // Refresh whatever's on screen so it reflects the now-active store.
+  if (_instance->_chat_screen && lv_scr_act() == _instance->_chat_screen)
+    _instance->rebuildChatHistory();
+  _instance->_contacts_dirty = true;        // "latest" sort reads the store
+#endif
 }
 
 void UITask::set_tz_ta_event_cb(lv_event_t* e) {

@@ -93,6 +93,17 @@ public:
     if (_count < CAP) _count++;
   }
 
+  // Replay buffered messages (oldest-first) with timestamp >= since_ts into dst.
+  // Used to backfill the SD store with history that arrived while saving was off.
+  void replayInto(MessageStore* dst, uint32_t since_ts) const {
+    if (!dst) return;
+    for (int k = 0; k < _count; k++) {
+      int i = (_head - _count + k + CAP) % CAP;
+      if (_buf[i].timestamp >= since_ts)
+        dst->append(_buf[i].outgoing, _buf[i].peer, _buf[i].sender, _buf[i].text, _buf[i].timestamp);
+    }
+  }
+
   bool setStatusByAck(uint32_t ack, uint8_t status) override {
     if (!ack) return false;
     // Newest-first so a recycled ack value updates the most recent send.

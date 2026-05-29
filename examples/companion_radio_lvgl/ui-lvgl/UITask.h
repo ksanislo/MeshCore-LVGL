@@ -73,6 +73,12 @@ class UITask : public AbstractUITask {
   SdMessageStore<CHAT_HISTORY_CAP> _sdmsgs;     // persistent (per-conversation files on SD)
 #endif
   MessageStore* _msgs;   // -> _rammsgs or _sdmsgs, chosen at begin() from the setting
+  uint32_t      _sd_off_ts;  // RTC time saving was disabled (0 = not off; for backfill)
+  // Append to the RAM ring always (keeps recent history for the toggle) and to
+  // the SD store when persistence is active.
+  void storeAppend(bool outgoing, const char* key, const char* sender,
+                   const char* text, uint32_t ts,
+                   uint8_t status = 0, uint32_t ack = 0, uint32_t expiry_ms = 0);
   lv_obj_t*       _chat_screen;
   lv_obj_t*       _chat_title;          // contact name in the chat top bar
   lv_obj_t*       _chat_history;        // scrollable message container (the VSA band)
@@ -385,7 +391,7 @@ public:
       _qr_return_screen(NULL),
       _screen_w(0), _screen_h(0),
       _kb_scroll(NULL), _kb_scroll_pad(0),
-      _buf1(NULL), _buf2(NULL), _msgs(&_rammsgs) {
+      _buf1(NULL), _buf2(NULL), _msgs(&_rammsgs), _sd_off_ts(0) {
         _chat_peer[0] = 0;
         _chat_key[0] = 0;
         _search_filter[0] = 0;
