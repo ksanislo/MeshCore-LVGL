@@ -51,6 +51,27 @@ static File openUpdate(FILESYSTEM* fs, const char* filename) {
 #endif
 }
 
+// Crash-safe full-file rewrite: callers write the new contents to "<name>.tmp",
+// then commitTmp() swaps it over the live file. The live file is only removed once
+// the temp is fully written + closed, so a reset can leave at most: the old-complete
+// live file (crash before/while writing the temp), or the new-complete temp (crash
+// during the swap) -- never a truncated live file. recoverTmp() promotes a leftover
+// temp at load time. This replaces the old "remove + rewrite in place" that lost the
+// whole file if interrupted mid-write. Uses only rename/exists/remove, which all
+// supported filesystems (SPIFFS, LittleFS, FAT/SdFat, Adafruit InternalFS) provide.
+static bool commitTmp(FILESYSTEM* fs, const char* tmp, const char* final) {
+  fs->remove(final);
+  if (fs->rename(tmp, final)) return true;
+  fs->remove(tmp);   // rename failed: drop the temp rather than leave it stale
+  return false;
+}
+
+// If a previous commit was interrupted after the live file was removed but before
+// the rename finished, the only intact copy is the temp -- promote it before loading.
+static void recoverTmp(FILESYSTEM* fs, const char* tmp, const char* final) {
+  if (fs->exists(tmp) && !fs->exists(final)) fs->rename(tmp, final);
+}
+
 // One contact record on disk (see saveContacts layout). Fixed size lets us
 // rewrite a single contact in place instead of the whole file.
 #define CONTACT_RECORD_SIZE  (32 + 32 + 1 + 1 + 1 + 4 + 1 + 4 + 64 + 4 + 4 + 4)  // 152
@@ -207,6 +228,7 @@ bool DataStore::saveMainIdentity(const mesh::LocalIdentity &identity) {
 }
 
 void DataStore::loadPrefs(NodePrefs& prefs, double& node_lat, double& node_lon) {
+  recoverTmp(_fs, "/new_prefs.tmp", "/new_prefs");
   if (_fs->exists("/new_prefs")) {
     loadPrefsInt("/new_prefs", prefs, node_lat, node_lon); // new filename
   } else if (_fs->exists("/node_prefs")) {
@@ -274,7 +296,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
 }
 
 void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_lon) {
-  File file = openWrite(_fs, "/new_prefs");
+  File file = openWrite(_fs, "/new_prefs.tmp");   // crash-safe: write temp, then swap
   if (file) {
     uint8_t pad[8];
     memset(pad, 0, sizeof(pad));
@@ -319,10 +341,12 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.screen_timeout_s, sizeof(_prefs.screen_timeout_s));       // 145
 
     file.close();
+    commitTmp(_fs, "/new_prefs.tmp", "/new_prefs");
   }
 }
 
 void DataStore::loadContacts(DataStoreHost* host) {
+  recoverTmp(_getContactsChannelsFS(), "/contacts3.tmp", "/contacts3");
 File file = openRead(_getContactsChannelsFS(), "/contacts3");
     if (file) {
       bool full = false;
@@ -354,11 +378,13 @@ File file = openRead(_getContactsChannelsFS(), "/contacts3");
 }
 
 void DataStore::saveContacts(DataStoreHost* host) {
-  File file = openWrite(_getContactsChannelsFS(), "/contacts3");
+  FILESYSTEM* fs = _getContactsChannelsFS();
+  File file = openWrite(fs, "/contacts3.tmp");   // crash-safe: write temp, then swap
   if (file) {
     uint32_t idx = 0;
     ContactInfo c;
     uint8_t unused = 0;
+    bool ok = true;
 
     while (host->getContactForSave(idx, c)) {
       bool success = (file.write(c.id.pub_key, 32) == 32);
@@ -374,11 +400,13 @@ void DataStore::saveContacts(DataStoreHost* host) {
       success = success && (file.write((uint8_t *)&c.gps_lat, 4) == 4);
       success = success && (file.write((uint8_t *)&c.gps_lon, 4) == 4);
 
-      if (!success) break; // write failed
+      if (!success) { ok = false; break; } // write failed -- don't commit a short file
 
       idx++;  // advance to next contact
     }
     file.close();
+    if (ok) commitTmp(fs, "/contacts3.tmp", "/contacts3");
+    else    fs->remove("/contacts3.tmp");   // leave the existing /contacts3 intact
   }
 }
 
@@ -413,6 +441,7 @@ bool DataStore::updateContact(int idx, const ContactInfo& c) {
 }
 
 void DataStore::loadChannels(DataStoreHost* host) {
+    recoverTmp(_getContactsChannelsFS(), "/channels2.tmp", "/channels2");
     File file = openRead(_getContactsChannelsFS(), "/channels2");
     if (file) {
       bool full = false;
@@ -438,22 +467,26 @@ void DataStore::loadChannels(DataStoreHost* host) {
 }
 
 void DataStore::saveChannels(DataStoreHost* host) {
-  File file = openWrite(_getContactsChannelsFS(), "/channels2");
+  FILESYSTEM* fs = _getContactsChannelsFS();
+  File file = openWrite(fs, "/channels2.tmp");   // crash-safe: write temp, then swap
   if (file) {
     uint8_t channel_idx = 0;
     ChannelDetails ch;
     uint8_t unused[4];
     memset(unused, 0, 4);
+    bool ok = true;
 
     while (host->getChannelForSave(channel_idx, ch)) {
       bool success = (file.write(unused, 4) == 4);
       success = success && (file.write((uint8_t *)ch.name, 32) == 32);
       success = success && (file.write((uint8_t *)ch.channel.secret, 32) == 32);
 
-      if (!success) break; // write failed
+      if (!success) { ok = false; break; } // write failed -- don't commit a short file
       channel_idx++;
     }
     file.close();
+    if (ok) commitTmp(fs, "/channels2.tmp", "/channels2");
+    else    fs->remove("/channels2.tmp");   // leave the existing /channels2 intact
   }
 }
 
