@@ -21,6 +21,7 @@ extern "C" __attribute__((weak)) void board_set_backlight(uint8_t duty) { (void)
 
 static void sanitizeForFont(const char* in, char* out, size_t cap);
 static bool containsCI(const char* hay, const char* needle);
+static const lv_font_t* withEmoji(const lv_font_t* base);  // base font + emoji/unicode fallback
 
 UITask* UITask::_instance = NULL;
 
@@ -66,6 +67,10 @@ static void styleAsDarkScreen(lv_obj_t* scr) {
   lv_obj_set_style_bg_color(scr, lv_color_hex(BG_HEX), 0);
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
   lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+  // text_font is inherited, so this gives every default-font field on the screen
+  // (compose box, name/nickname inputs, channel list, search, etc.) emoji/unicode
+  // support. Widgets with an explicit larger font wrap it via withEmoji() too.
+  lv_obj_set_style_text_font(scr, withEmoji(&lv_font_montserrat_14), 0);
 }
 
 lv_obj_t* UITask::buildSplashScreen() {
@@ -189,6 +194,7 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_set_style_bg_color(_contacts_table, lv_color_hex(BG_HEX), LV_PART_ITEMS);
   lv_obj_set_style_bg_opa(_contacts_table, LV_OPA_COVER, LV_PART_ITEMS);
   lv_obj_set_style_text_color(_contacts_table, lv_color_hex(FG_HEX), LV_PART_ITEMS);
+  lv_obj_set_style_text_font(_contacts_table, withEmoji(&lv_font_montserrat_14), LV_PART_ITEMS);
   lv_obj_set_style_pad_top(_contacts_table, 10, LV_PART_ITEMS);
   lv_obj_set_style_pad_bottom(_contacts_table, 10, LV_PART_ITEMS);
   lv_obj_set_style_pad_left(_contacts_table, 8, LV_PART_ITEMS);
@@ -851,6 +857,7 @@ void UITask::buildContactPickerScreen() {
   lv_obj_set_style_bg_color(_pick_table, lv_color_hex(BG_HEX), LV_PART_ITEMS);
   lv_obj_set_style_bg_opa(_pick_table, LV_OPA_COVER, LV_PART_ITEMS);
   lv_obj_set_style_text_color(_pick_table, lv_color_hex(FG_HEX), LV_PART_ITEMS);
+  lv_obj_set_style_text_font(_pick_table, withEmoji(&lv_font_montserrat_14), LV_PART_ITEMS);
   lv_obj_set_style_pad_top(_pick_table, 10, LV_PART_ITEMS);
   lv_obj_set_style_pad_bottom(_pick_table, 10, LV_PART_ITEMS);
   lv_obj_set_style_pad_left(_pick_table, 8, LV_PART_ITEMS);
@@ -1222,12 +1229,73 @@ static void sanitizeForFont(const char* in, char* out, size_t cap) {
 // renders emoji and accented/"smart" Unicode instead of dropping/boxing them.
 extern const lv_font_t meshcore_emoji_14;
 
-// montserrat_14 with the emoji/unicode font as a glyph fallback (lazily set up).
-static const lv_font_t* msgFont() {
-  static lv_font_t f;
-  if (!f.fallback) { f = lv_font_montserrat_14; f.fallback = &meshcore_emoji_14; }
-  return &f;
+// imgfont path callback: map an emoji codepoint to its color image on the SD card
+// (S: drive). Returns false for non-emoji so text/accents fall through to the
+// baked fonts. A missing image makes lv_imgfont's get_info fail -> chain falls
+// through to the monochrome baked emoji. VS16/ZWJ/skin-tones are already stripped
+// at the display layer, so we see base codepoints here.
+// Is this codepoint one we treat as an emoji (route to a color image)? Text and
+// accented Latin return false so they stay on the base / monochrome fonts.
+static bool isEmojiCp(uint32_t cp) {
+  return (cp >= 0x1F000) ||
+         (cp >= 0x2600 && cp <= 0x27BF) ||   // misc symbols + dingbats
+         (cp >= 0x2B00 && cp <= 0x2BFF) ||   // stars/arrows
+         (cp >= 0x2300 && cp <= 0x23FF) ||   // misc technical (⌚⏰ etc.)
+         cp == 0x2122 || cp == 0x203C || cp == 0x2049;
 }
+
+// imgfont path callback. The image size is the imgfont's own height (we make one
+// imgfont per UI font size), so color emoji are pre-rendered per size on the card
+// as /emoji/<size>/<codepoint>.bin -- loaded on demand. A missing file makes
+// get_info fail and the chain falls through to the 14px monochrome baked set.
+static bool emojiImgPathCb(const lv_font_t* font, void* img_src, uint16_t len,
+                           uint32_t unicode, uint32_t unicode_next) {
+  (void)unicode_next;
+  if (!isEmojiCp(unicode)) return false;
+  lv_snprintf((char*)img_src, len, "S:/emoji/%d/%lx.bin",
+              (int)font->line_height, (unsigned long)unicode);
+  return true;
+}
+
+// One color imgfont per pixel size (cached). path_cb reads font->line_height to
+// pick the matching /emoji/<size>/ folder.
+static lv_font_t* emojiImgFont(int size) {
+  static struct { int size; lv_font_t* font; } cache[6];
+  static int n = 0;
+  for (int i = 0; i < n; i++) if (cache[i].size == size) return cache[i].font;
+  if (n >= (int)(sizeof(cache) / sizeof(cache[0]))) return nullptr;
+  cache[n].size = size;
+  cache[n].font = lv_imgfont_create((uint16_t)size, emojiImgPathCb);
+  return cache[n++].font;
+}
+
+// Nominal pixel size of a built-in Montserrat font (for matching the emoji size).
+static int nominalSize(const lv_font_t* f) {
+  if (f == &lv_font_montserrat_12) return 12;
+  if (f == &lv_font_montserrat_16) return 16;
+  if (f == &lv_font_montserrat_20) return 20;
+  if (f == &lv_font_montserrat_28) return 28;
+  return 14;
+}
+
+// Return a copy of `base` whose glyph fallback is: color imgfont at the base's
+// size (SD) -> 14px monochrome baked set -> placeholder. So emoji / extended
+// Unicode render anywhere this font is used, color-matched to the text size when
+// the SD pack has that size. Cached per base font.
+static const lv_font_t* withEmoji(const lv_font_t* base) {
+  static struct { const lv_font_t* base; lv_font_t font; } cache[6];
+  static int n = 0;
+  for (int i = 0; i < n; i++) if (cache[i].base == base) return &cache[i].font;
+  if (n >= (int)(sizeof(cache) / sizeof(cache[0]))) return base;
+  lv_font_t* img = emojiImgFont(nominalSize(base));
+  if (img) img->fallback = (lv_font_t*)&meshcore_emoji_14;  // color -> monochrome
+  cache[n].base = base;
+  cache[n].font = *base;
+  cache[n].font.fallback = img ? img : (lv_font_t*)&meshcore_emoji_14;
+  return &cache[n++].font;
+}
+
+static const lv_font_t* msgFont() { return withEmoji(&lv_font_montserrat_14); }
 
 static void addMessageText(lv_obj_t* bubble, const char* text) {
   static const uint32_t FG_TEXT = 0xF3F4F6;
@@ -1249,6 +1317,7 @@ static void addMessageText(lv_obj_t* bubble, const char* text) {
     lv_span_t* span = lv_spangroup_new_span(sg);
     lv_span_set_text(span, buf);
     lv_style_set_text_color(&span->style, lv_color_hex(color));
+    lv_style_set_text_font(&span->style, msgFont());  // emoji/unicode in every span (incl. mentions)
   };
 
   char clean[CHAT_MSG_TEXT_MAX + 8];
@@ -1417,6 +1486,7 @@ void UITask::buildContactCard(lv_obj_t* bubble, const ChatMessage* m,
   lv_obj_t* nm = lv_label_create(bubble);
   lv_label_set_text(nm, sname);
   lv_obj_set_style_text_color(nm, lv_color_hex(0xF3F4F6), 0);
+  lv_obj_set_style_text_font(nm, withEmoji(&lv_font_montserrat_14), 0);
 
   char hex[2 * PUB_KEY_SIZE + 1];
   mesh::Utils::toHex(hex, pubkey, PUB_KEY_SIZE);
@@ -1559,7 +1629,7 @@ void UITask::rebuildChatHistory() {
       sanitizeForFont(m->sender[0] ? m->sender : "?", sname, sizeof(sname));
       lv_label_set_text(name, sname);
       lv_obj_set_style_text_color(name, lv_color_hex(0x9CA3AF), 0);  // gray-400
-      lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+      lv_obj_set_style_text_font(name, withEmoji(&lv_font_montserrat_12), 0);
     }
 
     // Full-width row wrapper so we can left/right-align the bubble inside it.
@@ -1676,7 +1746,7 @@ void UITask::openChat(const char* peer_name) {
 
     _chat_title = lv_label_create(bar);
     lv_obj_set_style_text_color(_chat_title, lv_color_hex(FG_HEX), 0);
-    lv_obj_set_style_text_font(_chat_title, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(_chat_title, withEmoji(&lv_font_montserrat_20), 0);
     lv_obj_align(_chat_title, LV_ALIGN_LEFT_MID, 40, 0);
     // Tap the contact name to open Contact Info (no-op for channels).
     lv_obj_add_flag(_chat_title, LV_OBJ_FLAG_CLICKABLE);
@@ -1855,6 +1925,9 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _screen_h = _lgfx->height();
 
   lv_init();
+#ifdef HAS_SD_CARD
+  SdSvc::registerFs();   // 'S:' lv_fs driver for SD-backed images (emoji); needs lv_init first
+#endif
 
   // Two DMA-capable internal buffers for double-buffered, pipelined flush.
   // Bigger buffers => fewer flush chunks => less per-transaction overhead.
@@ -2056,7 +2129,7 @@ void UITask::buildContactInfoScreen() {
 
   _cinfo_title = lv_label_create(_cinfo_body);
   lv_obj_set_style_text_color(_cinfo_title, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(_cinfo_title, &lv_font_montserrat_28, 0);
+  lv_obj_set_style_text_font(_cinfo_title, withEmoji(&lv_font_montserrat_28), 0);
 
   _cinfo_key = lv_label_create(_cinfo_body);
   lv_obj_set_style_text_color(_cinfo_key, lv_color_hex(DIM_HEX), 0);
@@ -2114,7 +2187,7 @@ void UITask::buildContactInfoScreen() {
   _cinfo_realname = lv_label_create(ncap);
   lv_label_set_text(_cinfo_realname, "");
   lv_obj_set_style_text_color(_cinfo_realname, lv_color_hex(DIM_HEX), 0);
-  lv_obj_set_style_text_font(_cinfo_realname, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_font(_cinfo_realname, withEmoji(&lv_font_montserrat_12), 0);
   _cinfo_name_ta = lv_textarea_create(fn);
   lv_textarea_set_one_line(_cinfo_name_ta, true);
   lv_obj_set_width(_cinfo_name_ta, LV_PCT(100));
@@ -2564,7 +2637,7 @@ void UITask::buildShareQRScreen() {
 
   _qr_name_lbl = lv_label_create(body);
   lv_obj_set_style_text_color(_qr_name_lbl, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(_qr_name_lbl, &lv_font_montserrat_28, 0);
+  lv_obj_set_style_text_font(_qr_name_lbl, withEmoji(&lv_font_montserrat_28), 0);
 
   _qr_key_lbl = lv_label_create(body);
   lv_obj_set_style_text_color(_qr_key_lbl, lv_color_hex(DIM_HEX), 0);
