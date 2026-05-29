@@ -128,6 +128,9 @@ void halt() {
 
 #ifdef MESH_PROXY
 static void meshTask(void*);   // backend loop, pinned to core 0 (defined below)
+// Gate: meshTask is created early (to reserve its stack before LVGL grabs the heap)
+// but must not touch the_mesh/radio/HSPI until ui_task.begin() has finished on core 1.
+static volatile bool s_ui_ready = false;
 #endif
 
 void setup() {
@@ -275,6 +278,10 @@ void setup() {
 #ifdef DISPLAY_CLASS
   ui_task.begin(disp, &sensors, the_mesh.getNodePrefs());  // still want to pass this in as dependency, as prefs might be moved
 #endif
+
+#ifdef MESH_PROXY
+  s_ui_ready = true;   // UI is up: release the core-0 mesh backend to start running
+#endif
 }
 
 #ifdef MESH_PROXY
@@ -283,6 +290,10 @@ void setup() {
 // blocking it. The UI talks to it only through MeshProxy: commands in, snapshot +
 // events out. Only the HSPI bus is shared (serialized by the Phase-A mutex).
 static void meshTask(void*) {
+  // Wait for the UI to finish initializing before doing any mesh/radio/HSPI work, so
+  // core 0 and core 1 don't race on the shared HSPI bus during startup (that race
+  // intermittently wedged core 1's init -- stuck at "Loading...").
+  while (!s_ui_ready) vTaskDelay(1);
   for (;;) {
     mproxy::drainCommands(the_mesh);    // execute UI-posted commands against the_mesh
     the_mesh.loop();                    // process mesh; the 5 callbacks enqueue events
