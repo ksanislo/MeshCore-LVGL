@@ -315,10 +315,14 @@ static const char* contactSymbol(uint8_t type) {
 static void formatLastSeen(char* out, size_t cap, uint32_t lastmod_secs, uint32_t now_secs) {
   if (lastmod_secs == 0) { snprintf(out, cap, "never"); return; }
   uint32_t age = now_secs >= lastmod_secs ? (now_secs - lastmod_secs) : 0;
-  if (age < 60)         snprintf(out, cap, "%us",   (unsigned)age);
-  else if (age < 3600)  snprintf(out, cap, "%um",   (unsigned)(age / 60));
-  else if (age < 86400) snprintf(out, cap, "%uh",   (unsigned)(age / 3600));
-  else                  snprintf(out, cap, "%ud",   (unsigned)(age / 86400));
+  // Keep it to one unit and at most 2 digits, rolling up so old contacts read
+  // "2y" rather than "760d": s -> m -> h -> d(<1wk) -> w(<1yr) -> y(capped 99).
+  if (age < 60)            snprintf(out, cap, "%us", (unsigned)age);
+  else if (age < 3600)     snprintf(out, cap, "%um", (unsigned)(age / 60));
+  else if (age < 86400)    snprintf(out, cap, "%uh", (unsigned)(age / 3600));
+  else if (age < 604800)   snprintf(out, cap, "%ud", (unsigned)(age / 86400));    // 1-6 d
+  else if (age < 31536000) snprintf(out, cap, "%uw", (unsigned)(age / 604800));   // 1-52 w
+  else { unsigned y = age / 31536000; if (y > 99) y = 99; snprintf(out, cap, "%uy", y); }
 }
 
 static constexpr uint8_t CONTACT_FLAG_FAVOURITE = 0x01;  // matches firmware
@@ -405,9 +409,10 @@ void UITask::rebuildContactsList() {
     if (!mproxy::getContactByIdx(i, c)) continue;
     if (!contactPasses(c)) continue;
     _crows[_crow_count].idx = (uint16_t)i;
-    // Sort key: latest message time for "Latest Messages", else last-heard.
+    // Sort key: latest message time for "Latest Messages", else last-heard by OUR
+    // clock (lastmod) -- not last_advert_timestamp, which is their (untrusted) clock.
     _crows[_crow_count].heard = (_contacts_order == 2)
-        ? _msgs->latestTimestampFor(c.name) : c.last_advert_timestamp;
+        ? _msgs->latestTimestampFor(c.name) : c.lastmod;
     _crows[_crow_count].fav = (c.flags & CONTACT_FLAG_FAVOURITE) ? 1 : 0;
     _crow_count++;
   }
@@ -436,7 +441,9 @@ void UITask::rebuildContactsList() {
     snprintf(cell, sizeof(cell), "%s %s", contactSymbol(c.type), clean);
     lv_table_set_cell_value(_contacts_table, r, 0, cell);
     char ago[16];
-    formatLastSeen(ago, sizeof(ago), c.last_advert_timestamp, now);
+    // lastmod = when WE last heard them (our clock). last_advert_timestamp is
+    // THEIR clock and can't be trusted (bad RTCs report wild times).
+    formatLastSeen(ago, sizeof(ago), c.lastmod, now);
     lv_table_set_cell_value(_contacts_table, r, 1, ago);
   }
   lv_obj_scroll_to_y(_contacts_table, 0, LV_ANIM_OFF);
@@ -945,7 +952,7 @@ void UITask::rebuildPicker() {
     if (!mproxy::getContactByIdx(i, c)) continue;
     if (_pick_filter[0] && !containsCI(c.name, _pick_filter)) continue;
     _prows[_prow_count].idx = (uint16_t)i;
-    _prows[_prow_count].heard = c.last_advert_timestamp;
+    _prows[_prow_count].heard = c.lastmod;   // our clock (see rebuildContactsList)
     _prows[_prow_count].fav = (c.flags & CONTACT_FLAG_FAVOURITE) ? 1 : 0;
     _prow_count++;
   }
@@ -2449,7 +2456,7 @@ void UITask::populateContactInfo() {
   lv_label_set_text(_cinfo_type_lbl, c->type <= 4 ? TYPE_NAMES[c->type] : "Unknown");
 
   char lh[16];
-  formatLastSeen(lh, sizeof(lh), c->last_advert_timestamp, mproxy::rtcSeconds());
+  formatLastSeen(lh, sizeof(lh), c->lastmod, mproxy::rtcSeconds());  // our clock, not theirs
   lv_label_set_text(_cinfo_lastheard, lh);
 
   if (_cinfo_telem) {
