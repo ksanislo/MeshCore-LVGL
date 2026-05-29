@@ -184,6 +184,19 @@ public:
     pending_telemetry = tag;
     return true;
   }
+  // On-device repeater/room console: log in (sets pending_login so onContactResponse
+  // matches the reply -> _ui->loginResult) and send a CLI command (reply arrives via
+  // onCommandDataRecv as a CLI_DATA message). Mirror the BLE CMD_SEND_LOGIN path.
+  bool loginToServer(const ContactInfo& c, const char* password) {
+    uint32_t est = 0;
+    if (sendLogin(c, password, est) == MSG_SEND_FAILED) return false;
+    memcpy(&pending_login, c.id.pub_key, 4);
+    return true;
+  }
+  bool sendCliCommand(const ContactInfo& c, const char* text) {
+    uint32_t est = 0;
+    return sendCommandData(c, getRTCClock()->getCurrentTimeUnique(), 0, text, est) != MSG_SEND_FAILED;
+  }
   void saveContacts() { _store->saveContacts(this); }  // public: on-device UI edits contacts
   void saveChannels() { _store->saveChannels(this); }  // public: on-device UI adds channels
   void getNodeStats(NodeStats& s);                     // public: on-device node-info screen

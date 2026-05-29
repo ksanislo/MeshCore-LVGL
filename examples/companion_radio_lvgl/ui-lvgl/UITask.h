@@ -105,6 +105,7 @@ class UITask : public AbstractUITask {
   bool            _chat_is_channel;     // send via sendGroupMessage vs sendMessage
   uint8_t         _chat_pubkey[6];      // recipient prefix for contact sends
   int             _chat_channel_idx;    // channel slot for channel sends
+  uint8_t         _chat_contact_type;   // ADV_TYPE_* of the open DM contact (repeater/room/chat)
 
   // In-conversation search (reveals a bar under the top bar; filters history).
   lv_obj_t*       _chat_search_bar;
@@ -224,6 +225,12 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _nodeinfo_screen;
   lv_obj_t*       _nodeinfo_lbl;
   lv_timer_t*     _nodeinfo_timer;
+
+  // Repeater/room login screen (password prompt). Lazily built.
+  lv_obj_t*       _login_screen;
+  lv_obj_t*       _login_pw_ta;
+  lv_obj_t*       _login_kb;
+  uint8_t         _login_pubkey[6];     // server we're logging into
 
   // LVGL display + input. Resolution is read from the LGFX device after
   // setRotation, so this UITask doesn't care whether the variant chose
@@ -432,6 +439,16 @@ class UITask : public AbstractUITask {
   static void open_nodeinfo_cb(lv_event_t* e);
   static void nodeinfo_back_cb(lv_event_t* e);
   static void nodeinfo_timer_cb(lv_timer_t* t);
+
+  // Repeater/room-server console: login + CLI command send
+  void      postCliCommand(const uint8_t* pubkey6, const char* conv_key, const char* text);
+  void      buildLoginScreen();
+  void      openLogin(const uint8_t* pubkey6);
+  static void kebab_login_cb(lv_event_t* e);
+  static void login_back_cb(lv_event_t* e);
+  static void login_go_cb(lv_event_t* e);
+  static void login_ta_event_cb(lv_event_t* e);
+  static void login_kb_event_cb(lv_event_t* e);
   static void newchan_open_cb(lv_event_t* e);   // "+ New channel" list entry
   static void newchan_back_cb(lv_event_t* e);
   static void newchan_save_cb(lv_event_t* e);
@@ -459,7 +476,7 @@ public:
       _chat_screen(NULL), _chat_title(NULL), _chat_history(NULL), _chat_sb(NULL),
       _chat_compose(NULL), _chat_input(NULL), _chat_keyboard(NULL),
       _insert_popup(NULL), _insert_list(NULL),
-      _chat_is_channel(false), _chat_channel_idx(-1),
+      _chat_is_channel(false), _chat_channel_idx(-1), _chat_contact_type(0),
       _chat_search_bar(NULL), _chat_search_ta(NULL), _search_active(false),
       _sending_lbl(NULL), _dot_frame(0), _anim_ms(0),
       _cinfo_screen(NULL), _cinfo_body(NULL), _cinfo_title(NULL), _cinfo_realname(NULL), _cinfo_key(NULL),
@@ -486,6 +503,7 @@ public:
       _newchan_screen(NULL), _newchan_name_ta(NULL), _newchan_key_ta(NULL),
       _newchan_err(NULL), _newchan_kb(NULL),
       _nodeinfo_screen(NULL), _nodeinfo_lbl(NULL), _nodeinfo_timer(NULL),
+      _login_screen(NULL), _login_pw_ta(NULL), _login_kb(NULL),
       _screen_w(0), _screen_h(0),
       _kb_scroll(NULL), _kb_scroll_pad(0),
       _buf1(NULL), _buf2(NULL), _msgs(&_rammsgs), _sd_off_ts(0),
@@ -515,6 +533,7 @@ public:
   void sentMsg(const char* peer, const char* text) override;
   void telemetryResponse(const uint8_t* pubkey, const char* from_name, const uint8_t* lpp, uint8_t lpp_len) override;
   void msgDelivered(uint32_t ack) override;
+  void loginResult(const uint8_t* pubkey, bool ok, uint8_t is_admin, uint16_t keep_alive_secs) override;
   void notify(UIEventType t = UIEventType::none) override;
   void loop() override;
 };

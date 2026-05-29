@@ -1265,12 +1265,30 @@ void UITask::sendCurrentMessage() {
   encodeMentions(raw, encoded, sizeof(encoded));
 
   const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
-  // Async send: the backend does sendMessage/sendGroupMessage + addExpectedAck and
-  // replies EV_SendResult with the real ack. The bubble shows immediately.
-  postSend(_chat_is_channel, _chat_is_channel ? nullptr : _chat_pubkey,
-           _chat_channel_idx, _chat_key, me, encoded);
+  if (!_chat_is_channel && _chat_contact_type == ADV_TYPE_REPEATER) {
+    // A repeater chat is a CLI console: send the line as a command (no ACK), reply
+    // arrives as a CLI_DATA message in this thread.
+    postCliCommand(_chat_pubkey, _chat_key, encoded);
+  } else {
+    // Async send: the backend does sendMessage/sendGroupMessage + addExpectedAck and
+    // replies EV_SendResult with the real ack. The bubble shows immediately.
+    postSend(_chat_is_channel, _chat_is_channel ? nullptr : _chat_pubkey,
+             _chat_channel_idx, _chat_key, me, encoded);
+  }
   lv_textarea_set_text(_chat_input, "");
   rebuildChatHistory();
+}
+
+// CLI command to a repeater: no ACK, so show it as a plain sent bubble and post the
+// command. The reply comes back as an incoming CLI_DATA message in the same thread.
+void UITask::postCliCommand(const uint8_t* pubkey6, const char* conv_key, const char* text) {
+  storeAppend(true, conv_key, "Me", text, mproxy::rtcSeconds(), MSG_STATUS_NONE, 0, 0, 0);
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::SendCommand;
+  if (pubkey6) memcpy(c.pubkey, pubkey6, 6);
+  strncpy(c.text, text, sizeof(c.text) - 1);
+  c.text[sizeof(c.text) - 1] = 0;
+  mproxy::postCommand(c);
 }
 
 // Runs on the backend thread (called from the_mesh.loop()): just enqueue.
@@ -1278,6 +1296,17 @@ void UITask::msgDelivered(uint32_t ack) {
   mproxy::UiEvent ev{};
   ev.kind = mproxy::EvKind::Delivered;
   ev.ack  = ack;
+  mproxy::pushEvent(ev);
+}
+
+// Backend thread: a repeater/room login response arrived -> enqueue for the UI.
+void UITask::loginResult(const uint8_t* pubkey, bool ok, uint8_t is_admin, uint16_t keep_alive_secs) {
+  mproxy::UiEvent ev{};
+  ev.kind = mproxy::EvKind::LoginResult;
+  ev.ok = ok;
+  ev.is_admin = is_admin;
+  ev.keep_alive = keep_alive_secs;
+  if (pubkey) memcpy(ev.pubkey, pubkey, 6);
   mproxy::pushEvent(ev);
 }
 
@@ -1993,6 +2022,14 @@ void UITask::openChat(const char* peer_name) {
     else _chat_key[0] = 0;
   } else {
     convKey(_chat_pubkey, false, _chat_key, sizeof(_chat_key));
+  }
+
+  // Remember the contact type so the compose bar / kebab can offer login + CLI for
+  // repeaters and room servers.
+  _chat_contact_type = ADV_TYPE_CHAT;
+  if (!_chat_is_channel) {
+    const ContactInfo* c = mproxy::lookupContactByPubKey(_chat_pubkey, 6);
+    if (c) _chat_contact_type = c->type;
   }
 
   rebuildChatHistory();
@@ -2868,6 +2905,10 @@ void UITask::chat_kebab_cb(lv_event_t* e) {
     lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_LIST, "Details"), kebab_details_cb, LV_EVENT_CLICKED, NULL);
   }
   lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_EYE_OPEN, "Search"), kebab_search_cb, LV_EVENT_CLICKED, NULL);
+  if (!s->_chat_is_channel &&
+      (s->_chat_contact_type == ADV_TYPE_REPEATER || s->_chat_contact_type == ADV_TYPE_ROOM)) {
+    lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_SETTINGS, "Login"), kebab_login_cb, LV_EVENT_CLICKED, NULL);
+  }
   if (s->_chat_is_channel) {
     lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_UPLOAD, "Share"), kebab_chanshare_cb, LV_EVENT_CLICKED, NULL);
   }
@@ -3349,6 +3390,125 @@ void UITask::newchan_kb_event_cb(lv_event_t* e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
     lv_obj_add_flag(_instance->_newchan_kb, LV_OBJ_FLAG_HIDDEN);
+    _instance->resetKbScroll();
+  }
+}
+
+// ===== Repeater / room-server login ======================================
+
+void UITask::buildLoginScreen() {
+  if (_login_screen) return;
+  _login_screen = lv_obj_create(NULL);
+  styleAsDarkScreen(_login_screen);
+  lv_obj_set_style_pad_all(_login_screen, 0, 0);
+
+  lv_obj_t* bar = lv_obj_create(_login_screen);
+  lv_obj_set_size(bar, _screen_w, HEADER_H);
+  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
+  lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(bar, 0, 0);
+  lv_obj_set_style_radius(bar, 0, 0);
+  lv_obj_set_style_pad_all(bar, 6, 0);
+  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t* back = lv_btn_create(bar);
+  lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_shadow_width(back, 0, 0);
+  lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_add_event_cb(back, login_back_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* bl = lv_label_create(back);
+  lv_label_set_text(bl, LV_SYMBOL_LEFT);
+  lv_obj_set_style_text_color(bl, lv_color_hex(FG_HEX), 0);
+  lv_obj_t* bt = lv_label_create(bar);
+  lv_label_set_text(bt, "Login");
+  lv_obj_set_style_text_color(bt, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(bt, &lv_font_montserrat_20, 0);
+  lv_obj_align(bt, LV_ALIGN_LEFT_MID, 40, 0);
+  lv_obj_t* go = lv_btn_create(bar);
+  lv_obj_align(go, LV_ALIGN_RIGHT_MID, 0, 0);
+  lv_obj_add_event_cb(go, login_go_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* gl = lv_label_create(go);
+  lv_label_set_text(gl, LV_SYMBOL_OK);
+
+  lv_obj_t* body = lv_obj_create(_login_screen);
+  lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
+  lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
+  lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(body, 0, 0);
+  lv_obj_set_style_pad_all(body, 12, 0);
+  lv_obj_set_style_pad_row(body, 8, 0);
+  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+
+  lv_obj_t* fp = makeField(body, "Password (blank for guest)");
+  _login_pw_ta = lv_textarea_create(fp);
+  lv_textarea_set_one_line(_login_pw_ta, true);
+  lv_textarea_set_password_mode(_login_pw_ta, true);
+  lv_obj_set_width(_login_pw_ta, LV_PCT(100));
+  lv_obj_add_event_cb(_login_pw_ta, login_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  _login_kb = lv_keyboard_create(_login_screen);
+  lv_obj_add_event_cb(_login_kb, login_kb_event_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_login_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::openLogin(const uint8_t* pubkey6) {
+  buildLoginScreen();
+  if (pubkey6) memcpy(_login_pubkey, pubkey6, 6);
+  lv_textarea_set_text(_login_pw_ta, "");
+  lv_obj_add_flag(_login_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_scr_load(_login_screen);
+}
+
+void UITask::kebab_login_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  uint8_t pk[6]; memcpy(pk, _instance->_chat_pubkey, 6);
+  _instance->closeMenuPopup();
+  _instance->openLogin(pk);
+}
+
+void UITask::login_back_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  lv_obj_add_flag(_instance->_login_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_scr_load(_instance->_chat_screen ? _instance->_chat_screen : _instance->_home_screen);
+}
+
+void UITask::login_go_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  const char* pw = lv_textarea_get_text(_instance->_login_pw_ta);
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::ServerLogin;
+  memcpy(c.pubkey, _instance->_login_pubkey, 6);
+  strncpy(c.password, pw ? pw : "", sizeof(c.password) - 1);
+  c.password[sizeof(c.password) - 1] = 0;
+  mproxy::postCommand(c);
+  lv_obj_add_flag(_instance->_login_kb, LV_OBJ_FLAG_HIDDEN);
+  _instance->showToast("Logging in...");      // result arrives via EvKind::LoginResult
+  lv_scr_load(_instance->_chat_screen ? _instance->_chat_screen : _instance->_home_screen);
+}
+
+void UITask::login_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    lv_obj_t* ta = lv_event_get_target(e);
+    lv_keyboard_set_textarea(_instance->_login_kb, ta);
+    lv_keyboard_set_mode(_instance->_login_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_login_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_login_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_login_kb);
+    _instance->raiseFieldForKb(lv_obj_get_parent(lv_obj_get_parent(ta)), _instance->_login_kb, ta);
+  }
+}
+
+void UITask::login_kb_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+    lv_obj_add_flag(_instance->_login_kb, LV_OBJ_FLAG_HIDDEN);
     _instance->resetKbScroll();
   }
 }
@@ -4569,6 +4729,16 @@ void UITask::drainEvents() {
       case mproxy::EvKind::Delivered: {
         if (_msgs->setStatusByAck(ev.ack, MSG_STATUS_DELIVERED) && _chat_screen)
           rebuildChatHistory();
+        break;
+      }
+      case mproxy::EvKind::LoginResult: {
+        if (ev.ok) {
+          char m[48];
+          snprintf(m, sizeof(m), "Logged in%s", ev.is_admin ? " (admin)" : "");
+          showToast(m);
+        } else {
+          showToast("Login failed");
+        }
         break;
       }
       case mproxy::EvKind::Telem: {

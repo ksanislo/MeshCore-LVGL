@@ -221,6 +221,16 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
       }
       break;
     }
+    case CmdKind::ServerLogin: {
+      ContactInfo* c = mesh.lookupContactByPubKey(cmd.pubkey, LOOKUP_PREFIX);
+      if (c) mesh.loginToServer(*c, cmd.password);   // reply -> onContactResponse -> _ui->loginResult
+      break;
+    }
+    case CmdKind::SendCommand: {
+      ContactInfo* c = mesh.lookupContactByPubKey(cmd.pubkey, LOOKUP_PREFIX);
+      if (c) mesh.sendCliCommand(*c, cmd.text);      // reply -> onCommandDataRecv -> CLI_DATA message
+      break;
+    }
     case CmdKind::ReqTelem: {
       ContactInfo* c = mesh.lookupContactByPubKey(cmd.pubkey, LOOKUP_PREFIX);
       if (c) mesh.requestTelemetry(*c);

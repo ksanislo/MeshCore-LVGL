@@ -465,8 +465,10 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   }
 
 #ifdef DISPLAY_CLASS
-  // we only want to show text messages on display, not cli data
-  bool should_display = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN;
+  // Show plain text, signed room posts, AND CLI replies (so the on-device repeater
+  // console can display command output in the repeater's chat thread).
+  bool should_display = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN
+                     || txt_type == TXT_TYPE_CLI_DATA;
   if (should_display && _ui) {
     setHookKey(from.id.pub_key, false);
     _ui->newMsg(path_len, from.name, text, offline_queue_len);
@@ -672,12 +674,14 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     // yes, is response to pending sendLogin()
     pending_login = 0;
 
+    bool login_ok = false; uint8_t login_admin = 0; uint16_t login_ka = 0;
     int i = 0;
     if (memcmp(&data[4], "OK", 2) == 0) { // legacy Repeater login OK response
       out_frame[i++] = PUSH_CODE_LOGIN_SUCCESS;
       out_frame[i++] = 0; // legacy: is_admin = false
       memcpy(&out_frame[i], contact.id.pub_key, 6);
       i += 6;                                     // pub_key_prefix
+      login_ok = true;
     } else if (data[4] == RESP_SERVER_LOGIN_OK) { // new login response
       uint16_t keep_alive_secs = ((uint16_t)data[5]) * 16;
       if (keep_alive_secs > 0) {
@@ -691,6 +695,7 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       i += 4; // NEW: include server timestamp
       out_frame[i++] = data[7]; // NEW (v7): ACL permissions
       out_frame[i++] = data[12]; // FIRMWARE_VER_LEVEL
+      login_ok = true; login_admin = data[6]; login_ka = keep_alive_secs;
     } else {
       out_frame[i++] = PUSH_CODE_LOGIN_FAIL;
       out_frame[i++] = 0; // reserved
@@ -698,6 +703,9 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
       i += 6; // pub_key_prefix
     }
     _serial->writeFrame(out_frame, i);
+#ifdef DISPLAY_CLASS
+    if (_ui) _ui->loginResult(contact.id.pub_key, login_ok, login_admin, login_ka);  // on-device console
+#endif
   } else if (len > 4 && // check for status response
              pending_status &&
              memcmp(&pending_status, contact.id.pub_key, 4) == 0 // legacy matching scheme

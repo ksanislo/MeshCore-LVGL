@@ -54,6 +54,11 @@ public:
   // Called when an outgoing message's ACK arrives (delivery confirmed), so an
   // on-device UI can mark it delivered. `ack` matches the value from sendMessage.
   virtual void msgDelivered(uint32_t ack) { (void)ack; }
+  // Called when a login response from a repeater/room server arrives, so an
+  // on-device UI can reflect success/failure + admin rights. Default no-op.
+  virtual void loginResult(const uint8_t* pubkey, bool ok, uint8_t is_admin, uint16_t keep_alive_secs) {
+    (void)pubkey; (void)ok; (void)is_admin; (void)keep_alive_secs;
+  }
   virtual void notify(UIEventType t = UIEventType::none) = 0;
   virtual void loop() = 0;
 };

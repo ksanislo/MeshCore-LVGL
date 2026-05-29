@@ -56,6 +56,8 @@ enum class CmdKind : uint8_t {
   Send, SaveGps, ToggleFav, SetNameOvr, ResetPath, SetPath,
   AddContact, ReqTelem, ShareZhop, Advert, UpdatePrefs, ApplyRadio,
   AddChannel,   // reuses name = channel name, path/path_len = raw secret bytes (16/32)
+  ServerLogin,  // login to a repeater/room server: pubkey + password
+  SendCommand,  // send a CLI command (TXT_TYPE_CLI_DATA) to a repeater: pubkey + text
 };
 
 struct MeshCmd {
@@ -68,8 +70,10 @@ struct MeshCmd {
   char     text[CHAT_MSG_TEXT_MAX + 32];
   // SaveGps
   int32_t  gps_lat, gps_lon;
-  // SetNameOvr
+  // SetNameOvr  /  AddChannel (channel name)
   char     name[32];
+  // ServerLogin
+  char     password[16];
   // SetPath
   uint8_t  path[MAX_PATH_SIZE];
   uint8_t  path_len;
@@ -80,7 +84,7 @@ struct MeshCmd {
 };
 
 // ---- Events (backend → UI) -------------------------------------------------
-enum class EvKind : uint8_t { Msg, SendResult, Delivered, Telem, MsgCount };
+enum class EvKind : uint8_t { Msg, SendResult, Delivered, Telem, MsgCount, LoginResult };
 
 struct UiEvent {
   EvKind   kind;
@@ -95,11 +99,14 @@ struct UiEvent {
   bool     ok;
   uint32_t ack;
   uint32_t timeout;
-  // Telem
+  // Telem  /  LoginResult (pubkey of the server)
   uint8_t  pubkey[6];
   char     telem_text[160];
   // MsgCount
   int      msgcount;
+  // LoginResult (ok reuses `ok`; pubkey reuses `pubkey`)
+  uint8_t  is_admin;
+  uint16_t keep_alive;
 };
 
 // ---- Lifecycle -------------------------------------------------------------
