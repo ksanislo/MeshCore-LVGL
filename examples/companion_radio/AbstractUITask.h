@@ -51,6 +51,9 @@ public:
                                  const uint8_t* lpp, uint8_t lpp_len) {
     (void)pubkey; (void)from_name; (void)lpp; (void)lpp_len;
   }
+  // Called when an outgoing message's ACK arrives (delivery confirmed), so an
+  // on-device UI can mark it delivered. `ack` matches the value from sendMessage.
+  virtual void msgDelivered(uint32_t ack) { (void)ack; }
   virtual void notify(UIEventType t = UIEventType::none) = 0;
   virtual void loop() = 0;
 };

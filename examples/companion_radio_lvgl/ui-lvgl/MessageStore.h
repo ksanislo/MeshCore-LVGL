@@ -15,12 +15,18 @@
   #define CHAT_PEER_NAME_MAX 32
 #endif
 
+// Delivery status for outgoing direct messages (incoming/channel msgs = NONE).
+enum { MSG_STATUS_NONE = 0, MSG_STATUS_SENDING = 1, MSG_STATUS_DELIVERED = 2, MSG_STATUS_FAILED = 3 };
+
 struct ChatMessage {
   char     peer[CHAT_PEER_NAME_MAX];   // conversation key (contact or channel name)
   char     sender[CHAT_PEER_NAME_MAX]; // who sent it (for channel display / grouping)
   char     text[CHAT_MSG_TEXT_MAX];
   uint32_t timestamp;  // RTC seconds at store time
   bool     outgoing;   // true = sent by us
+  uint8_t  status;     // MSG_STATUS_* (delivery state for outgoing direct msgs)
+  uint32_t ack;        // expected ACK value (to match a delivery confirmation)
+  uint32_t expiry_ms;  // millis() deadline after which a SENDING msg is FAILED (0 = none)
 };
 
 class MessageStore {
@@ -28,7 +34,17 @@ public:
   virtual ~MessageStore() {}
 
   virtual void append(bool outgoing, const char* peer, const char* sender,
-                      const char* text, uint32_t ts) = 0;
+                      const char* text, uint32_t ts,
+                      uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0) = 0;
+
+  // Mark the (most recent) SENDING message with this ack as `status`. Returns true if found.
+  virtual bool setStatusByAck(uint32_t ack, uint8_t status) = 0;
+  // Move any SENDING message past its expiry deadline to `fail_status`. Returns true if any changed.
+  virtual bool expireSending(uint32_t now_ms, uint8_t fail_status) = 0;
+
+  // Re-arm an existing (e.g. failed) message in place for a resend: set it back to
+  // SENDING with a new ack/expiry, no new entry. Returns false if `m` isn't current.
+  virtual bool requeue(const ChatMessage* m, uint32_t ack, uint32_t expiry_ms) = 0;
 
   // Fill `out` with pointers to this peer's messages, oldest-first, up to `max`.
   // Returns the number written. Pointers stay valid until the next append.
@@ -56,15 +72,56 @@ class RamMessageStore : public MessageStore {
 
 public:
   void append(bool outgoing, const char* peer, const char* sender,
-              const char* text, uint32_t ts) override {
+              const char* text, uint32_t ts,
+              uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0) override {
     ChatMessage& m = _buf[_head];
     m.outgoing = outgoing;
     m.timestamp = ts;
+    m.status = status;
+    m.ack = ack;
+    m.expiry_ms = expiry_ms;
     copyBounded(m.peer, peer, CHAT_PEER_NAME_MAX);
     copyBounded(m.sender, sender, CHAT_PEER_NAME_MAX);
     copyBounded(m.text, text, CHAT_MSG_TEXT_MAX);
     _head = (_head + 1) % CAP;
     if (_count < CAP) _count++;
+  }
+
+  bool setStatusByAck(uint32_t ack, uint8_t status) override {
+    if (!ack) return false;
+    // Newest-first so a recycled ack value updates the most recent send.
+    for (int k = 0; k < _count; k++) {
+      int i = (_head - 1 - k + CAP) % CAP;
+      if (_buf[i].ack == ack && _buf[i].status == MSG_STATUS_SENDING) {
+        _buf[i].status = status;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool expireSending(uint32_t now_ms, uint8_t fail_status) override {
+    bool changed = false;
+    for (int i = 0; i < _count; i++) {
+      if (_buf[i].status == MSG_STATUS_SENDING && _buf[i].expiry_ms &&
+          (int32_t)(now_ms - _buf[i].expiry_ms) >= 0) {
+        _buf[i].status = fail_status;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  bool requeue(const ChatMessage* m, uint32_t ack, uint32_t expiry_ms) override {
+    for (int i = 0; i < _count; i++) {
+      if (&_buf[i] == m) {  // still the same live slot
+        _buf[i].status = MSG_STATUS_SENDING;
+        _buf[i].ack = ack;
+        _buf[i].expiry_ms = expiry_ms;
+        return true;
+      }
+    }
+    return false;
   }
 
   void clearPeer(const char* peer) override {

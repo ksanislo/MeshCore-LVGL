@@ -417,6 +417,9 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
       memcpy(&out_frame[5], &trip_time, 4);
       _serial->writeFrame(out_frame, 9);
 
+#ifdef DISPLAY_CLASS
+      if (_ui) { uint32_t a; memcpy(&a, data, 4); _ui->msgDelivered(a); }
+#endif
       // NOTE: the same ACK can be received multiple times!
       expected_ack_table[i].ack = 0; // clear expected hash, now that we have received ACK
       return expected_ack_table[i].contact;

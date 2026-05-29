@@ -85,6 +85,11 @@ class UITask : public AbstractUITask {
   bool            _search_active;
   char            _search_filter[40];
 
+  // Outgoing send-status: animated "sending" footer of the latest in-flight msg.
+  lv_obj_t*       _sending_lbl;
+  int             _dot_frame;
+  uint32_t        _anim_ms;
+
   // Contact Info page (+ Path Editor sub-page). Lazily built, reused.
   lv_obj_t*       _cinfo_screen;
   lv_obj_t*       _cinfo_body;          // scrollable form
@@ -202,6 +207,8 @@ class UITask : public AbstractUITask {
   void      rebuildChatHistory();
   void      layoutChatBody(bool keyboard_shown);
   void      sendCurrentMessage();
+  void      resendMessage(const struct ChatMessage* m);
+  static void chat_resend_cb(lv_event_t* e);
   void      ensureInsertPopup();
   void      showInsertMenu();
   void      openContactPicker(int action);
@@ -339,6 +346,7 @@ public:
       _insert_popup(NULL), _insert_list(NULL),
       _chat_is_channel(false), _chat_channel_idx(-1),
       _chat_search_bar(NULL), _chat_search_ta(NULL), _search_active(false),
+      _sending_lbl(NULL), _dot_frame(0), _anim_ms(0),
       _cinfo_screen(NULL), _cinfo_body(NULL), _cinfo_title(NULL), _cinfo_realname(NULL), _cinfo_key(NULL),
       _cinfo_fav_lbl(NULL), _cinfo_name_ta(NULL), _cinfo_keyfull(NULL),
       _cinfo_lat_ta(NULL), _cinfo_lon_ta(NULL), _cinfo_type_lbl(NULL),
@@ -379,6 +387,7 @@ public:
   void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) override;
   void sentMsg(const char* peer, const char* text) override;
   void telemetryResponse(const uint8_t* pubkey, const char* from_name, const uint8_t* lpp, uint8_t lpp_len) override;
+  void msgDelivered(uint32_t ack) override;
   void notify(UIEventType t = UIEventType::none) override;
   void loop() override;
 };

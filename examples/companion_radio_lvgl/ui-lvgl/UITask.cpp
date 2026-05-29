@@ -1079,6 +1079,8 @@ void UITask::sendCurrentMessage() {
   const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
   uint32_t now = the_mesh.getRTCClock()->getCurrentTimeUnique();
   bool sent = false;
+  uint32_t ack = 0, timeout = 0;
+  ContactInfo* c = NULL;
 
   if (_chat_is_channel) {
     ChannelDetails ch;
@@ -1086,18 +1088,52 @@ void UITask::sendCurrentMessage() {
       sent = the_mesh.sendGroupMessage(now, ch.channel, me, text, strlen(text));
     }
   } else {
-    ContactInfo* c = the_mesh.lookupContactByPubKey(_chat_pubkey, 6);
-    if (c) {
-      uint32_t ack = 0, timeout = 0;
-      sent = the_mesh.sendMessage(*c, now, 0, text, ack, timeout) != MSG_SEND_FAILED;
-    }
+    c = the_mesh.lookupContactByPubKey(_chat_pubkey, 6);
+    if (c) sent = the_mesh.sendMessage(*c, now, 0, text, ack, timeout) != MSG_SEND_FAILED;
   }
 
   if (sent) {
-    _msgs.append(true, _chat_peer, me, text, now);
+    if (c && ack) {
+      // Direct message with an expected ACK: track delivery (sending -> delivered/failed).
+      the_mesh.addExpectedAck(ack, c);
+      _msgs.append(true, _chat_peer, me, text, now, MSG_STATUS_SENDING, ack, millis() + timeout + 2000);
+    } else {
+      _msgs.append(true, _chat_peer, me, text, now);  // channel / no-ack: no delivery tracking
+    }
     lv_textarea_set_text(_chat_input, "");
     rebuildChatHistory();
   }
+}
+
+void UITask::msgDelivered(uint32_t ack) {
+  if (_msgs.setStatusByAck(ack, MSG_STATUS_DELIVERED) && _chat_screen)
+    rebuildChatHistory();
+}
+
+void UITask::resendMessage(const ChatMessage* m) {
+  if (!m || _chat_is_channel) return;
+  ContactInfo* c = the_mesh.lookupContactByPubKey(_chat_pubkey, 6);
+  if (!c) return;
+  char text[CHAT_MSG_TEXT_MAX];
+  strncpy(text, m->text, sizeof(text) - 1);
+  text[sizeof(text) - 1] = 0;
+  uint32_t now = the_mesh.getRTCClock()->getCurrentTimeUnique();
+  uint32_t ack = 0, timeout = 0;
+  if (the_mesh.sendMessage(*c, now, 0, text, ack, timeout) == MSG_SEND_FAILED || !ack) return;
+  the_mesh.addExpectedAck(ack, c);
+  // Re-arm the existing entry in place (back to "sending") -- no duplicate bubble.
+  if (!_msgs.requeue(m, ack, millis() + timeout + 2000)) {
+    // The original scrolled out of the ring; fall back to a fresh entry.
+    const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
+    _msgs.append(true, _chat_peer, me, text, now, MSG_STATUS_SENDING, ack, millis() + timeout + 2000);
+  }
+  rebuildChatHistory();
+}
+
+void UITask::chat_resend_cb(lv_event_t* e) {
+  if (!_instance) return;
+  const ChatMessage* m = (const ChatMessage*)lv_obj_get_user_data(lv_event_get_target(e));
+  if (m) _instance->resendMessage(m);
 }
 
 // Map common "smart"/typographic UTF-8 punctuation to ASCII so it renders in
@@ -1401,6 +1437,7 @@ static void fmtDateLabel(uint32_t local_secs, long now_day, char* out, size_t ca
 void UITask::rebuildChatHistory() {
   if (!_chat_history) return;
   lv_obj_clean(_chat_history);
+  _sending_lbl = NULL;  // old label just got deleted; re-set if a sending msg renders
 
   const ChatMessage* all[CHAT_HISTORY_CAP];
   int n = _msgs.messagesFor(_chat_peer, all, CHAT_HISTORY_CAP);
@@ -1487,7 +1524,13 @@ void UITask::rebuildChatHistory() {
       buildContactCard(bubble, m, cpk, ctype, cname);
     } else {
       addMessageText(bubble, m->text);
-      attachMentions(bubble, m->text);
+      if (m->outgoing && m->status == MSG_STATUS_FAILED) {
+        lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);  // tap to resend
+        lv_obj_set_user_data(bubble, (void*)m);
+        lv_obj_add_event_cb(bubble, chat_resend_cb, LV_EVENT_CLICKED, NULL);
+      } else {
+        attachMentions(bubble, m->text);
+      }
     }
 
     // Timestamp below the bubble, but collapse it within a burst: hide it when
@@ -1502,16 +1545,30 @@ void UITask::rebuildChatHistory() {
           (nx->timestamp - m->timestamp) <= 300)
         show_time = false;
     }
-    if (show_time) {
-      char tbuf[12];
-      fmtClockTime((uint32_t)((long)m->timestamp + tzoff), tbuf, sizeof(tbuf),
-                   _node_prefs && _node_prefs->clock_12h);
+    // Footer line: outgoing delivery status (sending/failed always; delivered ->
+    // a check + time) or just the time, with the burst-collapse applied to time.
+    bool sending   = m->outgoing && m->status == MSG_STATUS_SENDING;
+    bool failed    = m->outgoing && m->status == MSG_STATUS_FAILED;
+    bool delivered = m->outgoing && m->status == MSG_STATUS_DELIVERED;
+    if (sending || failed || show_time) {
+      char ftxt[40];
+      if (sending) {
+        strcpy(ftxt, "sending");
+      } else if (failed) {
+        strcpy(ftxt, LV_SYMBOL_WARNING " failed - tap to resend");
+      } else {
+        char tbuf[12];
+        fmtClockTime((uint32_t)((long)m->timestamp + tzoff), tbuf, sizeof(tbuf),
+                     _node_prefs && _node_prefs->clock_12h);
+        snprintf(ftxt, sizeof(ftxt), "%s%s", delivered ? LV_SYMBOL_OK " " : "", tbuf);
+      }
       lv_obj_t* tl = lv_label_create(_chat_history);
-      lv_label_set_text(tl, tbuf);
+      lv_label_set_text(tl, ftxt);
       lv_obj_set_width(tl, LV_PCT(100));
       lv_obj_set_style_text_align(tl, m->outgoing ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
-      lv_obj_set_style_text_color(tl, lv_color_hex(DIM_HEX), 0);
+      lv_obj_set_style_text_color(tl, lv_color_hex(failed ? 0xF87171 : DIM_HEX), 0);
       lv_obj_set_style_text_font(tl, &lv_font_montserrat_12, 0);
+      if (sending) _sending_lbl = tl;  // animate this one's dots in loop()
     }
 
     strncpy(last_sender, m->sender, CHAT_PEER_NAME_MAX - 1);
@@ -3480,6 +3537,16 @@ void UITask::loop() {
                &tmv);
       lv_label_set_text(_clock_label, buf);
     }
+  }
+
+  // Outgoing send-status: fail any in-flight message past its deadline, then
+  // animate the "sending" footer of the most recent in-flight message.
+  if (_msgs.expireSending(now, MSG_STATUS_FAILED) && _chat_screen) rebuildChatHistory();
+  if (_sending_lbl && now - _anim_ms >= 400) {
+    _anim_ms = now;
+    _dot_frame = (_dot_frame + 1) & 3;
+    static const char* dots[] = {"sending", "sending.", "sending..", "sending..."};
+    lv_label_set_text(_sending_lbl, dots[_dot_frame]);
   }
 
   // Throttled contacts refresh (set dirty by newMsg).

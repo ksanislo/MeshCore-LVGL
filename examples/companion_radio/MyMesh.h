@@ -168,6 +168,15 @@ public:
   // Request telemetry from a contact AND record the tag so onContactResponse()
   // matches the reply (the on-device UI calls this; the BLE path sets the tag
   // in its own CMD handler). Returns false if the send failed.
+  // Register an expected ACK so processAck() can confirm delivery of a message
+  // sent directly by the on-device UI (the BLE CMD path registers its own).
+  void addExpectedAck(uint32_t ack, ContactInfo* c) {
+    if (!ack) return;
+    expected_ack_table[next_ack_idx].msg_sent = _ms->getMillis();
+    expected_ack_table[next_ack_idx].ack = ack;
+    expected_ack_table[next_ack_idx].contact = c;
+    next_ack_idx = (next_ack_idx + 1) % (int)(sizeof(expected_ack_table) / sizeof(expected_ack_table[0]));
+  }
   bool requestTelemetry(const ContactInfo& c) {
     uint32_t tag = 0, est = 0;
     if (sendRequest(c, REQ_TYPE_GET_TELEMETRY_DATA, tag, est) == MSG_SEND_FAILED) return false;
