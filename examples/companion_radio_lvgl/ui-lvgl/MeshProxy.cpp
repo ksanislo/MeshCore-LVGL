@@ -193,6 +193,11 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
     case CmdKind::AddContact:
       mesh.addContact(cmd.contact);
       break;
+    case CmdKind::AddChannel:
+      // name = channel name, text = base64 PSK (validated UI-side). addChannel
+      // decodes/validates (16 or 32 bytes) + derives the hash; persist on success.
+      if (mesh.addChannel(cmd.name, cmd.text)) mesh.saveChannels();
+      break;
     case CmdKind::ReqTelem: {
       ContactInfo* c = mesh.lookupContactByPubKey(cmd.pubkey, LOOKUP_PREFIX);
       if (c) mesh.requestTelemetry(*c);

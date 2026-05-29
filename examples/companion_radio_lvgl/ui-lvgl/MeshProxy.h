@@ -54,6 +54,7 @@ struct MeshSnapshot {
 enum class CmdKind : uint8_t {
   Send, SaveGps, ToggleFav, SetNameOvr, ResetPath, SetPath,
   AddContact, ReqTelem, ShareZhop, Advert, UpdatePrefs, ApplyRadio,
+  AddChannel,   // reuses name = channel name, text = base64 PSK (validated UI-side)
 };
 
 struct MeshCmd {

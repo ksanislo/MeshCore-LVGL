@@ -673,6 +673,17 @@ void UITask::rebuildChannelsList() {
   if (!_channels_list) return;
   lv_obj_clean(_channels_list);
 
+  // "+ New channel" entry at the top -> create/join dialog.
+  {
+    lv_obj_t* addb = lv_list_add_btn(_channels_list, LV_SYMBOL_PLUS, "New channel");
+    lv_obj_set_style_bg_color(addb, lv_color_hex(BG_HEX), 0);
+    lv_obj_set_style_text_color(addb, lv_color_hex(0x60A5FA), 0);
+    lv_obj_set_style_border_color(addb, lv_color_hex(0x374151), 0);
+    lv_obj_set_style_border_side(addb, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_width(addb, 1, 0);
+    lv_obj_add_event_cb(addb, newchan_open_cb, LV_EVENT_CLICKED, NULL);
+  }
+
   // getChannel() returns true for any in-range slot incl. empty ones, so skip
   // slots with no name. The Public channel is added on every boot (MyMesh).
   for (int idx = 0; idx < MAX_GROUP_CHANNELS; idx++) {
@@ -3095,6 +3106,176 @@ void UITask::path_kb_event_cb(lv_event_t* e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
     lv_obj_add_flag(_instance->_path_kb, LV_OBJ_FLAG_HIDDEN);
+    _instance->resetKbScroll();
+  }
+}
+
+// ===== New-channel screen (create/join by name + base64 key) =============
+
+// Minimal base64 decoder used only to validate the entered channel key (16 or 32
+// bytes). Kept local so we don't pull base64.hpp's (non-inline) definitions into
+// this TU -- they're already compiled into BaseChatMesh and would clash at link.
+// The backend's addChannel() does the authoritative decode. Returns byte count,
+// or -1 on an invalid character / overflow.
+static int b64DecodedLen(const char* s, uint8_t* out, int outCap) {
+  int bits = 0, nbits = 0, n = 0;
+  for (const char* p = s; *p; p++) {
+    char c = *p;
+    if (c == '=') break;                                   // padding -> end of data
+    if (c == ' ' || c == '\n' || c == '\r' || c == '\t') continue;
+    int v;
+    if      (c >= 'A' && c <= 'Z') v = c - 'A';
+    else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+    else if (c >= '0' && c <= '9') v = c - '0' + 52;
+    else if (c == '+')             v = 62;
+    else if (c == '/')             v = 63;
+    else return -1;                                        // invalid char
+    bits = (bits << 6) | v; nbits += 6;
+    if (nbits >= 8) {
+      nbits -= 8;
+      if (n >= outCap) return -1;
+      out[n++] = (uint8_t)((bits >> nbits) & 0xFF);
+    }
+  }
+  return n;
+}
+
+void UITask::buildNewChannelScreen() {
+  if (_newchan_screen) return;
+  _newchan_screen = lv_obj_create(NULL);
+  styleAsDarkScreen(_newchan_screen);
+  lv_obj_set_style_pad_all(_newchan_screen, 0, 0);
+
+  lv_obj_t* bar = lv_obj_create(_newchan_screen);
+  lv_obj_set_size(bar, _screen_w, HEADER_H);
+  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
+  lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(bar, 0, 0);
+  lv_obj_set_style_radius(bar, 0, 0);
+  lv_obj_set_style_pad_all(bar, 6, 0);
+  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t* back = lv_btn_create(bar);
+  lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_shadow_width(back, 0, 0);
+  lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_add_event_cb(back, newchan_back_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* bl = lv_label_create(back);
+  lv_label_set_text(bl, LV_SYMBOL_LEFT);
+  lv_obj_set_style_text_color(bl, lv_color_hex(FG_HEX), 0);
+  lv_obj_t* bt = lv_label_create(bar);
+  lv_label_set_text(bt, "New Channel");
+  lv_obj_set_style_text_color(bt, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(bt, &lv_font_montserrat_20, 0);
+  lv_obj_align(bt, LV_ALIGN_LEFT_MID, 40, 0);
+  lv_obj_t* save = lv_btn_create(bar);
+  lv_obj_align(save, LV_ALIGN_RIGHT_MID, 0, 0);
+  lv_obj_add_event_cb(save, newchan_save_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* svl = lv_label_create(save);
+  lv_label_set_text(svl, LV_SYMBOL_OK);
+
+  lv_obj_t* body = lv_obj_create(_newchan_screen);
+  lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
+  lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
+  lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(body, 0, 0);
+  lv_obj_set_style_pad_all(body, 12, 0);
+  lv_obj_set_style_pad_row(body, 8, 0);
+  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+
+  lv_obj_t* fn = makeField(body, "Name");
+  _newchan_name_ta = lv_textarea_create(fn);
+  lv_textarea_set_one_line(_newchan_name_ta, true);
+  lv_obj_set_width(_newchan_name_ta, LV_PCT(100));
+  lv_obj_add_event_cb(_newchan_name_ta, newchan_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  lv_obj_t* fk = makeField(body, "Key (base64 PSK, e.g. izOH6cXN...)");
+  _newchan_key_ta = lv_textarea_create(fk);
+  lv_textarea_set_one_line(_newchan_key_ta, true);
+  lv_obj_set_width(_newchan_key_ta, LV_PCT(100));
+  lv_obj_add_event_cb(_newchan_key_ta, newchan_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  _newchan_err = lv_label_create(body);
+  lv_label_set_text(_newchan_err, "");
+  lv_obj_set_style_text_color(_newchan_err, lv_color_hex(0xF87171), 0);
+  lv_obj_add_flag(_newchan_err, LV_OBJ_FLAG_HIDDEN);
+
+  _newchan_kb = lv_keyboard_create(_newchan_screen);
+  lv_obj_add_event_cb(_newchan_kb, newchan_kb_event_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_newchan_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::openNewChannel() {
+  buildNewChannelScreen();
+  lv_textarea_set_text(_newchan_name_ta, "");
+  lv_textarea_set_text(_newchan_key_ta, "");
+  lv_obj_add_flag(_newchan_err, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_newchan_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_scr_load(_newchan_screen);
+}
+
+bool UITask::createChannelFromForm() {
+  const char* name = lv_textarea_get_text(_newchan_name_ta);
+  const char* key  = lv_textarea_get_text(_newchan_key_ta);
+  auto fail = [this](const char* m){
+    lv_label_set_text(_newchan_err, m);
+    lv_obj_clear_flag(_newchan_err, LV_OBJ_FLAG_HIDDEN);
+  };
+  if (!name || !name[0]) { fail("Enter a channel name"); return false; }
+  if (!key  || !key[0])  { fail("Enter a base64 key");   return false; }
+  uint8_t tmp[64];
+  int len = b64DecodedLen(key, tmp, sizeof(tmp));
+  if (len != 16 && len != 32) { fail("Key must be base64 (16 or 32 bytes)"); return false; }
+  mproxy::MeshCmd cmd{};
+  cmd.kind = mproxy::CmdKind::AddChannel;
+  strncpy(cmd.name, name, sizeof(cmd.name) - 1);   // channel name
+  strncpy(cmd.text, key,  sizeof(cmd.text) - 1);   // base64 PSK
+  mproxy::postCommand(cmd);
+  showToast("Channel added");
+  return true;   // it appears in the list once the backend republishes the snapshot
+}
+
+void UITask::newchan_open_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->openNewChannel();
+}
+
+void UITask::newchan_back_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  lv_obj_add_flag(_instance->_newchan_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_scr_load(_instance->_home_screen);
+}
+
+void UITask::newchan_save_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  if (_instance->createChannelFromForm()) {
+    lv_obj_add_flag(_instance->_newchan_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_scr_load(_instance->_home_screen);
+  }
+}
+
+void UITask::newchan_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    lv_obj_t* ta = lv_event_get_target(e);
+    lv_keyboard_set_textarea(_instance->_newchan_kb, ta);
+    lv_keyboard_set_mode(_instance->_newchan_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_newchan_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_newchan_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_newchan_kb);
+    _instance->raiseFieldForKb(lv_obj_get_parent(lv_obj_get_parent(ta)), _instance->_newchan_kb, ta);
+  }
+}
+
+void UITask::newchan_kb_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+    lv_obj_add_flag(_instance->_newchan_kb, LV_OBJ_FLAG_HIDDEN);
     _instance->resetKbScroll();
   }
 }

@@ -213,6 +213,13 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _qr_key_lbl;
   lv_obj_t*       _qr_return_screen;
 
+  // New-channel screen (name + base64 key). Lazily built.
+  lv_obj_t*       _newchan_screen;
+  lv_obj_t*       _newchan_name_ta;
+  lv_obj_t*       _newchan_key_ta;
+  lv_obj_t*       _newchan_err;
+  lv_obj_t*       _newchan_kb;
+
   // LVGL display + input. Resolution is read from the LGFX device after
   // setRotation, so this UITask doesn't care whether the variant chose
   // portrait or landscape.
@@ -406,6 +413,16 @@ class UITask : public AbstractUITask {
   static void qr_back_cb(lv_event_t* e);
   static void share_showqr_cb(lv_event_t* e);
 
+  // New-channel screen (create/join by name + base64 key)
+  void      buildNewChannelScreen();
+  void      openNewChannel();
+  bool      createChannelFromForm();
+  static void newchan_open_cb(lv_event_t* e);   // "+ New channel" list entry
+  static void newchan_back_cb(lv_event_t* e);
+  static void newchan_save_cb(lv_event_t* e);
+  static void newchan_ta_event_cb(lv_event_t* e);
+  static void newchan_kb_event_cb(lv_event_t* e);
+
 public:
   UITask(mesh::MainBoard* board, BaseSerialInterface* serial)
     : AbstractUITask(board, serial),
@@ -451,6 +468,8 @@ public:
       _info_popup(NULL), _info_title_lbl(NULL), _info_body_lbl(NULL),
       _qr_screen(NULL), _qr_code(NULL), _qr_name_lbl(NULL), _qr_key_lbl(NULL),
       _qr_return_screen(NULL),
+      _newchan_screen(NULL), _newchan_name_ta(NULL), _newchan_key_ta(NULL),
+      _newchan_err(NULL), _newchan_kb(NULL),
       _screen_w(0), _screen_h(0),
       _kb_scroll(NULL), _kb_scroll_pad(0),
       _buf1(NULL), _buf2(NULL), _msgs(&_rammsgs), _sd_off_ts(0),

@@ -184,6 +184,7 @@ public:
     return true;
   }
   void saveContacts() { _store->saveContacts(this); }  // public: on-device UI edits contacts
+  void saveChannels() { _store->saveChannels(this); }  // public: on-device UI adds channels
   // Persist a single edited contact in place (crash-safe vs the full rewrite).
   // Use for field edits only (add/remove change indices -> use saveContacts()).
   bool saveContact(const ContactInfo& c) {
@@ -298,9 +299,6 @@ private:
   void checkCLIRescueCmd();
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f) const;
-
-  // helpers, short-cuts
-  void saveChannels() { _store->saveChannels(this); }
 
   DataStore* _store;
   NodePrefs _prefs;
