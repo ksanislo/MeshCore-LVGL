@@ -5,6 +5,7 @@
 #include <helpers/ContactInfo.h>        // ContactInfo (read-model copies)
 #include <Utils.h>                      // mesh::Utils::toHex
 #include <esp_heap_caps.h>
+#include <esp_system.h>                 // esp_restart() for the Reboot button
 #include <ctype.h>                      // tolower (case-insensitive search)
 #include <strings.h>                    // strcasecmp (A-Z contact sort)
 
@@ -3317,6 +3318,16 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_history_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_history_chk, set_history_cb, LV_EVENT_VALUE_CHANGED, NULL);
 #endif
+
+  // Reboot button -- handy on battery, and a clean software restart (esp_restart)
+  // vs the hardware RESET line.
+  lv_obj_t* reboot = lv_btn_create(body);
+  lv_obj_set_width(reboot, LV_PCT(100));
+  lv_obj_set_style_bg_color(reboot, lv_color_hex(0x7F1D1D), 0);
+  lv_obj_add_event_cb(reboot, [](lv_event_t*){ esp_restart(); }, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* reboot_lbl = lv_label_create(reboot);
+  lv_label_set_text(reboot_lbl, LV_SYMBOL_POWER " Reboot");
+  lv_obj_center(reboot_lbl);
 
   // Shared on-screen keyboard for the settings textareas. Parented to the home
   // screen so it overlays the tabview; hidden until a field is focused.

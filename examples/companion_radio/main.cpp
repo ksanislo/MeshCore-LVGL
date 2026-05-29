@@ -5,6 +5,22 @@
   // Dual-core split (CrowPanel LVGL companion): the UI talks to the mesh backend
   // only through MeshProxy (snapshot + command/event queues). See MeshProxy.h.
   #include "MeshProxy.h"
+  #include "driver/gpio.h"
+
+  // The radio's DIO interrupt (RadioLib's setFlag, which does a non-atomic
+  // `state |= INT_READY`) MUST fire on the same core that runs the_mesh.loop()
+  // (the core-0 meshTask). Otherwise the ISR on one core races the loop's
+  // `state = ...` on the other, the done-flag gets dropped, and the radio wedges
+  // mid-TX (no TX/RX, BLE companion also stalls). Arduino binds every GPIO
+  // interrupt to whichever core first installs the shared ISR service, so we
+  // install it from core 0 before radio_init() does the first attachInterrupt.
+  static volatile bool s_gpio_isr_done = false;
+  static volatile int  s_gpio_isr_err  = -999;
+  static void installGpioIsrOnCore0(void*) {
+    s_gpio_isr_err = (int)gpio_install_isr_service((int)ARDUINO_ISR_FLAG);
+    s_gpio_isr_done = true;
+    vTaskDelete(NULL);
+  }
 #endif
 
 // Believe it or not, this std C function is busted on some platforms!
@@ -116,6 +132,16 @@ static void meshTask(void*);   // backend loop, pinned to core 0 (defined below)
 
 void setup() {
   Serial.begin(115200);
+#ifdef MESH_PROXY
+  // Pin the GPIO ISR service to core 0 (where meshTask runs) BEFORE any
+  // attachInterrupt, so the radio's DIO interrupt fires on core 0 -- same core as
+  // the_mesh.loop(), avoiding a cross-core race on RadioLib's `state` flag.
+  {
+    xTaskCreatePinnedToCore(installGpioIsrOnCore0, "isr0", 2048, nullptr, 20, nullptr, 0);
+    uint32_t t0 = millis();
+    while (!s_gpio_isr_done && (uint32_t)(millis() - t0) < 1000) delay(2);
+  }
+#endif
 
   board.begin();
 
@@ -229,16 +255,16 @@ void setup() {
 #ifdef MESH_PROXY
   if (!mproxy::init()) Serial.println("MeshProxy: init failed (PSRAM/queue alloc)");
   mproxy::publishIfChanged(the_mesh);   // seed the first snapshot before the UI reads it
+  // Create the backend task BEFORE ui_task.begin(): the LVGL draw buffers are
+  // allocated greedily (sized to whatever internal RAM is free, down to a floor),
+  // so if the UI starts first it eats the heap and the 16 KB task stack can no
+  // longer be allocated (xTaskCreate fails -> no mesh/BLE at all). Reserving the
+  // task stack first lets the draw buffers simply shrink to fit the remainder.
+  xTaskCreatePinnedToCore(meshTask, "mesh", 16384, nullptr, 1, nullptr, 0);  // core 0
 #endif
 
 #ifdef DISPLAY_CLASS
   ui_task.begin(disp, &sensors, the_mesh.getNodePrefs());  // still want to pass this in as dependency, as prefs might be moved
-#endif
-
-#ifdef MESH_PROXY
-  // Start the backend last: the first snapshot is already published and the UI is
-  // initialized, so the task can churn immediately without the UI reading a blank.
-  xTaskCreatePinnedToCore(meshTask, "mesh", 16384, nullptr, 1, nullptr, 0);  // core 0
 #endif
 }
 
