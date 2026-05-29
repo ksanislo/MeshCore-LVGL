@@ -2030,6 +2030,14 @@ void UITask::openChat(const char* peer_name) {
   if (!_chat_is_channel) {
     const ContactInfo* c = mproxy::lookupContactByPubKey(_chat_pubkey, 6);
     if (c) _chat_contact_type = c->type;
+    // Repeater/room: silently auto-login if a credential is saved (backend no-ops
+    // otherwise), so the console is ready without making the user stop to type.
+    if (_chat_contact_type == ADV_TYPE_REPEATER || _chat_contact_type == ADV_TYPE_ROOM) {
+      mproxy::MeshCmd c2{};
+      c2.kind = mproxy::CmdKind::AutoLogin;
+      memcpy(c2.pubkey, _chat_pubkey, 6);
+      mproxy::postCommand(c2);
+    }
   }
 
   rebuildChatHistory();
@@ -3394,123 +3402,171 @@ void UITask::newchan_kb_event_cb(lv_event_t* e) {
   }
 }
 
-// ===== Repeater / room-server login ======================================
+// ===== Repeater / room-server login (popup over the originating screen) ====
 
-void UITask::buildLoginScreen() {
-  if (_login_screen) return;
-  _login_screen = lv_obj_create(NULL);
-  styleAsDarkScreen(_login_screen);
-  lv_obj_set_style_pad_all(_login_screen, 0, 0);
+void UITask::buildLoginPopup() {
+  if (_login_popup) return;
+  _login_popup = lv_obj_create(lv_layer_top());          // dimmed backdrop
+  lv_obj_set_size(_login_popup, _screen_w, _screen_h);
+  lv_obj_set_pos(_login_popup, 0, 0);
+  lv_obj_set_style_bg_color(_login_popup, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(_login_popup, LV_OPA_60, 0);
+  lv_obj_set_style_border_width(_login_popup, 0, 0);
+  lv_obj_set_style_pad_all(_login_popup, 0, 0);
+  lv_obj_clear_flag(_login_popup, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(_login_popup, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(_login_popup, login_dismiss_cb, LV_EVENT_CLICKED, NULL);  // tap outside = cancel
+  lv_obj_add_flag(_login_popup, LV_OBJ_FLAG_HIDDEN);
 
-  lv_obj_t* bar = lv_obj_create(_login_screen);
-  lv_obj_set_size(bar, _screen_w, HEADER_H);
-  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
-  lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
-  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(bar, 0, 0);
-  lv_obj_set_style_radius(bar, 0, 0);
-  lv_obj_set_style_pad_all(bar, 6, 0);
-  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_t* back = lv_btn_create(bar);
-  lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_shadow_width(back, 0, 0);
-  lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
-  lv_obj_add_event_cb(back, login_back_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* bl = lv_label_create(back);
-  lv_label_set_text(bl, LV_SYMBOL_LEFT);
-  lv_obj_set_style_text_color(bl, lv_color_hex(FG_HEX), 0);
-  lv_obj_t* bt = lv_label_create(bar);
-  lv_label_set_text(bt, "Login");
-  lv_obj_set_style_text_color(bt, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(bt, &lv_font_montserrat_20, 0);
-  lv_obj_align(bt, LV_ALIGN_LEFT_MID, 40, 0);
-  lv_obj_t* go = lv_btn_create(bar);
-  lv_obj_align(go, LV_ALIGN_RIGHT_MID, 0, 0);
+  _login_card = lv_obj_create(_login_popup);
+  lv_obj_set_width(_login_card, LV_PCT(90));
+  lv_obj_set_height(_login_card, LV_SIZE_CONTENT);
+  lv_obj_align(_login_card, LV_ALIGN_TOP_MID, 0, HEADER_H + 8);
+  lv_obj_set_style_bg_color(_login_card, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_opa(_login_card, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(_login_card, 8, 0);
+  lv_obj_set_style_border_width(_login_card, 0, 0);
+  lv_obj_set_style_pad_all(_login_card, 12, 0);
+  lv_obj_set_style_pad_row(_login_card, 8, 0);
+  lv_obj_clear_flag(_login_card, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(_login_card, LV_FLEX_FLOW_COLUMN);
+  lv_obj_add_flag(_login_card, LV_OBJ_FLAG_CLICKABLE);   // consume clicks (don't dismiss)
+
+  _login_title = lv_label_create(_login_card);
+  lv_obj_set_style_text_color(_login_title, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(_login_title, &lv_font_montserrat_16, 0);
+  lv_label_set_text(_login_title, "Login");
+
+  // Password row: [field with inline eye] [send].
+  lv_obj_t* prow = lv_obj_create(_login_card);
+  lv_obj_set_width(prow, LV_PCT(100));
+  lv_obj_set_height(prow, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(prow, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(prow, 0, 0);
+  lv_obj_set_style_pad_all(prow, 0, 0);
+  lv_obj_set_style_pad_column(prow, 6, 0);
+  lv_obj_clear_flag(prow, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(prow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(prow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+  _login_pw_ta = lv_textarea_create(prow);
+  lv_textarea_set_one_line(_login_pw_ta, true);
+  lv_textarea_set_password_mode(_login_pw_ta, false);   // visible by default (personal handheld)
+  lv_obj_set_flex_grow(_login_pw_ta, 1);
+  lv_obj_set_style_pad_right(_login_pw_ta, 24, 0);       // room for the inline eye
+  lv_obj_add_event_cb(_login_pw_ta, login_ta_event_cb, LV_EVENT_ALL, NULL);
+  _login_eye_lbl = lv_label_create(_login_pw_ta);        // small mono toggle inside the field
+  lv_label_set_text(_login_eye_lbl, LV_SYMBOL_EYE_OPEN);
+  lv_obj_set_style_text_font(_login_eye_lbl, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(_login_eye_lbl, lv_color_hex(DIM_HEX), 0);
+  lv_obj_align(_login_eye_lbl, LV_ALIGN_RIGHT_MID, -2, 0);
+  lv_obj_add_flag(_login_eye_lbl, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(_login_eye_lbl, login_eye_cb, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t* go = lv_btn_create(prow);                    // send / done, at the end of the field
   lv_obj_add_event_cb(go, login_go_cb, LV_EVENT_CLICKED, NULL);
   lv_obj_t* gl = lv_label_create(go);
   lv_label_set_text(gl, LV_SYMBOL_OK);
+  lv_obj_center(gl);
 
-  lv_obj_t* body = lv_obj_create(_login_screen);
-  lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
-  lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
-  lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
-  lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(body, 0, 0);
-  lv_obj_set_style_pad_all(body, 12, 0);
-  lv_obj_set_style_pad_row(body, 8, 0);
-  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+  // Checkbox row: Save login | Auto-login.
+  lv_obj_t* crow = lv_obj_create(_login_card);
+  lv_obj_set_width(crow, LV_PCT(100));
+  lv_obj_set_height(crow, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(crow, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(crow, 0, 0);
+  lv_obj_set_style_pad_all(crow, 0, 0);
+  lv_obj_set_style_pad_column(crow, 16, 0);
+  lv_obj_clear_flag(crow, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(crow, LV_FLEX_FLOW_ROW);
+  _login_save_chk = lv_checkbox_create(crow);
+  lv_checkbox_set_text(_login_save_chk, "Save login");
+  lv_obj_set_style_text_color(_login_save_chk, lv_color_hex(FG_HEX), 0);
+  _login_auto_chk = lv_checkbox_create(crow);
+  lv_checkbox_set_text(_login_auto_chk, "Auto-login");
+  lv_obj_set_style_text_color(_login_auto_chk, lv_color_hex(FG_HEX), 0);
 
-  lv_obj_t* fp = makeField(body, "Password (blank for guest)");
-  _login_pw_ta = lv_textarea_create(fp);
-  lv_textarea_set_one_line(_login_pw_ta, true);
-  lv_textarea_set_password_mode(_login_pw_ta, true);
-  lv_obj_set_width(_login_pw_ta, LV_PCT(100));
-  lv_obj_add_event_cb(_login_pw_ta, login_ta_event_cb, LV_EVENT_ALL, NULL);
-
-  _login_kb = lv_keyboard_create(_login_screen);
+  _login_kb = lv_keyboard_create(_login_popup);
   lv_obj_add_event_cb(_login_kb, login_kb_event_cb, LV_EVENT_ALL, NULL);
   lv_obj_add_flag(_login_kb, LV_OBJ_FLAG_HIDDEN);
 }
 
-void UITask::openLogin(const uint8_t* pubkey6) {
-  buildLoginScreen();
+void UITask::openLogin(const uint8_t* pubkey6, const char* name) {
+  buildLoginPopup();
   if (pubkey6) memcpy(_login_pubkey, pubkey6, 6);
+  char sn[CHAT_PEER_NAME_MAX], t[CHAT_PEER_NAME_MAX + 12];
+  sanitizeForFont(name && name[0] ? name : "server", sn, sizeof(sn));
+  snprintf(t, sizeof(t), "Login: %s", sn);
+  lv_label_set_text(_login_title, t);
   lv_textarea_set_text(_login_pw_ta, "");
+  lv_obj_clear_state(_login_save_chk, LV_STATE_CHECKED);
+  lv_obj_clear_state(_login_auto_chk, LV_STATE_CHECKED);
   lv_obj_add_flag(_login_kb, LV_OBJ_FLAG_HIDDEN);
-  lv_scr_load(_login_screen);
+  lv_obj_clear_flag(_login_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_login_popup);
 }
 
 void UITask::kebab_login_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   uint8_t pk[6]; memcpy(pk, _instance->_chat_pubkey, 6);
+  char nm[CHAT_PEER_NAME_MAX]; strncpy(nm, _instance->_chat_peer, sizeof(nm) - 1); nm[sizeof(nm) - 1] = 0;
   _instance->closeMenuPopup();
-  _instance->openLogin(pk);
+  _instance->openLogin(pk, nm);
 }
 
-void UITask::login_back_cb(lv_event_t* e) {
-  (void)e;
+void UITask::login_dismiss_cb(lv_event_t* e) {
   if (!_instance) return;
+  if (lv_event_get_target(e) != _instance->_login_popup) return;  // ignore clicks on the card
   lv_obj_add_flag(_instance->_login_kb, LV_OBJ_FLAG_HIDDEN);
-  lv_scr_load(_instance->_chat_screen ? _instance->_chat_screen : _instance->_home_screen);
+  lv_obj_add_flag(_instance->_login_popup, LV_OBJ_FLAG_HIDDEN);
 }
 
 void UITask::login_go_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   const char* pw = lv_textarea_get_text(_instance->_login_pw_ta);
+  bool save  = lv_obj_has_state(_instance->_login_save_chk, LV_STATE_CHECKED);
+  bool autol = lv_obj_has_state(_instance->_login_auto_chk, LV_STATE_CHECKED);
   mproxy::MeshCmd c{};
   c.kind = mproxy::CmdKind::ServerLogin;
   memcpy(c.pubkey, _instance->_login_pubkey, 6);
   strncpy(c.password, pw ? pw : "", sizeof(c.password) - 1);
   c.password[sizeof(c.password) - 1] = 0;
+  c.save_login = save;
+  c.auto_login = autol;                       // backend saves if either is set
   mproxy::postCommand(c);
   lv_obj_add_flag(_instance->_login_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_instance->_login_popup, LV_OBJ_FLAG_HIDDEN);
   _instance->showToast("Logging in...");      // result arrives via EvKind::LoginResult
-  lv_scr_load(_instance->_chat_screen ? _instance->_chat_screen : _instance->_home_screen);
 }
 
 void UITask::login_ta_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
-    lv_obj_t* ta = lv_event_get_target(e);
-    lv_keyboard_set_textarea(_instance->_login_kb, ta);
+    lv_keyboard_set_textarea(_instance->_login_kb, _instance->_login_pw_ta);
     lv_keyboard_set_mode(_instance->_login_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_obj_clear_flag(_instance->_login_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(_instance->_login_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_login_kb);
-    _instance->raiseFieldForKb(lv_obj_get_parent(lv_obj_get_parent(ta)), _instance->_login_kb, ta);
   }
 }
 
 void UITask::login_kb_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_event_code_t code = lv_event_get_code(e);
-  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
     lv_obj_add_flag(_instance->_login_kb, LV_OBJ_FLAG_HIDDEN);
-    _instance->resetKbScroll();
-  }
+}
+
+void UITask::login_eye_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance || !_instance->_login_pw_ta) return;
+  bool hidden = lv_textarea_get_password_mode(_instance->_login_pw_ta);
+  lv_textarea_set_password_mode(_instance->_login_pw_ta, !hidden);
+  if (_instance->_login_eye_lbl)
+    lv_label_set_text(_instance->_login_eye_lbl, !hidden ? LV_SYMBOL_EYE_CLOSE : LV_SYMBOL_EYE_OPEN);
 }
 
 // ===== Node-info / status screen =========================================

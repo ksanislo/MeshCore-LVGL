@@ -85,6 +85,15 @@ struct AdvertPath {
   uint8_t path[MAX_PATH_SIZE];
 };
 
+#ifdef ENABLE_LOGIN_STORE
+  #ifndef MAX_LOGINS
+  #define MAX_LOGINS 32
+  #endif
+  // A saved repeater/room-server credential (on-device standalone use); persisted
+  // to /logins. pubkey is the 6-byte prefix; auto=1 means auto-login on chat open.
+  struct LoginCred { uint8_t pubkey[6]; char password[16]; uint8_t autolog; };
+#endif
+
 class MyMesh : public BaseChatMesh, public DataStoreHost {
 public:
   MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMeshTables &tables, DataStore& store, AbstractUITask* ui=NULL);
@@ -197,6 +206,11 @@ public:
     uint32_t est = 0;
     return sendCommandData(c, getRTCClock()->getCurrentTimeUnique(), 0, text, est) != MSG_SEND_FAILED;
   }
+#ifdef ENABLE_LOGIN_STORE
+  const LoginCred* findLoginCred(const uint8_t* pubkey); // saved cred (6-byte key) or NULL
+  void        saveLogin(const uint8_t* pubkey, const char* password, bool autolog);
+  void        loadLoginCreds();                          // from /logins at boot
+#endif
   void saveContacts() { _store->saveContacts(this); }  // public: on-device UI edits contacts
   void saveChannels() { _store->saveChannels(this); }  // public: on-device UI adds channels
   void getNodeStats(NodeStats& s);                     // public: on-device node-info screen
@@ -292,6 +306,11 @@ private:
   static const int MAX_NAME_OVERRIDES = 32;
   NameOverride _name_ov[MAX_NAME_OVERRIDES];
   int _name_ov_count = 0;
+
+#ifdef ENABLE_LOGIN_STORE
+  LoginCred _logins[MAX_LOGINS];
+  int _num_logins = 0;
+#endif
 
   uint8_t _hook_key[6] = {0};   // identity of the msg currently handed to the UI
   bool _hook_is_channel = false;

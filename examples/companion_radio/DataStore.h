@@ -40,6 +40,9 @@ public:
   bool updateContact(int idx, const ContactInfo& c);  // in-place single-record write
   void loadChannels(DataStoreHost* host);
   void saveChannels(DataStoreHost* host);
+  // Opaque credential blob (saved repeater/room logins) on internal flash, crash-safe.
+  void saveLogins(const uint8_t* data, size_t len);
+  size_t loadLogins(uint8_t* data, size_t maxlen);
   void migrateToSecondaryFS();
   uint8_t getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_buf[]);
   bool putBlobByKey(const uint8_t key[], int key_len, const uint8_t src_buf[], uint8_t len);

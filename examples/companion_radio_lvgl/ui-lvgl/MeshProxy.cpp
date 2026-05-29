@@ -223,12 +223,27 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
     }
     case CmdKind::ServerLogin: {
       ContactInfo* c = mesh.lookupContactByPubKey(cmd.pubkey, LOOKUP_PREFIX);
-      if (c) mesh.loginToServer(*c, cmd.password);   // reply -> onContactResponse -> _ui->loginResult
+      if (c) {
+        mesh.loginToServer(*c, cmd.password);        // reply -> onContactResponse -> _ui->loginResult
+#ifdef ENABLE_LOGIN_STORE
+        if (cmd.save_login || cmd.auto_login) mesh.saveLogin(cmd.pubkey, cmd.password, cmd.auto_login);
+#endif
+      }
       break;
     }
     case CmdKind::SendCommand: {
       ContactInfo* c = mesh.lookupContactByPubKey(cmd.pubkey, LOOKUP_PREFIX);
       if (c) mesh.sendCliCommand(*c, cmd.text);      // reply -> onCommandDataRecv -> CLI_DATA message
+      break;
+    }
+    case CmdKind::AutoLogin: {
+#ifdef ENABLE_LOGIN_STORE
+      const LoginCred* cred = mesh.findLoginCred(cmd.pubkey);  // only if saved + auto
+      if (cred && cred->autolog) {
+        ContactInfo* c = mesh.lookupContactByPubKey(cmd.pubkey, LOOKUP_PREFIX);
+        if (c) mesh.loginToServer(*c, cred->password);
+      }
+#endif
       break;
     }
     case CmdKind::ReqTelem: {

@@ -980,6 +980,9 @@ void MyMesh::begin(bool has_display) {
   addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
   _store->loadChannels(this);
   loadNameOverrides();
+#ifdef ENABLE_LOGIN_STORE
+  loadLoginCreds();
+#endif
 
   radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_set_tx_power(_prefs.tx_power_dbm);
@@ -2204,6 +2207,31 @@ void MyMesh::checkSerialInterface() {
 
 // Fill a NodeStats from the live dispatcher / radio / packet-manager counters --
 // same sources as the CMD_GET_STATS BLE path, for the on-device node-info screen.
+#ifdef ENABLE_LOGIN_STORE
+const LoginCred* MyMesh::findLoginCred(const uint8_t* pubkey) {
+  for (int i = 0; i < _num_logins; i++)
+    if (memcmp(_logins[i].pubkey, pubkey, 6) == 0) return &_logins[i];
+  return NULL;
+}
+void MyMesh::saveLogin(const uint8_t* pubkey, const char* password, bool autolog) {
+  int idx = -1;
+  for (int i = 0; i < _num_logins; i++)
+    if (memcmp(_logins[i].pubkey, pubkey, 6) == 0) { idx = i; break; }
+  if (idx < 0) {
+    if (_num_logins >= MAX_LOGINS) idx = 0;   // table full: overwrite the first slot
+    else idx = _num_logins++;
+  }
+  memcpy(_logins[idx].pubkey, pubkey, 6);
+  StrHelper::strncpy(_logins[idx].password, password, sizeof(_logins[idx].password));
+  _logins[idx].autolog = autolog ? 1 : 0;
+  _store->saveLogins((const uint8_t*)_logins, (size_t)_num_logins * sizeof(LoginCred));
+}
+void MyMesh::loadLoginCreds() {
+  size_t n = _store->loadLogins((uint8_t*)_logins, sizeof(_logins));
+  _num_logins = (int)(n / sizeof(LoginCred));
+}
+#endif
+
 void MyMesh::getNodeStats(NodeStats& s) {
   s.uptime_secs  = _ms->getMillis() / 1000;
   s.err_flags    = _err_flags;

@@ -490,6 +490,25 @@ void DataStore::saveChannels(DataStoreHost* host) {
   }
 }
 
+// Saved repeater/room logins: opaque blob on internal flash (_fs), crash-safe.
+void DataStore::saveLogins(const uint8_t* data, size_t len) {
+  File file = openWrite(_fs, "/logins.tmp");
+  if (file) {
+    bool ok = (file.write(data, len) == len);
+    file.close();
+    if (ok) commitTmp(_fs, "/logins.tmp", "/logins");
+    else    _fs->remove("/logins.tmp");
+  }
+}
+size_t DataStore::loadLogins(uint8_t* data, size_t maxlen) {
+  recoverTmp(_fs, "/logins.tmp", "/logins");
+  File file = openRead(_fs, "/logins");
+  if (!file) return 0;
+  int n = file.read(data, maxlen);
+  file.close();
+  return n > 0 ? (size_t)n : 0;
+}
+
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
 
 #define MAX_ADVERT_PKT_LEN   (2 + 32 + PUB_KEY_SIZE + 4 + SIGNATURE_SIZE + MAX_ADVERT_DATA_SIZE)

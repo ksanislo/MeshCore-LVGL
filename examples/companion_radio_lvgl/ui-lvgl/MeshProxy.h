@@ -56,8 +56,9 @@ enum class CmdKind : uint8_t {
   Send, SaveGps, ToggleFav, SetNameOvr, ResetPath, SetPath,
   AddContact, ReqTelem, ShareZhop, Advert, UpdatePrefs, ApplyRadio,
   AddChannel,   // reuses name = channel name, path/path_len = raw secret bytes (16/32)
-  ServerLogin,  // login to a repeater/room server: pubkey + password
+  ServerLogin,  // login to a repeater/room server: pubkey + password (+ save_login)
   SendCommand,  // send a CLI command (TXT_TYPE_CLI_DATA) to a repeater: pubkey + text
+  AutoLogin,    // pubkey: log in using a saved credential if one exists (silent)
 };
 
 struct MeshCmd {
@@ -74,6 +75,8 @@ struct MeshCmd {
   char     name[32];
   // ServerLogin
   char     password[16];
+  bool     save_login;     // ServerLogin: persist the credential
+  bool     auto_login;     // ServerLogin: mark the saved credential for auto-login
   // SetPath
   uint8_t  path[MAX_PATH_SIZE];
   uint8_t  path_len;

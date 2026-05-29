@@ -227,8 +227,13 @@ class UITask : public AbstractUITask {
   lv_timer_t*     _nodeinfo_timer;
 
   // Repeater/room login screen (password prompt). Lazily built.
-  lv_obj_t*       _login_screen;
+  lv_obj_t*       _login_popup;         // dimmed backdrop over the originating screen
+  lv_obj_t*       _login_card;          // the login card itself
+  lv_obj_t*       _login_title;         // "Login: <name>"
   lv_obj_t*       _login_pw_ta;
+  lv_obj_t*       _login_eye_lbl;       // inline show/hide toggle (mono, inside the field)
+  lv_obj_t*       _login_save_chk;      // "Save login"
+  lv_obj_t*       _login_auto_chk;      // "Auto-login"
   lv_obj_t*       _login_kb;
   uint8_t         _login_pubkey[6];     // server we're logging into
 
@@ -442,13 +447,14 @@ class UITask : public AbstractUITask {
 
   // Repeater/room-server console: login + CLI command send
   void      postCliCommand(const uint8_t* pubkey6, const char* conv_key, const char* text);
-  void      buildLoginScreen();
-  void      openLogin(const uint8_t* pubkey6);
+  void      buildLoginPopup();
+  void      openLogin(const uint8_t* pubkey6, const char* name);
   static void kebab_login_cb(lv_event_t* e);
-  static void login_back_cb(lv_event_t* e);
+  static void login_dismiss_cb(lv_event_t* e);
   static void login_go_cb(lv_event_t* e);
   static void login_ta_event_cb(lv_event_t* e);
   static void login_kb_event_cb(lv_event_t* e);
+  static void login_eye_cb(lv_event_t* e);      // toggle password show/hide
   static void newchan_open_cb(lv_event_t* e);   // "+ New channel" list entry
   static void newchan_back_cb(lv_event_t* e);
   static void newchan_save_cb(lv_event_t* e);
@@ -503,7 +509,8 @@ public:
       _newchan_screen(NULL), _newchan_name_ta(NULL), _newchan_key_ta(NULL),
       _newchan_err(NULL), _newchan_kb(NULL),
       _nodeinfo_screen(NULL), _nodeinfo_lbl(NULL), _nodeinfo_timer(NULL),
-      _login_screen(NULL), _login_pw_ta(NULL), _login_kb(NULL),
+      _login_popup(NULL), _login_card(NULL), _login_title(NULL), _login_pw_ta(NULL),
+      _login_eye_lbl(NULL), _login_save_chk(NULL), _login_auto_chk(NULL), _login_kb(NULL),
       _screen_w(0), _screen_h(0),
       _kb_scroll(NULL), _kb_scroll_pad(0),
       _buf1(NULL), _buf2(NULL), _msgs(&_rammsgs), _sd_off_ts(0),
