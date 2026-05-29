@@ -2,16 +2,10 @@
 
 #include "MessageStore.h"
 #include <Arduino.h>
-#include <SdFat.h>
+#include "SdCard.h"   // shared mount + RAII bus lock (pulls in <SdFat.h> + `sd`)
 
-// Shared SD filesystem + bus guard, provided by the variant (the SD card shares
-// the LoRa HSPI bus, re-pinned per access). See variants/.../target.cpp.
-extern SdFs sd;
-extern void sd_bus_to_sd();
-extern void sd_bus_to_lora();
-extern bool sd_card_begin();
-
-// Persistent message store on the SD card.
+// Persistent message store on the SD card. One consumer of the shared SdCard
+// facility (mount + bus lock); others (emoji/map/sound caches) use it too.
 //
 // Each conversation is its own append-only log at /chat/<key>.log, where <key>
 // is a stable id chosen by the caller (contact pubkey prefix, or channel secret
@@ -30,26 +24,21 @@ class SdMessageStore : public MessageStore {
   ChatMessage _buf[CAP];
   int  _count;
   char _loaded[CHAT_PEER_NAME_MAX];  // conversation key currently in _buf
-  bool _ok;                          // SD mounted
   bool _write_err;                   // a persist write failed (e.g. card full)
-  uint32_t _retry_ms;                // last (re)mount attempt time
+  bool _dir_ok;                      // /chat exists on the currently-mounted card
 
-  // Mount if needed. No card-detect pin on this board, so we (re)mount lazily on
-  // access -- recovering a re-inserted card -- but throttle attempts so a missing
-  // card doesn't thrash SD.begin() (and the shared LoRa bus) every message.
-  bool ensureMounted() {
-    if (_ok) return true;
-    uint32_t now = millis();
-    if (_retry_ms != 0 && (uint32_t)(now - _retry_ms) < 3000) return false;
-    _retry_ms = now ? now : 1;
-    _ok = sd_card_begin();
-    if (_ok) {
-      sd_bus_to_sd();
+  // Ensure the card is mounted (via the shared service, which throttles retries
+  // and recovers a re-inserted card) and that our /chat dir exists. Resets the
+  // loaded conversation after a fresh (re)mount so it reloads from the card.
+  bool ensure() {
+    if (!SdSvc::ensureMounted()) { _dir_ok = false; return false; }
+    if (!_dir_ok) {
+      SdSvc::Lock lk;
       if (!sd.exists("/chat")) sd.mkdir("/chat");
-      sd_bus_to_lora();
-      _loaded[0] = 0;   // force reload of the active conversation from the card
+      _dir_ok = true;
+      _loaded[0] = 0;
     }
-    return _ok;
+    return true;
   }
 
   static void keyPath(const char* key, char* out, size_t cap) {
@@ -98,10 +87,10 @@ class SdMessageStore : public MessageStore {
   void loadConversation(const char* key) {
     _count = 0;
     copyBounded(_loaded, key, CHAT_PEER_NAME_MAX);
-    if (!_ok) return;
+    if (!SdSvc::ready()) return;
     char path[64];
     keyPath(key, path, sizeof(path));
-    sd_bus_to_sd();
+    SdSvc::Lock lk;
     FsFile f = sd.open(path, O_RDONLY);
     if (f.isOpen()) {
       char line[CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 32];
@@ -113,7 +102,6 @@ class SdMessageStore : public MessageStore {
       }
       f.close();
     }
-    sd_bus_to_lora();
   }
 
   // Parse one record line into the RAM buffer.
@@ -131,20 +119,20 @@ class SdMessageStore : public MessageStore {
   }
 
 public:
-  SdMessageStore() : _count(0), _ok(false), _write_err(false), _retry_ms(0) { _loaded[0] = 0; }
+  SdMessageStore() : _count(0), _write_err(false), _dir_ok(false) { _loaded[0] = 0; }
 
   // Returns (and clears) whether a persist write has failed since last checked.
   bool takeWriteError() { bool e = _write_err; _write_err = false; return e; }
 
   // Mount the card + ensure /chat exists. Call once after radio_init.
-  bool begin() { _ok = false; _retry_ms = 0; return ensureMounted(); }
-  bool ready() const { return _ok; }
+  bool begin() { SdSvc::begin(); _dir_ok = false; return ensure(); }
+  bool ready() const { return SdSvc::ready(); }
 
   // Preload the newest ~cap messages across all conversations into `dst` (the RAM
   // ring), so disabling/ejecting the card keeps recent history on screen. Reads
   // only each file's tail. Appends oldest-first so the ring keeps the newest set.
   void preloadRecent(MessageStore* dst, int cap) {
-    if (!_ok || !dst || cap <= 0) return;
+    if (!SdSvc::ready() || !dst || cap <= 0) return;
     if (cap > CAP) cap = CAP;
     ChatMessage* recent = (ChatMessage*)malloc(sizeof(ChatMessage) * cap);
     if (!recent) return;
@@ -162,7 +150,8 @@ public:
       rn++;
     };
 
-    sd_bus_to_sd();
+    {
+    SdSvc::Lock lk;
     FsFile dir = sd.open("/chat", O_RDONLY);
     FsFile f;
     char name[80];
@@ -205,24 +194,24 @@ public:
       f.close();
     }
     if (dir.isOpen()) dir.close();
-    sd_bus_to_lora();
+    }  // release the bus before appending into the RAM ring
 
     for (int i = 0; i < rn; i++)
       dst->append(recent[i].outgoing, recent[i].peer, recent[i].sender, recent[i].text, recent[i].timestamp);
     free(recent);
   }
 
-  // Unmount (e.g. when the user disables history) so the card can be removed.
+  // Unmount the shared card (e.g. when the user disables history).
   void end() {
-    if (_ok) { sd_bus_to_sd(); sd.end(); sd_bus_to_lora(); }
-    _ok = false;
+    SdSvc::end();
+    _dir_ok = false;
     _loaded[0] = 0;
   }
 
   void append(bool outgoing, const char* peer, const char* sender,
               const char* text, uint32_t ts,
               uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0) override {
-    if (ensureMounted()) {
+    if (ensure()) {
       // Build the whole record, then write it in one go and verify every byte
       // landed -- a full card silently short-writes, so check the count.
       char rec[CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 48];
@@ -235,19 +224,20 @@ public:
 
       char path[64];
       keyPath(peer, path, sizeof(path));
-      sd_bus_to_sd();
-      FsFile f = sd.open(path, O_WRONLY | O_CREAT | O_APPEND);
-      bool opened = f.isOpen();
-      bool wrote = false;
-      if (opened) {
-        size_t n = f.write((const uint8_t*)rec, o);
-        f.close();
-        wrote = ((int)n == o);
+      bool opened = false, wrote = false;
+      {
+        SdSvc::Lock lk;
+        FsFile f = sd.open(path, O_WRONLY | O_CREAT | O_APPEND);
+        opened = f.isOpen();
+        if (opened) {
+          size_t n = f.write((const uint8_t*)rec, o);
+          f.close();
+          wrote = ((int)n == o);
+        }
       }
-      sd_bus_to_lora();
       if (!wrote) {
         _write_err = true;            // surfaced to the UI
-        if (!opened) _ok = false;     // couldn't open at all -> card gone; remount next access
+        if (!opened) end();           // couldn't open at all -> card gone; remount next access
       }
     }
     if (strncmp(peer, _loaded, CHAT_PEER_NAME_MAX) == 0)
@@ -255,7 +245,7 @@ public:
   }
 
   int messagesFor(const char* peer, const ChatMessage** out, int max) override {
-    ensureMounted();  // recover a re-inserted card before loading
+    ensure();  // recover a re-inserted card before loading
     if (strncmp(peer, _loaded, CHAT_PEER_NAME_MAX) != 0) loadConversation(peer);
     int n = (_count < max) ? _count : max;
     for (int i = 0; i < n; i++) out[i] = &_buf[_count - n + i];
@@ -263,12 +253,11 @@ public:
   }
 
   void clearPeer(const char* peer) override {
-    if (_ok) {
+    if (SdSvc::ready()) {
       char path[64];
       keyPath(peer, path, sizeof(path));
-      sd_bus_to_sd();
+      SdSvc::Lock lk;
       if (sd.exists(path)) sd.remove(path);
-      sd_bus_to_lora();
     }
     if (strncmp(peer, _loaded, CHAT_PEER_NAME_MAX) == 0) _count = 0;
   }
@@ -299,11 +288,11 @@ public:
   uint32_t latestTimestampFor(const char* peer) override {
     if (strncmp(peer, _loaded, CHAT_PEER_NAME_MAX) == 0)
       return _count > 0 ? _buf[_count - 1].timestamp : 0;
-    if (!_ok) return 0;
+    if (!SdSvc::ready()) return 0;
     char path[64];
     keyPath(peer, path, sizeof(path));
     uint32_t ts = 0;
-    sd_bus_to_sd();
+    SdSvc::Lock lk;
     FsFile f = sd.open(path, O_RDONLY);
     if (f.isOpen()) {
       uint32_t sz = (uint32_t)f.size();
@@ -320,7 +309,6 @@ public:
       }
       f.close();
     }
-    sd_bus_to_lora();
     return ts;
   }
 
