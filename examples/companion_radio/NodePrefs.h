@@ -43,4 +43,5 @@ struct NodePrefs {  // persisted to file
   int16_t tz_offset_minutes;   // local-time display offset from UTC, in minutes (0 = UTC)
   uint8_t clock_12h;           // 0 = 24-hour clock display, 1 = 12-hour (AM/PM)
   uint8_t persist_history;     // 0 = session-only chat history, 1 = save to SD (0xFF = unset -> on)
+  uint16_t screen_timeout_s;   // backlight idle-off after N s of no touch; 0 = never (also old-firmware default)
 };

@@ -259,6 +259,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     _prefs.tz_offset_minutes = 0;                                                          // 141 (default UTC)
     _prefs.clock_12h = 0;                                                                  // 143 (default 24h)
     _prefs.persist_history = 0xFF;                                                         // 144 (0xFF = unset -> on)
+    _prefs.screen_timeout_s = 0;                                                           // 145 (0 = never / unset)
     file.read((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
     file.read((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
     file.read((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
@@ -266,6 +267,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.tz_offset_minutes, sizeof(_prefs.tz_offset_minutes));     // 141
     file.read((uint8_t *)&_prefs.clock_12h, sizeof(_prefs.clock_12h));                     // 143
     file.read((uint8_t *)&_prefs.persist_history, sizeof(_prefs.persist_history));         // 144
+    file.read((uint8_t *)&_prefs.screen_timeout_s, sizeof(_prefs.screen_timeout_s));       // 145
 
     file.close();
   }
@@ -314,6 +316,7 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.tz_offset_minutes, sizeof(_prefs.tz_offset_minutes));     // 141
     file.write((uint8_t *)&_prefs.clock_12h, sizeof(_prefs.clock_12h));                     // 143
     file.write((uint8_t *)&_prefs.persist_history, sizeof(_prefs.persist_history));         // 144
+    file.write((uint8_t *)&_prefs.screen_timeout_s, sizeof(_prefs.screen_timeout_s));       // 145
 
     file.close();
   }

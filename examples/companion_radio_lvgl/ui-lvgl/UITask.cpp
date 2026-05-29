@@ -55,6 +55,15 @@ void UITask::touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   }
   uint16_t tx = 0, ty = 0;
   if (_instance->_lgfx->getTouch(&tx, &ty)) {
+    _instance->_last_input_ms = millis();   // reset the idle-off timer
+    if (_instance->_display_off) {
+      // Wake the backlight and swallow this touch so it doesn't also fire a
+      // button -- the tap that wakes the screen shouldn't act on whatever's under it.
+      board_set_backlight(_instance->_backlight_duty);
+      _instance->_display_off = false;
+      data->state = LV_INDEV_STATE_REL;
+      return;
+    }
     data->state = LV_INDEV_STATE_PR;
     data->point.x = tx;
     data->point.y = ty;
@@ -2031,6 +2040,10 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   // Apply a persisted backlight level (0 = keep the board's boot default).
   if (_node_prefs && _node_prefs->display_brightness)
     board_set_backlight(_node_prefs->display_brightness);
+  // Duty to restore on wake from idle-off: the configured brightness, or ~60%
+  // (matching the board's default) when unset. Seed the idle timer.
+  _backlight_duty = (_node_prefs && _node_prefs->display_brightness) ? _node_prefs->display_brightness : 153;
+  _last_input_ms = millis();
 
   _screen_w = _lgfx->width();
   _screen_h = _lgfx->height();
@@ -3283,6 +3296,12 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_width(_set_rot_dd, LV_PCT(100));
   lv_obj_add_event_cb(_set_rot_dd, set_rot_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  lv_obj_t* fto = makeField(body, "Screen Timeout (off when idle; saves battery)");
+  _set_screen_dd = lv_dropdown_create(fto);
+  lv_dropdown_set_options(_set_screen_dd, "Never\n15 s\n30 s\n1 min\n2 min\n5 min");
+  lv_obj_set_width(_set_screen_dd, LV_PCT(100));
+  lv_obj_add_event_cb(_set_screen_dd, set_screen_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
   // Local-time offset for the header clock. Entered in hours (decimals OK for
   // half/quarter-hour zones, e.g. 5.5, 5.75, -3.5); stored as minutes.
   _set_tz_ta = makeNumberField(body, "UTC offset (hours)", set_tz_ta_event_cb);
@@ -3354,6 +3373,14 @@ void UITask::populateSettings() {
   lv_slider_set_value(_set_bright_slider, pct, LV_ANIM_OFF);
 
   lv_dropdown_set_selected(_set_rot_dd, _lgfx ? (_lgfx->getRotation() & 3) : 0);
+
+  if (_set_screen_dd) {
+    const uint16_t secs[] = {0, 15, 30, 60, 120, 300};   // matches the options + set_screen_cb
+    int idx = 0;
+    for (int i = 0; i < (int)(sizeof(secs) / sizeof(secs[0])); i++)
+      if (secs[i] == _node_prefs->screen_timeout_s) { idx = i; break; }
+    lv_dropdown_set_selected(_set_screen_dd, idx);
+  }
 
   if (_set_tz_ta) {
     char tb[16];
@@ -3499,6 +3526,7 @@ void UITask::set_bright_cb(lv_event_t* e) {
   int pct = (int)lv_slider_get_value(lv_event_get_target(e));
   uint8_t duty = (uint8_t)((pct * 255 + 50) / 100);
   if (duty < 1) duty = 1;
+  _instance->_backlight_duty = duty;   // also the level restored on wake from idle-off
   if (code == LV_EVENT_VALUE_CHANGED) {
     board_set_backlight(duty);  // live preview while dragging
   } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
@@ -3515,6 +3543,19 @@ void UITask::set_rot_cb(lv_event_t* e) {
   _instance->_node_prefs->display_rotation = (uint8_t)(sel + 1);    // 1-based; 0 = unset
   pushPrefs();
   _instance->showToast("Rotation saved (restart to apply)");
+}
+
+// Screen-timeout dropdown <-> seconds (index order must match the options string).
+static const uint16_t SCREEN_TIMEOUT_SECS[] = {0, 15, 30, 60, 120, 300};
+static constexpr int SCREEN_TIMEOUT_N = sizeof(SCREEN_TIMEOUT_SECS) / sizeof(SCREEN_TIMEOUT_SECS[0]);
+
+void UITask::set_screen_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  uint16_t sel = lv_dropdown_get_selected(lv_event_get_target(e));
+  if (sel >= SCREEN_TIMEOUT_N) sel = 0;
+  _instance->_node_prefs->screen_timeout_s = SCREEN_TIMEOUT_SECS[sel];
+  _instance->_last_input_ms = millis();   // restart the idle countdown from now
+  pushPrefs();
 }
 
 void UITask::copyToClipboard(const char* text) {
@@ -3872,6 +3913,18 @@ void UITask::loop() {
   mproxy::beginUiRead();
   drainEvents();
 
+  // Backlight idle-off (battery). Touch resets _last_input_ms in touchpad_read_cb,
+  // which also wakes it. The radio/mesh keep running on core 0 the whole time.
+  uint16_t timeout_s = _node_prefs ? _node_prefs->screen_timeout_s : 0;
+  if (timeout_s && !_display_off && (uint32_t)(now - _last_input_ms) > (uint32_t)timeout_s * 1000) {
+    board_set_backlight(0);
+    _display_off = true;
+  }
+  // While the screen is off, skip the clock repaint and list rebuilds: nothing is
+  // visible, and a per-second clock update would needlessly invalidate + flush.
+  // lv_timer_handler still runs below so touch can wake us.
+  if (!_display_off) {
+
   // Live header clock (1 Hz). rtcSeconds() is the internal RTC -- no bus traffic.
   if (_clock_label) {
     uint32_t secs = mproxy::rtcSeconds();
@@ -3939,7 +3992,9 @@ void UITask::loop() {
     }
   }
 
-  lv_timer_handler();
+  }  // end if(!_display_off)
+
+  lv_timer_handler();   // always: renders dirty areas (none while off) + polls touch (wakes us)
   mproxy::endUiRead();
 }
 

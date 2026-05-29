@@ -25,6 +25,12 @@ class UITask : public AbstractUITask {
   bool            _started;
   uint32_t        _last_tick_ms;
   int             _msgcount;
+  // Power: backlight idle-off. _last_input_ms is reset on every touch; when the
+  // idle timeout elapses the backlight is turned off (_display_off) and the next
+  // touch wakes it (and is swallowed). The radio/mesh keep running on core 0.
+  uint32_t        _last_input_ms;
+  bool            _display_off;
+  uint8_t         _backlight_duty;      // duty to restore on wake (configured brightness)
   lv_obj_t*       _splash_screen;
   lv_obj_t*       _home_screen;
   lv_obj_t*       _header_label;
@@ -166,6 +172,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_path_dd;
   lv_obj_t*       _set_bright_slider;
   lv_obj_t*       _set_rot_dd;
+  lv_obj_t*       _set_screen_dd;       // screen idle-off timeout dropdown
   lv_obj_t*       _set_tz_ta;           // UTC offset (hours) for local-time display
   lv_obj_t*       _set_clock_chk;       // 12-hour clock toggle
   lv_obj_t*       _set_history_chk;     // persist chat history to SD toggle
@@ -351,6 +358,7 @@ class UITask : public AbstractUITask {
   static void set_pathmode_cb(lv_event_t* e);
   static void set_bright_cb(lv_event_t* e);
   static void set_rot_cb(lv_event_t* e);
+  static void set_screen_cb(lv_event_t* e);
   void      copyToClipboard(const char* text);
   void      applyPreset(int idx);
   static void radio_preset_cb(lv_event_t* e);
@@ -381,6 +389,7 @@ public:
     : AbstractUITask(board, serial),
       _lgfx(NULL), _node_prefs(NULL), _sensors(NULL),
       _started(false), _last_tick_ms(0), _msgcount(0),
+      _last_input_ms(0), _display_off(false), _backlight_duty(153),
       _splash_screen(NULL), _home_screen(NULL),
       _header_label(NULL), _clock_label(NULL), _clock_last(0),
       _tabview(NULL),
@@ -409,7 +418,7 @@ public:
       _path_screen(NULL), _path_size_dd(NULL), _path_ta(NULL), _path_kb(NULL), _path_err(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
-      _set_rot_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_history_chk(NULL), _set_kb(NULL),
+      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_history_chk(NULL), _set_kb(NULL),
       _set_active_ta(NULL), _set_key_ta(NULL),
       _set_lat_ta(NULL), _set_lon_ta(NULL), _set_sharepos(NULL), _confirm_popup(NULL),
       _info_popup(NULL), _info_title_lbl(NULL), _info_body_lbl(NULL),
