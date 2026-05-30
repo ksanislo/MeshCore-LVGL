@@ -207,10 +207,14 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _path_err;
 
   // Settings tab widgets (live inside _tab_settings; keyboard overlays _home_screen).
-  lv_obj_t*       _set_profile_avatar;     // owner profile hero (top of Settings)
+  lv_obj_t*       _set_profile_avatar;     // compact owner hero (Settings launcher)
   lv_obj_t*       _set_profile_avatar_lbl;
   lv_obj_t*       _set_profile_name;
   lv_obj_t*       _set_profile_key;
+  lv_obj_t*       _prof_avatar;            // big owner hero (Settings > Profile pane)
+  lv_obj_t*       _prof_avatar_lbl;
+  lv_obj_t*       _prof_name;
+  lv_obj_t*       _prof_key;
   lv_obj_t*       _set_name_ta;
   lv_obj_t*       _set_freq_ta;
   lv_obj_t*       _set_bw_dd;
@@ -656,6 +660,7 @@ public:
       _menu_popup(NULL), _menu_list(NULL), _toast(NULL), _path_return_screen(NULL),
       _path_screen(NULL), _path_size_dd(NULL), _path_ta(NULL), _path_kb(NULL), _path_err(NULL),
       _set_profile_avatar(NULL), _set_profile_avatar_lbl(NULL), _set_profile_name(NULL), _set_profile_key(NULL),
+      _prof_avatar(NULL), _prof_avatar_lbl(NULL), _prof_name(NULL), _prof_key(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
       _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_avatar_dd(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_kb(NULL),

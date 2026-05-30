@@ -2959,6 +2959,60 @@ static lv_obj_t* makeField(lv_obj_t* parent, const char* caption) {
   return col;
 }
 
+// Big detail-page hero card: avatar circle + name (28px) stacked over a tappable
+// "<pub..key>" line. Shared by the Contact Info page and the Settings > Profile
+// page so every detail page looks identical. Out-params expose the pieces for
+// populate; keyCb handles a tap on the key line (opens the full-key popup).
+static void makeHeroCard(lv_obj_t* parent, lv_obj_t** avatarOut, lv_obj_t** avatarLblOut,
+                         lv_obj_t** nameOut, lv_obj_t** keyOut, lv_event_cb_t keyCb) {
+  lv_obj_t* hero = lv_obj_create(parent);
+  lv_obj_remove_style_all(hero);
+  lv_obj_set_width(hero, LV_PCT(100));
+  lv_obj_set_height(hero, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_color(hero, lv_color_hex(UI_SURFACE), 0);
+  lv_obj_set_style_bg_opa(hero, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(hero, 8, 0);
+  lv_obj_set_style_pad_all(hero, 12, 0);
+  lv_obj_set_style_pad_column(hero, 12, 0);
+  lv_obj_set_flex_flow(hero, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(hero, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(hero, LV_OBJ_FLAG_SCROLLABLE);
+  makePassive(hero);   // tap the card (except the key line) falls through to dismiss kb
+
+  lv_obj_t* av = lv_obj_create(hero);
+  lv_obj_remove_style_all(av);
+  lv_obj_set_size(av, 56, 56);
+  lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_t* avl = lv_label_create(av);
+  lv_obj_center(avl);
+  lv_obj_set_style_text_color(avl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(avl, fontHero(), 0);
+
+  lv_obj_t* col = lv_obj_create(hero);
+  lv_obj_remove_style_all(col);
+  lv_obj_set_flex_grow(col, 1);
+  lv_obj_set_height(col, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(col, 2, 0);
+  lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_t* nm = lv_label_create(col);
+  lv_obj_set_width(nm, LV_PCT(100));
+  lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
+  lv_obj_set_style_text_color(nm, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(nm, fontHero(), 0);
+  lv_obj_t* ky = lv_label_create(col);
+  lv_obj_set_width(ky, LV_PCT(100));
+  lv_label_set_long_mode(ky, LV_LABEL_LONG_DOT);
+  lv_obj_set_style_text_color(ky, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_font(ky, fontCaption(), 0);
+  lv_obj_add_flag(ky, LV_OBJ_FLAG_CLICKABLE);   // tap -> full key + copy popup
+  lv_obj_add_event_cb(ky, keyCb, LV_EVENT_CLICKED, NULL);
+
+  *avatarOut = av; *avatarLblOut = avl; *nameOut = nm; *keyOut = ky;
+}
+
 void UITask::buildContactInfoScreen() {
   if (_cinfo_screen) return;
   _cinfo_screen = lv_obj_create(NULL);
@@ -2981,53 +3035,11 @@ void UITask::buildContactInfoScreen() {
   lv_obj_set_style_pad_row(_cinfo_body, 8, 0);
   lv_obj_set_flex_flow(_cinfo_body, LV_FLEX_FLOW_COLUMN);
 
-  // Hero card: avatar circle beside the name stacked over "<pub..key>" -- the same
-  // design as the owner profile hero on the Settings tab. Branding (name-seeded
-  // color / type glyph) matches the contacts list and chat header.
-  lv_obj_t* hero = lv_obj_create(_cinfo_body);
-  lv_obj_remove_style_all(hero);
-  lv_obj_set_width(hero, LV_PCT(100));
-  lv_obj_set_height(hero, LV_SIZE_CONTENT);
-  lv_obj_set_style_bg_color(hero, lv_color_hex(UI_SURFACE), 0);
-  lv_obj_set_style_bg_opa(hero, LV_OPA_COVER, 0);
-  lv_obj_set_style_radius(hero, 8, 0);
-  lv_obj_set_style_pad_all(hero, 10, 0);
-  lv_obj_set_style_pad_column(hero, 12, 0);
-  lv_obj_set_flex_flow(hero, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(hero, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_clear_flag(hero, LV_OBJ_FLAG_SCROLLABLE);
-  makePassive(hero);   // tap the card (except the key line) -> falls through to dismiss kb
-
-  _cinfo_avatar = lv_obj_create(hero);
-  lv_obj_remove_style_all(_cinfo_avatar);
-  lv_obj_set_size(_cinfo_avatar, 48, 48);
-  lv_obj_set_style_radius(_cinfo_avatar, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_opa(_cinfo_avatar, LV_OPA_COVER, 0);
-  lv_obj_clear_flag(_cinfo_avatar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-  _cinfo_avatar_lbl = lv_label_create(_cinfo_avatar);
-  lv_obj_center(_cinfo_avatar_lbl);
-  lv_obj_set_style_text_color(_cinfo_avatar_lbl, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_set_style_text_font(_cinfo_avatar_lbl, fontTitle(), 0);
-
-  lv_obj_t* hcol = lv_obj_create(hero);
-  lv_obj_remove_style_all(hcol);
-  lv_obj_set_flex_grow(hcol, 1);
-  lv_obj_set_height(hcol, LV_SIZE_CONTENT);
-  lv_obj_set_flex_flow(hcol, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_pad_row(hcol, 2, 0);
-  lv_obj_clear_flag(hcol, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-  _cinfo_title = lv_label_create(hcol);
-  lv_obj_set_width(_cinfo_title, LV_PCT(100));
-  lv_label_set_long_mode(_cinfo_title, LV_LABEL_LONG_DOT);
-  lv_obj_set_style_text_color(_cinfo_title, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(_cinfo_title, fontHeading(), 0);
-  _cinfo_key = lv_label_create(hcol);
-  lv_obj_set_width(_cinfo_key, LV_PCT(100));
-  lv_label_set_long_mode(_cinfo_key, LV_LABEL_LONG_DOT);
-  lv_obj_set_style_text_color(_cinfo_key, lv_color_hex(DIM_HEX), 0);
-  lv_obj_set_style_text_font(_cinfo_key, fontCaption(), 0);
-  lv_obj_add_flag(_cinfo_key, LV_OBJ_FLAG_CLICKABLE);   // tap -> full key + copy popup
-  lv_obj_add_event_cb(_cinfo_key, cinfo_key_cb, LV_EVENT_CLICKED, NULL);
+  // Big hero card (avatar + 28px name over the tappable "<pub..key>" line), shared
+  // with the Settings > Profile page so all detail pages match. Branding
+  // (name-seeded color / type glyph) is applied in populateContactInfo().
+  makeHeroCard(_cinfo_body, &_cinfo_avatar, &_cinfo_avatar_lbl, &_cinfo_title,
+               &_cinfo_key, cinfo_key_cb);
 
   // action row
   lv_obj_t* actions = lv_obj_create(_cinfo_body);
@@ -4651,6 +4663,10 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
 
   body = _set_pane_body[CAT_PROFILE];   // Profile
 
+  // Big hero card up top -- same look as a contact detail page (the compact card
+  // on the Settings launcher links here).
+  makeHeroCard(body, &_prof_avatar, &_prof_avatar_lbl, &_prof_name, &_prof_key, profile_key_cb);
+
   // ===== Public Info =====
   addSettingsSection(body, "Public Info");
 
@@ -5029,6 +5045,14 @@ void UITask::updateOwnerProfile() {
   if (keyhex[0]) snprintf(snip, sizeof(snip), "<%.6s...%.6s>  " LV_SYMBOL_COPY, keyhex, keyhex + 2 * PUB_KEY_SIZE - 6);
   else           snip[0] = 0;
   lv_label_set_text(_set_profile_key, snip);
+
+  // Big hero on the Settings > Profile pane shows the same owner identity.
+  if (_prof_name) {
+    lv_label_set_text(_prof_name, clean);
+    lv_label_set_text(_prof_avatar_lbl, g[0] ? g : "?");
+    lv_obj_set_style_bg_color(_prof_avatar, lv_color_hex(nameColor(who)), 0);
+    lv_label_set_text(_prof_key, snip);
+  }
 }
 
 void UITask::applyRadioSettings() {
