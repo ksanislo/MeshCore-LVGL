@@ -297,8 +297,9 @@ lv_obj_t* UITask::buildHomeScreen() {
   styleAsDarkScreen(scr);
   lv_obj_set_style_pad_all(scr, 0, 0);
 
-  // ----- header strip -----
+  // ----- header strip (logo + clock; hidden while a settings pane is open) -----
   lv_obj_t* header = lv_obj_create(scr);
+  _header = header;
   lv_obj_set_size(header, _screen_w, HEADER_H);
   lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 0);
   lv_obj_set_style_bg_color(header, lv_color_hex(UI_SURFACE), 0);  // gray-800
@@ -4534,8 +4535,21 @@ lv_obj_t* UITask::makeCategoryRow(lv_obj_t* parent, const char* icon, const char
   return row;
 }
 
+// Show/hide the home logo+clock header. A settings pane has its own back+title
+// bar, so we drop the logo header (it adds nothing on a back-button page and wastes
+// scarce vertical space in landscape) and grow the tabview to fill the gap, putting
+// the pane's title bar at the very top. Top-level tabs (no back button) keep it.
+void UITask::setHomeChrome(bool show) {
+  if (!_header || !_tabview) return;
+  if (show) lv_obj_clear_flag(_header, LV_OBJ_FLAG_HIDDEN);
+  else      lv_obj_add_flag(_header, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_size(_tabview, _screen_w, show ? _screen_h - HEADER_H : _screen_h);
+  lv_obj_align(_tabview, LV_ALIGN_TOP_MID, 0, show ? HEADER_H : 0);
+}
+
 void UITask::showSettingsCategory(int cat) {
   if (cat < 0 || cat >= CAT_COUNT || !_set_pane[cat]) return;
+  setHomeChrome(false);   // pane's own back+title bar takes the top
   if (_set_launcher) lv_obj_add_flag(_set_launcher, LV_OBJ_FLAG_HIDDEN);
   for (int i = 0; i < CAT_COUNT; i++) if (_set_pane[i]) lv_obj_add_flag(_set_pane[i], LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(_set_pane[cat], LV_OBJ_FLAG_HIDDEN);
@@ -4549,6 +4563,7 @@ void UITask::settingsBackToLauncher() {
   if (_set_kb) lv_obj_add_flag(_set_kb, LV_OBJ_FLAG_HIDDEN);
   _set_active_pane = NULL;
   if (_set_launcher) lv_obj_clear_flag(_set_launcher, LV_OBJ_FLAG_HIDDEN);
+  setHomeChrome(true);    // back at a top-level view -> restore the logo header
 }
 
 void UITask::category_row_cb(lv_event_t* e) {
@@ -4571,8 +4586,9 @@ void UITask::settings_back_cb(lv_event_t* e) {
 void UITask::settings_tab_changed_cb(lv_event_t* e) {
   (void)e;
   if (!_instance || !_instance->_set_launcher || !_instance->_tabview) return;
-  if (lv_tabview_get_tab_act(_instance->_tabview) == 2)  // 2 = Settings tab
-    _instance->settingsBackToLauncher();
+  // Any tab switch lands on a top-level view: reset Settings to its launcher and
+  // restore the header (also covers leaving a pane via the tab bar).
+  _instance->settingsBackToLauncher();
 }
 
 // The owner profile as a full-screen "contact page for yourself": same header bar

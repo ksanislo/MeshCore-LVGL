@@ -34,6 +34,7 @@ class UITask : public AbstractUITask {
   uint8_t         _backlight_duty;      // duty to restore on wake (configured brightness)
   lv_obj_t*       _splash_screen;
   lv_obj_t*       _home_screen;
+  lv_obj_t*       _header;              // home logo+clock bar (hidden while a settings pane is open)
   lv_obj_t*       _header_logo;         // MeshCore wordmark (recolorable alpha img)
   lv_obj_t*       _clock_label;         // live device clock in the home header
   uint32_t        _clock_last;          // last shown second (1 Hz throttle)
@@ -553,6 +554,7 @@ private:
   lv_obj_t* makeCategoryRow(lv_obj_t* parent, const char* icon, const char* title, const char* desc, int cat);
   void showSettingsCategory(int cat);
   void settingsBackToLauncher();
+  void setHomeChrome(bool show);   // show/hide the logo header (+resize tabview) for pane drill-in
   static void set_notify_cb(lv_event_t* e);
   // Phase-1 additions: telemetry policy + advanced toggles + share-me.
   static void set_telem_cb(lv_event_t* e);          // user_data 0/1/2 = base/loc/env
@@ -639,7 +641,7 @@ public:
       _started(false), _last_tick_ms(0), _msgcount(0),
       _last_input_ms(0), _display_off(false), _swallow_touch(false), _backlight_duty(153),
       _splash_screen(NULL), _home_screen(NULL),
-      _header_logo(NULL), _clock_label(NULL), _clock_last(0),
+      _header(NULL), _header_logo(NULL), _clock_label(NULL), _clock_last(0),
       _tabview(NULL),
       _tab_contacts(NULL), _tab_channels(NULL), _tab_settings(NULL),
       _contacts_scroll(NULL), _contacts_spacer(NULL), _contacts_empty(NULL),
