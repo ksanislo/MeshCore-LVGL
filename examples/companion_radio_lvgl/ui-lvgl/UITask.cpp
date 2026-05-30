@@ -739,19 +739,48 @@ void UITask::clistBuild(ContactListView& lv, lv_obj_t* parent) {
   lv_obj_add_event_cb(lv.scroll, clist_scroll_cb, LV_EVENT_SCROLL, &lv);
 }
 
-// Bind pool slot `slot` to display index `disp` (a lv.rows entry).
+// Render the special lead row pinned at display index 0 (+New Contact, or self).
+void UITask::fillLeadRow(ContactListView& lv, ContactRow& w) {
+  lv_obj_add_flag(w.dot, LV_OBJ_FLAG_HIDDEN);   // no unread marker on the lead row
+  if (lv.lead == ContactListView::LEAD_NEW) {
+    lv_label_set_text(w.avatar_lbl, LV_SYMBOL_PLUS);
+    lv_obj_set_style_bg_color(w.avatar, lv_color_hex(UI_PRIMARY), 0);
+    lv_label_set_text(w.name, "New Contact");
+    lv_obj_set_style_text_color(w.name, lv_color_hex(UI_ACCENT), 0);
+    lv_label_set_text(w.seen, "");
+  } else {  // LEAD_SELF: our own identity, like a contact card
+    const char* who = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "(unnamed)";
+    char clean[CHAT_PEER_NAME_MAX + 4];
+    sanitizeForFont(who, clean, sizeof(clean));
+    lv_label_set_text(w.name, clean);
+    lv_obj_set_style_text_color(w.name, lv_color_hex(FG_HEX), 0);
+    char g[8]; firstGrapheme(clean, g, sizeof(g));
+    lv_label_set_text(w.avatar_lbl, g[0] ? g : "?");
+    lv_obj_set_style_bg_color(w.avatar, lv_color_hex(nameColor(who)), 0);
+    lv_label_set_text(w.seen, "You");
+  }
+}
+
+// Bind pool slot `slot` to display index `disp`. With a lead row, disp 0 is the
+// lead and contact rows start at disp 1 (offset by leadN).
 void UITask::clistBind(ContactListView& lv, int slot, int disp) {
   ContactRow& w = lv.pool[slot];
-  ContactInfo c;
-  if (!mproxy::getContactByIdx(lv.rows[disp].idx, c)) return;
-  fillContactRow(w, c);
+  int leadN = (lv.lead != ContactListView::LEAD_NONE) ? 1 : 0;
+  if (leadN && disp == 0) {
+    fillLeadRow(lv, w);
+  } else {
+    ContactInfo c;
+    if (!mproxy::getContactByIdx(lv.rows[disp - leadN].idx, c)) return;
+    fillContactRow(w, c);
+  }
   lv_obj_set_user_data(w.root, (void*)(intptr_t)disp);
 }
 
 // Re-window the pool to the current scroll position. A display index maps to slot
 // (disp % pool_n), so scrolling by one row rebinds exactly one slot.
 void UITask::clistRelayout(ContactListView& lv) {
-  if (!lv.scroll || lv.pool_n == 0 || lv.count == 0) return;
+  int total = lv.count + ((lv.lead != ContactListView::LEAD_NONE) ? 1 : 0);
+  if (!lv.scroll || lv.pool_n == 0 || total == 0) return;
   int sy = lv_obj_get_scroll_y(lv.scroll);
   if (sy < 0) sy = 0;
   int top = sy / UI_CONTACT_ROW_H;
@@ -761,7 +790,7 @@ void UITask::clistRelayout(ContactListView& lv) {
     int disp = top + i;
     int slot = disp % lv.pool_n;
     ContactRow& w = lv.pool[slot];
-    if (disp >= lv.count) {
+    if (disp >= total) {
       if (lv.bound_idx[slot] != -1) {
         lv_obj_add_flag(w.root, LV_OBJ_FLAG_HIDDEN);
         lv.bound_idx[slot] = -1;
@@ -781,7 +810,8 @@ void UITask::clistRelayout(ContactListView& lv) {
 // top, force a full re-window, refresh the scrollbar. Shows empty_text when empty.
 void UITask::clistRefresh(ContactListView& lv, const char* empty_text) {
   if (!lv.scroll) return;
-  if (lv.count == 0) {
+  int total = lv.count + ((lv.lead != ContactListView::LEAD_NONE) ? 1 : 0);
+  if (total == 0) {
     lv_obj_set_height(lv.spacer, 0);
     for (int s = 0; s < lv.pool_n; s++) {
       lv_obj_add_flag(lv.pool[s].root, LV_OBJ_FLAG_HIDDEN);
@@ -792,7 +822,7 @@ void UITask::clistRefresh(ContactListView& lv, const char* empty_text) {
     return;
   }
   if (lv.empty) lv_obj_add_flag(lv.empty, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_set_height(lv.spacer, lv.count * UI_CONTACT_ROW_H);
+  lv_obj_set_height(lv.spacer, total * UI_CONTACT_ROW_H);
   lv_obj_scroll_to_y(lv.scroll, 0, LV_ANIM_OFF);
   for (int s = 0; s < lv.pool_n; s++) lv.bound_idx[s] = -1;
   lv.first_visible = -1;
@@ -811,9 +841,12 @@ void UITask::clist_row_cb(lv_event_t* e) {
   ContactListView* lv = (ContactListView*)lv_event_get_user_data(e);
   if (!lv) return;
   int disp = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target(e));
-  if (disp < 0 || disp >= lv->count) return;
+  int leadN = (lv->lead != ContactListView::LEAD_NONE) ? 1 : 0;
+  if (leadN && disp == 0) { if (lv->on_lead) lv->on_lead(); return; }   // lead row
+  int ci = disp - leadN;
+  if (ci < 0 || ci >= lv->count) return;
   ContactInfo c;
-  if (!mproxy::getContactByIdx(lv->rows[disp].idx, c)) return;
+  if (!mproxy::getContactByIdx(lv->rows[ci].idx, c)) return;
   if (lv->on_tap) lv->on_tap(c);   // per-instance behavior (open chat / pick-for-send)
 }
 
@@ -851,10 +884,25 @@ void UITask::clistPickSelect(const ContactInfo& pick) {
   }
 }
 
+// Picker lead row: select our own contact (synthesize a self ContactInfo and run
+// the same pick action -- e.g. insert our own contact ref).
+void UITask::clistPickSelf() {
+  if (!_instance || !mproxy::selfPubKey()) return;
+  ContactInfo self{};
+  memcpy(self.id.pub_key, mproxy::selfPubKey(), PUB_KEY_SIZE);
+  self.type = ADV_TYPE_CHAT;
+  const char* nm = (_instance->_node_prefs && _instance->_node_prefs->node_name[0])
+                       ? _instance->_node_prefs->node_name : "Me";
+  strncpy(self.name, nm, sizeof(self.name) - 1);
+  clistPickSelect(self);
+}
+
 // The Contacts tab is one ContactListView instance whose tap opens the chat.
 void UITask::buildContactRows(lv_obj_t* parent) {
   clistBuild(_clist, parent);
   _clist.on_tap = clistOpenContact;
+  _clist.lead = ContactListView::LEAD_NEW;   // "+ New Contact" pinned at the top
+  _clist.on_lead = clistNewContact;
 }
 
 void UITask::contacts_search_ta_cb(lv_event_t* e) {
@@ -1299,6 +1347,7 @@ void UITask::buildContactPickerScreen() {
   // contact for the pending send/insert action instead of opening it.
   clistBuild(_pick_list, _pick_popup);
   _pick_list.on_tap = clistPickSelect;
+  _pick_list.on_lead = clistPickSelf;   // lead row (set per-open) selects our own contact
 
   _pick_kb = lv_keyboard_create(_pick_popup);
   lv_obj_add_flag(_pick_kb, LV_OBJ_FLAG_FLOATING);   // overlay, don't take a flex slot
@@ -1319,6 +1368,9 @@ void UITask::openContactPicker(int action) {
   buildContactPickerScreen();
   _pick_action = action;
   _pick_filter[0] = 0;
+  // "Share contact" (insert, action 2) offers our own contact as the lead row; the
+  // recipient picker (action 1) does not.
+  _pick_list.lead = (action == 2) ? ContactListView::LEAD_SELF : ContactListView::LEAD_NONE;
   lv_textarea_set_text(_pick_search_ta, "");
   lv_obj_add_flag(_pick_kb, LV_OBJ_FLAG_HIDDEN);
   lv_label_set_text(_pick_title, action == 1 ? "Send to..." : "Share contact");
@@ -1972,16 +2024,9 @@ void UITask::add_contact_cb(lv_event_t* e) {
   uint8_t pk[PUB_KEY_SIZE], type;
   char name[CHAT_PEER_NAME_MAX];
   if (!parseContactRef(m->text, pk, type, name, sizeof(name))) return;
-
-  mproxy::MeshCmd cmd{};
-  cmd.kind = mproxy::CmdKind::AddContact;
-  ContactInfo& c = cmd.contact;
-  memcpy(c.id.pub_key, pk, PUB_KEY_SIZE);
-  c.type = type;
-  strncpy(c.name, name, sizeof(c.name) - 1);
-  c.out_path_len = OUT_PATH_UNKNOWN;
-  c.lastmod = mproxy::rtcSeconds();
-  mproxy::postCommand(cmd);   // backend adds it; the snapshot + list refresh on next publish
+  // Open the unified New Contact screen prefilled (key locked); the user confirms
+  // with Save (and may set a local nickname). Returns to the chat on back/save.
+  _instance->openNewContactPrefilled(pk, type, name, _instance->_chat_screen);
 }
 
 // Format helpers for chat timestamps. Inputs are already UTC + the local offset.
@@ -4102,6 +4147,183 @@ void UITask::newchan_kb_event_cb(lv_event_t* e) {
     lv_obj_add_flag(_instance->_newchan_kb, LV_OBJ_FLAG_HIDDEN);
     _instance->resetKbScroll();
   }
+}
+
+// ----- Unified add/import-contact screen (mirrors New Channel) ----------------
+void UITask::buildNewContactScreen() {
+  if (_newcon_screen) return;
+  _newcon_screen = lv_obj_create(NULL);
+  styleAsDarkScreen(_newcon_screen);
+  lv_obj_set_style_pad_all(_newcon_screen, 0, 0);
+
+  lv_obj_t* bar = makeHeaderBar(_newcon_screen, "New Contact", newcon_back_cb);
+  lv_obj_t* save = lv_btn_create(bar);   // flexes to the right of the grown title
+  lv_obj_add_event_cb(save, newcon_save_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* svl = lv_label_create(save);
+  lv_label_set_text(svl, LV_SYMBOL_OK " Save");
+
+  lv_obj_t* body = lv_obj_create(_newcon_screen);
+  lv_obj_add_event_cb(body, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
+  lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
+  lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(body, 0, 0);
+  lv_obj_set_style_pad_all(body, 12, 0);
+  lv_obj_set_style_pad_row(body, 8, 0);
+  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+
+  lv_obj_t* fn = makeField(body, "Name");
+  _newcon_name_ta = lv_textarea_create(fn);
+  lv_textarea_set_one_line(_newcon_name_ta, true); lv_obj_add_event_cb(_newcon_name_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+  lv_obj_set_width(_newcon_name_ta, LV_PCT(100));
+  lv_obj_add_event_cb(_newcon_name_ta, newcon_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  lv_obj_t* fk = makeField(body, "Key (hex) or paste meshcore:// link");
+  _newcon_key_ta = lv_textarea_create(fk);
+  lv_textarea_set_one_line(_newcon_key_ta, true); lv_obj_add_event_cb(_newcon_key_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+  lv_obj_set_width(_newcon_key_ta, LV_PCT(100));
+  lv_obj_add_event_cb(_newcon_key_ta, newcon_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  _newcon_err = lv_label_create(body);
+  lv_label_set_text(_newcon_err, "");
+  lv_obj_set_style_text_color(_newcon_err, lv_color_hex(UI_ERROR), 0);
+  lv_obj_add_flag(_newcon_err, LV_OBJ_FLAG_HIDDEN);
+
+  _newcon_kb = lv_keyboard_create(_newcon_screen);
+  lv_obj_add_event_cb(_newcon_kb, newcon_kb_event_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_newcon_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::openNewContact(lv_obj_t* return_screen) {
+  buildNewContactScreen();
+  _newcon_return_screen = return_screen;
+  _newcon_prefilled = false;
+  _newcon_advname[0] = 0;
+  memset(_newcon_pubkey, 0, PUB_KEY_SIZE);
+  _newcon_type = ADV_TYPE_CHAT;
+  lv_textarea_set_text(_newcon_name_ta, "");
+  lv_textarea_set_text(_newcon_key_ta, "");
+  lv_obj_add_flag(_newcon_err, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_newcon_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_scr_load(_newcon_screen);
+}
+
+void UITask::openNewContactPrefilled(const uint8_t* pubkey, uint8_t type, const char* advname,
+                                     lv_obj_t* return_screen) {
+  buildNewContactScreen();
+  _newcon_return_screen = return_screen;
+  _newcon_prefilled = true;
+  memcpy(_newcon_pubkey, pubkey, PUB_KEY_SIZE);
+  _newcon_type = type;
+  strncpy(_newcon_advname, advname ? advname : "", sizeof(_newcon_advname) - 1);
+  _newcon_advname[sizeof(_newcon_advname) - 1] = 0;
+  lv_textarea_set_text(_newcon_name_ta, _newcon_advname);   // editable display name
+  char hex[2 * PUB_KEY_SIZE + 1];
+  mesh::Utils::toHex(hex, pubkey, PUB_KEY_SIZE);
+  char trunc[24];
+  snprintf(trunc, sizeof(trunc), "<%.6s...%.6s>", hex, hex + 2 * PUB_KEY_SIZE - 6);
+  lv_textarea_set_text(_newcon_key_ta, trunc);   // read-only (no keyboard raised for it)
+  lv_obj_add_flag(_newcon_err, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_newcon_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_scr_load(_newcon_screen);
+}
+
+bool UITask::saveContactFromForm() {
+  auto fail = [this](const char* m){ lv_label_set_text(_newcon_err, m); lv_obj_clear_flag(_newcon_err, LV_OBJ_FLAG_HIDDEN); };
+  uint8_t pk[PUB_KEY_SIZE]; uint8_t type = ADV_TYPE_CHAT;
+  char advname[CHAT_PEER_NAME_MAX]; advname[0] = 0;
+
+  if (_newcon_prefilled) {
+    memcpy(pk, _newcon_pubkey, PUB_KEY_SIZE);
+    type = _newcon_type;
+    strncpy(advname, _newcon_advname, sizeof(advname) - 1); advname[sizeof(advname) - 1] = 0;
+  } else {
+    // A raw hex key, or a pasted "meshcore://contact/add?public_key=..&name=..&type=.." link.
+    const char* keyIn = lv_textarea_get_text(_newcon_key_ta);
+    char hexbuf[2 * PUB_KEY_SIZE + 1] = "";
+    if (keyIn && strstr(keyIn, "contact/add")) {
+      char pkp[2 * PUB_KEY_SIZE + 4], nm[80], typ[8];
+      if (uriParam(keyIn, "public_key", pkp, sizeof(pkp))) snprintf(hexbuf, sizeof(hexbuf), "%s", pkp);
+      if (uriParam(keyIn, "name", nm, sizeof(nm)))         urlDecodeInto(nm, advname, sizeof(advname));
+      if (uriParam(keyIn, "type", typ, sizeof(typ)))       type = (uint8_t)atoi(typ);
+    } else {
+      snprintf(hexbuf, sizeof(hexbuf), "%s", keyIn ? keyIn : "");
+    }
+    if (hexToBytes(hexbuf, pk, PUB_KEY_SIZE) != PUB_KEY_SIZE) { fail("Key must be 64 hex chars"); return false; }
+  }
+
+  const char* typed = lv_textarea_get_text(_newcon_name_ta);
+  const char* base = advname[0] ? advname : typed;   // advertised name is the stored contact name
+  if (!base || !base[0]) { fail("Enter a name"); return false; }
+
+  mproxy::MeshCmd cmd{};
+  cmd.kind = mproxy::CmdKind::AddContact;
+  ContactInfo& c = cmd.contact;
+  memcpy(c.id.pub_key, pk, PUB_KEY_SIZE);
+  c.type = type;
+  strncpy(c.name, base, sizeof(c.name) - 1);
+  c.out_path_len = OUT_PATH_UNKNOWN;
+  c.lastmod = mproxy::rtcSeconds();
+  mproxy::postCommand(cmd);
+
+  // A name edited beyond the advertised name is a local override; the contact keeps
+  // its advert name and displayName() prefers the override.
+  if (advname[0] && typed && typed[0] && strcmp(typed, advname) != 0) {
+    mproxy::MeshCmd ov{};
+    ov.kind = mproxy::CmdKind::SetNameOvr;
+    memcpy(ov.pubkey, pk, PUB_KEY_SIZE);
+    strncpy(ov.name, typed, sizeof(ov.name) - 1);
+    mproxy::postCommand(ov);
+  }
+  showToast("Contact added");
+  return true;   // appears in the list once the backend republishes the snapshot
+}
+
+void UITask::newcon_back_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  lv_obj_add_flag(_instance->_newcon_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_scr_load(_instance->_newcon_return_screen ? _instance->_newcon_return_screen : _instance->_home_screen);
+}
+
+void UITask::newcon_save_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  if (_instance->saveContactFromForm()) {
+    lv_obj_add_flag(_instance->_newcon_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_scr_load(_instance->_newcon_return_screen ? _instance->_newcon_return_screen : _instance->_home_screen);
+  }
+}
+
+void UITask::newcon_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  // The key field is read-only when prefilled -> don't raise its keyboard.
+  if (ta == _instance->_newcon_key_ta && _instance->_newcon_prefilled) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    lv_keyboard_set_textarea(_instance->_newcon_kb, ta);
+    lv_keyboard_set_mode(_instance->_newcon_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_newcon_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_newcon_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_newcon_kb);
+    _instance->raiseFieldForKb(lv_obj_get_parent(lv_obj_get_parent(ta)), _instance->_newcon_kb, ta);
+  }
+}
+
+void UITask::newcon_kb_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+    lv_obj_add_flag(_instance->_newcon_kb, LV_OBJ_FLAG_HIDDEN);
+    _instance->resetKbScroll();
+  }
+}
+
+// Contacts tab lead row: open the New Contact screen for manual entry.
+void UITask::clistNewContact() {
+  if (_instance) _instance->openNewContact(_instance->_home_screen);
 }
 
 // Add an inline show/hide eye to a one-line textarea: hidden (password) by default,

@@ -102,6 +102,7 @@ class UITask : public AbstractUITask {
   // clistRelayout (operate on a ContactListView&); clist_row_cb/clist_scroll_cb carry
   // the instance via event user_data.
   struct ContactListView {
+    enum { LEAD_NONE = 0, LEAD_NEW, LEAD_SELF };  // special first row, per variant
     lv_obj_t* scroll;                       // scrollable container
     lv_obj_t* spacer;                       // transparent child sized to count rows
     lv_obj_t* empty;                        // centered placeholder
@@ -113,6 +114,8 @@ class UITask : public AbstractUITask {
     ContactDispRow rows[CONTACTS_MAX_ROWS]; // filtered/sorted display set (indices only)
     int        count;
     void (*on_tap)(const ContactInfo&);     // per instance: open chat, or pick-for-send
+    int        lead;                        // LEAD_*: a special row pinned at display index 0
+    void (*on_lead)();                      // tap behavior for the lead row
   };
   ContactListView _clist;                   // the Contacts tab list
 
@@ -321,6 +324,19 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _newchan_err;
   lv_obj_t*       _newchan_kb;
 
+  // Unified add/import-contact screen: blank from "+ New Contact", or prefilled
+  // (key locked) when adding an unknown contact from a DM/channel contact ref.
+  lv_obj_t*       _newcon_screen;
+  lv_obj_t*       _newcon_name_ta;
+  lv_obj_t*       _newcon_key_ta;
+  lv_obj_t*       _newcon_err;
+  lv_obj_t*       _newcon_kb;
+  lv_obj_t*       _newcon_return_screen;
+  uint8_t         _newcon_pubkey[PUB_KEY_SIZE];        // set when prefilled
+  uint8_t         _newcon_type;
+  char            _newcon_advname[CHAT_PEER_NAME_MAX]; // advertised/linked name (override baseline)
+  bool            _newcon_prefilled;                   // key is fixed (read-only) when true
+
   // Node-info / status screen (read-only, periodically refreshed). Lazily built.
   lv_obj_t*       _nodeinfo_screen;
   lv_obj_t*       _nodeinfo_lbl;
@@ -415,6 +431,9 @@ class UITask : public AbstractUITask {
   static void clist_scroll_cb(lv_event_t* e);
   static void clistOpenContact(const ContactInfo& c);  // Contacts tab tap: open the chat
   static void clistPickSelect(const ContactInfo& c);   // picker tap: run the share/insert action
+  void      fillLeadRow(ContactListView& lv, ContactRow& w);  // render the lead row (+New / self)
+  static void clistNewContact();   // Contacts tab lead: open the New Contact screen
+  static void clistPickSelf();     // picker lead: select our own contact
   void      buildContactRows(lv_obj_t* parent);
   static void contacts_scroll_cb(lv_event_t* e);
   static void contacts_search_ta_cb(lv_event_t* e);
@@ -624,6 +643,15 @@ private:
   void      buildNewChannelScreen();
   void      openNewChannel();
   bool      createChannelFromForm();
+  void      buildNewContactScreen();
+  void      openNewContact(lv_obj_t* return_screen);   // blank manual entry
+  void      openNewContactPrefilled(const uint8_t* pubkey, uint8_t type, const char* advname,
+                                     lv_obj_t* return_screen);   // from a contact ref (key locked)
+  bool      saveContactFromForm();
+  static void newcon_back_cb(lv_event_t* e);
+  static void newcon_save_cb(lv_event_t* e);
+  static void newcon_ta_event_cb(lv_event_t* e);
+  static void newcon_kb_event_cb(lv_event_t* e);
   void      openShareChannelQR(int idx);        // channel -> meshcore://channel/add QR
   static void kebab_chanshare_cb(lv_event_t* e); // channel chat kebab "Share"
 
@@ -713,6 +741,9 @@ public:
       _qr_return_screen(NULL),
       _newchan_screen(NULL), _newchan_name_ta(NULL), _newchan_key_ta(NULL),
       _newchan_err(NULL), _newchan_kb(NULL),
+      _newcon_screen(NULL), _newcon_name_ta(NULL), _newcon_key_ta(NULL),
+      _newcon_err(NULL), _newcon_kb(NULL), _newcon_return_screen(NULL),
+      _newcon_pubkey{}, _newcon_type(0), _newcon_advname{}, _newcon_prefilled(false),
       _nodeinfo_screen(NULL), _nodeinfo_lbl(NULL), _nodeinfo_timer(NULL),
       _login_popup(NULL), _login_card(NULL), _login_title(NULL), _login_pw_ta(NULL),
       _login_save_chk(NULL), _login_auto_chk(NULL), _login_kb(NULL),
