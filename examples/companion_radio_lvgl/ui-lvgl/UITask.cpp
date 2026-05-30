@@ -4266,6 +4266,61 @@ void UITask::newchan_kb_event_cb(lv_event_t* e) {
 }
 
 // ----- Unified add/import-contact screen (mirrors New Channel) ----------------
+// Resolve the contact key/type/advertised-name from the form: the locked prefill,
+// or parse the key field (raw hex, or a "meshcore://contact/add?public_key=..&
+// name=..&type=.." link). Returns false if no full public key is available yet.
+bool UITask::resolveNewContact(uint8_t* pk, uint8_t& type, char* advname, size_t cap) {
+  advname[0] = 0;
+  type = ADV_TYPE_CHAT;
+  if (_newcon_prefilled) {
+    memcpy(pk, _newcon_pubkey, PUB_KEY_SIZE);
+    type = _newcon_type;
+    strncpy(advname, _newcon_advname, cap - 1); advname[cap - 1] = 0;
+    return true;
+  }
+  const char* keyIn = lv_textarea_get_text(_newcon_key_ta);
+  char hexbuf[2 * PUB_KEY_SIZE + 1] = "";
+  if (keyIn && strstr(keyIn, "contact/add")) {
+    char pkp[2 * PUB_KEY_SIZE + 4], nm[80], typ[8];
+    if (uriParam(keyIn, "public_key", pkp, sizeof(pkp))) snprintf(hexbuf, sizeof(hexbuf), "%s", pkp);
+    if (uriParam(keyIn, "name", nm, sizeof(nm)))         urlDecodeInto(nm, advname, cap);
+    if (uriParam(keyIn, "type", typ, sizeof(typ)))       type = (uint8_t)atoi(typ);
+  } else {
+    snprintf(hexbuf, sizeof(hexbuf), "%s", keyIn ? keyIn : "");
+  }
+  return hexToBytes(hexbuf, pk, PUB_KEY_SIZE) == PUB_KEY_SIZE;
+}
+
+// Live hero preview from the current form -- same branded hero card a built contact
+// shows. Updates as the name/key fields change.
+void UITask::refreshNewContactHero() {
+  if (!_newcon_hero_nm) return;
+  uint8_t pk[PUB_KEY_SIZE], type; char advname[CHAT_PEER_NAME_MAX];
+  bool haveKey = resolveNewContact(pk, type, advname, sizeof(advname));
+  const char* typed = lv_textarea_get_text(_newcon_name_ta);
+  const char* shown = (typed && typed[0]) ? typed : (advname[0] ? advname : "New contact");
+  char clean[CHAT_PEER_NAME_MAX + 4];
+  sanitizeForFont(shown, clean, sizeof(clean));
+  lv_label_set_text(_newcon_hero_nm, clean);
+  brandAvatar(_newcon_hero_av, _newcon_hero_avl, clean, type);
+  if (haveKey) {
+    char hex[2 * PUB_KEY_SIZE + 1]; mesh::Utils::toHex(hex, pk, PUB_KEY_SIZE);
+    char trunc[24]; snprintf(trunc, sizeof(trunc), "<%.6s...%.6s>", hex, hex + 2 * PUB_KEY_SIZE - 6);
+    lv_label_set_text(_newcon_hero_key, trunc);
+  } else {
+    lv_label_set_text(_newcon_hero_key, "(enter a key)");
+  }
+}
+
+void UITask::newcon_key_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  uint8_t pk[PUB_KEY_SIZE], type; char advname[CHAT_PEER_NAME_MAX];
+  if (!_instance->resolveNewContact(pk, type, advname, sizeof(advname))) return;
+  char hex[2 * PUB_KEY_SIZE + 1]; mesh::Utils::toHex(hex, pk, PUB_KEY_SIZE);
+  _instance->showKeyPopup(hex);
+}
+
 void UITask::buildNewContactScreen() {
   if (_newcon_screen) return;
   _newcon_screen = lv_obj_create(NULL);
@@ -4288,6 +4343,9 @@ void UITask::buildNewContactScreen() {
   lv_obj_set_style_pad_all(body, 12, 0);
   lv_obj_set_style_pad_row(body, 8, 0);
   lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+
+  // Live hero preview at the top -- same branded card a built contact shows.
+  makeHeroCard(body, &_newcon_hero_av, &_newcon_hero_avl, &_newcon_hero_nm, &_newcon_hero_key, newcon_key_cb);
 
   lv_obj_t* fn = makeField(body, "Name");
   _newcon_name_ta = lv_textarea_create(fn);
@@ -4322,6 +4380,7 @@ void UITask::openNewContact(lv_obj_t* return_screen) {
   lv_textarea_set_text(_newcon_key_ta, "");
   lv_obj_add_flag(_newcon_err, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(_newcon_kb, LV_OBJ_FLAG_HIDDEN);
+  refreshNewContactHero();
   lv_scr_load(_newcon_screen);
 }
 
@@ -4342,32 +4401,15 @@ void UITask::openNewContactPrefilled(const uint8_t* pubkey, uint8_t type, const 
   lv_textarea_set_text(_newcon_key_ta, trunc);   // read-only (no keyboard raised for it)
   lv_obj_add_flag(_newcon_err, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(_newcon_kb, LV_OBJ_FLAG_HIDDEN);
+  refreshNewContactHero();
   lv_scr_load(_newcon_screen);
 }
 
 bool UITask::saveContactFromForm() {
   auto fail = [this](const char* m){ lv_label_set_text(_newcon_err, m); lv_obj_clear_flag(_newcon_err, LV_OBJ_FLAG_HIDDEN); };
-  uint8_t pk[PUB_KEY_SIZE]; uint8_t type = ADV_TYPE_CHAT;
-  char advname[CHAT_PEER_NAME_MAX]; advname[0] = 0;
-
-  if (_newcon_prefilled) {
-    memcpy(pk, _newcon_pubkey, PUB_KEY_SIZE);
-    type = _newcon_type;
-    strncpy(advname, _newcon_advname, sizeof(advname) - 1); advname[sizeof(advname) - 1] = 0;
-  } else {
-    // A raw hex key, or a pasted "meshcore://contact/add?public_key=..&name=..&type=.." link.
-    const char* keyIn = lv_textarea_get_text(_newcon_key_ta);
-    char hexbuf[2 * PUB_KEY_SIZE + 1] = "";
-    if (keyIn && strstr(keyIn, "contact/add")) {
-      char pkp[2 * PUB_KEY_SIZE + 4], nm[80], typ[8];
-      if (uriParam(keyIn, "public_key", pkp, sizeof(pkp))) snprintf(hexbuf, sizeof(hexbuf), "%s", pkp);
-      if (uriParam(keyIn, "name", nm, sizeof(nm)))         urlDecodeInto(nm, advname, sizeof(advname));
-      if (uriParam(keyIn, "type", typ, sizeof(typ)))       type = (uint8_t)atoi(typ);
-    } else {
-      snprintf(hexbuf, sizeof(hexbuf), "%s", keyIn ? keyIn : "");
-    }
-    if (hexToBytes(hexbuf, pk, PUB_KEY_SIZE) != PUB_KEY_SIZE) { fail("Key must be 64 hex chars"); return false; }
-  }
+  uint8_t pk[PUB_KEY_SIZE]; uint8_t type;
+  char advname[CHAT_PEER_NAME_MAX];
+  if (!resolveNewContact(pk, type, advname, sizeof(advname))) { fail("Key must be 64 hex chars"); return false; }
 
   const char* typed = lv_textarea_get_text(_newcon_name_ta);
   const char* base = advname[0] ? advname : typed;   // advertised name is the stored contact name
@@ -4425,6 +4467,8 @@ void UITask::newcon_ta_event_cb(lv_event_t* e) {
     lv_obj_align(_instance->_newcon_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_newcon_kb);
     _instance->raiseFieldForKb(lv_obj_get_parent(lv_obj_get_parent(ta)), _instance->_newcon_kb, ta);
+  } else if (code == LV_EVENT_VALUE_CHANGED) {
+    _instance->refreshNewContactHero();   // live preview as the name/key are typed
   }
 }
 

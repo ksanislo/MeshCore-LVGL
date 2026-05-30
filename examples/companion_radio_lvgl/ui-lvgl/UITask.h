@@ -336,6 +336,10 @@ class UITask : public AbstractUITask {
   uint8_t         _newcon_type;
   char            _newcon_advname[CHAT_PEER_NAME_MAX]; // advertised/linked name (override baseline)
   bool            _newcon_prefilled;                   // key is fixed (read-only) when true
+  lv_obj_t*       _newcon_hero_av;                      // live hero preview (like a contact page)
+  lv_obj_t*       _newcon_hero_avl;
+  lv_obj_t*       _newcon_hero_nm;
+  lv_obj_t*       _newcon_hero_key;
 
   // Node-info / status screen (read-only, periodically refreshed). Lazily built.
   lv_obj_t*       _nodeinfo_screen;
@@ -650,6 +654,9 @@ private:
   void      openNewContactPrefilled(const uint8_t* pubkey, uint8_t type, const char* advname,
                                      lv_obj_t* return_screen);   // from a contact ref (key locked)
   bool      saveContactFromForm();
+  bool      resolveNewContact(uint8_t* pk, uint8_t& type, char* advname, size_t cap);  // prefill or parse
+  void      refreshNewContactHero();   // live hero preview from the current form
+  static void newcon_key_cb(lv_event_t* e);   // hero key tap -> full key popup
   static void newcon_back_cb(lv_event_t* e);
   static void newcon_save_cb(lv_event_t* e);
   static void newcon_ta_event_cb(lv_event_t* e);
@@ -746,6 +753,7 @@ public:
       _newcon_screen(NULL), _newcon_name_ta(NULL), _newcon_key_ta(NULL),
       _newcon_err(NULL), _newcon_kb(NULL), _newcon_return_screen(NULL),
       _newcon_pubkey{}, _newcon_type(0), _newcon_advname{}, _newcon_prefilled(false),
+      _newcon_hero_av(NULL), _newcon_hero_avl(NULL), _newcon_hero_nm(NULL), _newcon_hero_key(NULL),
       _nodeinfo_screen(NULL), _nodeinfo_lbl(NULL), _nodeinfo_timer(NULL),
       _login_popup(NULL), _login_card(NULL), _login_title(NULL), _login_pw_ta(NULL),
       _login_save_chk(NULL), _login_auto_chk(NULL), _login_kb(NULL),
