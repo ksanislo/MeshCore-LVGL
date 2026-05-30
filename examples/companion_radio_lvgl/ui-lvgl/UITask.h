@@ -360,7 +360,8 @@ class UITask : public AbstractUITask {
   void      rebuildContactsList();
   // Display name = local override if set, else the contact's advert name.
   const char* displayName(const uint8_t* pubkey, const char* realname, char* buf, size_t cap);
-  bool      contactPasses(const struct ContactInfo& c);
+  bool      contactPasses(const struct ContactInfo& c, const char* search);
+  void      fillContactDisplaySet(ContactListView& lv, const char* search);  // shared filter+sort
   void      rebuildChannelsList();
   // Drain the backend→UI event queue (new/sent msgs, delivery, telemetry) and
   // apply each to the message store / LVGL. Runs at the top of loop(), UI core.
@@ -460,7 +461,6 @@ class UITask : public AbstractUITask {
   void      buildContactPickerScreen();
   void      rebuildPicker();
   void      closeContactPicker();
-  static int  prow_cmp(const void* a, const void* b);
   static void pick_search_ta_cb(lv_event_t* e);
   static void pick_kb_cb(lv_event_t* e);
   static void pick_close_cb(lv_event_t* e);

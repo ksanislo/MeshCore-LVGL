@@ -474,7 +474,9 @@ const char* UITask::displayName(const uint8_t* pubkey, const char* realname, cha
 
 // Filter predicate: the pop-out's filter choice + the name search box.
 // _contacts_filt: 0=All,1=Favorites,2=Users,3=Repeaters,4=Room Servers,5=Sensors.
-bool UITask::contactPasses(const ContactInfo& c) {
+// Category filter (_contacts_filt, shared across the Contacts tab + picker) plus a
+// per-list name search (the caller passes its own search string).
+bool UITask::contactPasses(const ContactInfo& c, const char* search) {
   switch (_contacts_filt) {
     case 1: if (!(c.flags & CONTACT_FLAG_FAVOURITE)) return false; break;
     case 2: if (c.type != ADV_TYPE_CHAT)     return false; break;
@@ -483,10 +485,10 @@ bool UITask::contactPasses(const ContactInfo& c) {
     case 5: if (c.type != ADV_TYPE_SENSOR)   return false; break;
     default: break;  // All
   }
-  if (_contacts_filter[0]) {
+  if (search && search[0]) {
     char dn[CHAT_PEER_NAME_MAX];
     displayName(c.id.pub_key, c.name, dn, sizeof(dn));
-    if (!containsCI(dn, _contacts_filter) && !containsCI(c.name, _contacts_filter)) return false;
+    if (!containsCI(dn, search) && !containsCI(c.name, search)) return false;
   }
   return true;
 }
@@ -529,29 +531,33 @@ int UITask::crow_cmp(const void* pa, const void* pb) {
   return 0;
 }
 
+// Populate a list's display set: shared category filter (_contacts_filt) + a
+// per-list name search, sorted by the shared order (_contacts_order). Used by both
+// the Contacts tab and the picker so filter/sort settings stay in sync.
+void UITask::fillContactDisplaySet(ContactListView& lv, const char* search) {
+  lv.count = 0;
+  int total = mproxy::getNumContacts();
+  for (int i = 0; i < total && lv.count < CONTACTS_MAX_ROWS; i++) {
+    ContactInfo c;
+    if (!mproxy::getContactByIdx(i, c)) continue;
+    if (!contactPasses(c, search)) continue;
+    lv.rows[lv.count].idx = (uint16_t)i;
+    // Sort key: latest message time for "Latest Messages", else last-heard by OUR
+    // clock (lastmod) -- not last_advert_timestamp, which is their (untrusted) clock.
+    lv.rows[lv.count].heard = (_contacts_order == 2)
+        ? _msgs->latestTimestampFor(c.name) : c.lastmod;
+    lv.rows[lv.count].fav = (c.flags & CONTACT_FLAG_FAVOURITE) ? 1 : 0;
+    lv.count++;
+  }
+  s_contacts_order = _contacts_order;
+  qsort(lv.rows, lv.count, sizeof(ContactDispRow), crow_cmp);
+}
+
 void UITask::rebuildContactsList() {
   if (!_clist.scroll) return;
   _contacts_dirty = false;
   _contacts_rebuilt_ms = millis();
-
-  // Build the filtered display set (indices only -- no per-contact widgets).
-  _clist.count = 0;
-  int total = mproxy::getNumContacts();
-  for (int i = 0; i < total && _clist.count < CONTACTS_MAX_ROWS; i++) {
-    ContactInfo c;
-    if (!mproxy::getContactByIdx(i, c)) continue;
-    if (!contactPasses(c)) continue;
-    _clist.rows[_clist.count].idx = (uint16_t)i;
-    // Sort key: latest message time for "Latest Messages", else last-heard by OUR
-    // clock (lastmod) -- not last_advert_timestamp, which is their (untrusted) clock.
-    _clist.rows[_clist.count].heard = (_contacts_order == 2)
-        ? _msgs->latestTimestampFor(c.name) : c.lastmod;
-    _clist.rows[_clist.count].fav = (c.flags & CONTACT_FLAG_FAVOURITE) ? 1 : 0;
-    _clist.count++;
-  }
-  s_contacts_order = _contacts_order;
-  qsort(_clist.rows, _clist.count, sizeof(ContactDispRow), crow_cmp);
-
+  fillContactDisplaySet(_clist, _contacts_filter);
   clistRefresh(_clist, mproxy::getNumContacts() > 0
       ? "No contacts match." : "No contacts yet.\nWaiting for adverts...");
 }
@@ -989,6 +995,8 @@ void UITask::contacts_order_pick_cb(lv_event_t* e) {
   }
   _instance->refreshContactsFilterChecks();
   _instance->rebuildContactsList();
+  if (_instance->_pick_popup && !lv_obj_has_flag(_instance->_pick_popup, LV_OBJ_FLAG_HIDDEN))
+    _instance->rebuildPicker();   // shared order setting -> keep an open picker in sync
 }
 
 void UITask::contacts_filt_pick_cb(lv_event_t* e) {
@@ -1000,6 +1008,8 @@ void UITask::contacts_filt_pick_cb(lv_event_t* e) {
   }
   _instance->refreshContactsFilterChecks();
   _instance->rebuildContactsList();
+  if (_instance->_pick_popup && !lv_obj_has_flag(_instance->_pick_popup, LV_OBJ_FLAG_HIDDEN))
+    _instance->rebuildPicker();   // shared category filter -> keep an open picker in sync
 }
 
 void UITask::channel_clicked_cb(lv_event_t* e) {
@@ -1229,16 +1239,6 @@ void UITask::showInsertMenu() {
 // address book without a cap and looks/scrolls identically -- only the tap action
 // differs (select-for-send instead of opening the contact).
 
-int UITask::prow_cmp(const void* pa, const void* pb) {
-  const ContactDispRow* a = (const ContactDispRow*)pa;
-  const ContactDispRow* b = (const ContactDispRow*)pb;
-  if (a->fav != b->fav) return (int)b->fav - (int)a->fav;  // favourites first, then A-Z
-  ContactInfo ca, cb;
-  mproxy::getContactByIdx(a->idx, ca);
-  mproxy::getContactByIdx(b->idx, cb);
-  return nameCmpLNS(ca.name, cb.name);
-}
-
 void UITask::buildContactPickerScreen() {
   if (_pick_popup) return;
   _pick_popup = lv_obj_create(lv_layer_top());
@@ -1248,6 +1248,7 @@ void UITask::buildContactPickerScreen() {
   lv_obj_set_style_pad_all(_pick_popup, 0, 0);
   lv_obj_set_flex_flow(_pick_popup, LV_FLEX_FLOW_COLUMN);
 
+  // Standard header: back button (bail without picking, like every page) + title.
   lv_obj_t* bar = lv_obj_create(_pick_popup);
   lv_obj_set_width(bar, LV_PCT(100));
   lv_obj_set_height(bar, HEADER_H);
@@ -1256,20 +1257,18 @@ void UITask::buildContactPickerScreen() {
   lv_obj_set_style_border_width(bar, 0, 0);
   lv_obj_set_style_radius(bar, 0, 0);
   lv_obj_set_style_pad_all(bar, 6, 0);
+  lv_obj_set_style_pad_column(bar, 6, 0);
   lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  makeBackButton(bar, pick_close_cb);
   _pick_title = lv_label_create(bar);
+  lv_obj_set_flex_grow(_pick_title, 1);
+  lv_label_set_long_mode(_pick_title, LV_LABEL_LONG_DOT);
   lv_obj_set_style_text_color(_pick_title, lv_color_hex(FG_HEX), 0);
   lv_obj_set_style_text_font(_pick_title, fontTitle(), 0);
-  lv_obj_align(_pick_title, LV_ALIGN_LEFT_MID, 4, 0);
-  lv_obj_t* close = lv_btn_create(bar);
-  lv_obj_set_style_bg_opa(close, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_shadow_width(close, 0, 0);
-  lv_obj_align(close, LV_ALIGN_RIGHT_MID, 0, 0);
-  lv_obj_add_event_cb(close, pick_close_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* cl = lv_label_create(close);
-  lv_label_set_text(cl, LV_SYMBOL_CLOSE);
-  lv_obj_set_style_text_color(cl, lv_color_hex(FG_HEX), 0);
 
+  // Search + filter button, same row layout (and slim styling) as the Contacts tab.
   lv_obj_t* srow = lv_obj_create(_pick_popup);
   lv_obj_set_width(srow, LV_PCT(100));
   lv_obj_set_height(srow, LV_SIZE_CONTENT);
@@ -1277,13 +1276,24 @@ void UITask::buildContactPickerScreen() {
   lv_obj_set_style_bg_opa(srow, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(srow, 0, 0);
   lv_obj_set_style_radius(srow, 0, 0);
-  lv_obj_set_style_pad_all(srow, 6, 0);
+  lv_obj_set_style_pad_hor(srow, 6, 0);
+  lv_obj_set_style_pad_ver(srow, 4, 0);
+  lv_obj_set_style_pad_column(srow, 6, 0);
   lv_obj_clear_flag(srow, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(srow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(srow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   _pick_search_ta = lv_textarea_create(srow);
   lv_textarea_set_one_line(_pick_search_ta, true); lv_obj_add_event_cb(_pick_search_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_placeholder_text(_pick_search_ta, LV_SYMBOL_EYE_OPEN " Search");
-  lv_obj_set_width(_pick_search_ta, LV_PCT(100));
+  lv_obj_set_flex_grow(_pick_search_ta, 1);
+  lv_obj_set_style_pad_ver(_pick_search_ta, 5, 0);
+  lv_obj_set_style_text_font(_pick_search_ta, &lv_font_montserrat_14, 0);
   lv_obj_add_event_cb(_pick_search_ta, pick_search_ta_cb, LV_EVENT_ALL, NULL);
+  lv_obj_t* fbtn = lv_btn_create(srow);   // same order/filter pop-out as the Contacts tab
+  lv_obj_add_event_cb(fbtn, contacts_filter_btn_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* fbl = lv_label_create(fbtn);
+  lv_label_set_text(fbl, LV_SYMBOL_LIST);
+  lv_obj_center(fbl);
 
   // Same virtualized contact-list component as the Contacts tab; tap selects the
   // contact for the pending send/insert action instead of opening it.
@@ -1299,18 +1309,9 @@ void UITask::buildContactPickerScreen() {
 
 void UITask::rebuildPicker() {
   if (!_pick_list.scroll) return;
-  _pick_list.count = 0;
-  int total = mproxy::getNumContacts();
-  for (int i = 0; i < total && _pick_list.count < CONTACTS_MAX_ROWS; i++) {
-    ContactInfo c;
-    if (!mproxy::getContactByIdx(i, c)) continue;
-    if (_pick_filter[0] && !containsCI(c.name, _pick_filter)) continue;
-    _pick_list.rows[_pick_list.count].idx = (uint16_t)i;
-    _pick_list.rows[_pick_list.count].heard = c.lastmod;   // our clock (see rebuildContactsList)
-    _pick_list.rows[_pick_list.count].fav = (c.flags & CONTACT_FLAG_FAVOURITE) ? 1 : 0;
-    _pick_list.count++;
-  }
-  qsort(_pick_list.rows, _pick_list.count, sizeof(ContactDispRow), prow_cmp);
+  // Same shared category filter + order as the Contacts tab, with the picker's own
+  // search box.
+  fillContactDisplaySet(_pick_list, _pick_filter);
   clistRefresh(_pick_list, "No contacts.");
 }
 
