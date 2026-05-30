@@ -3659,6 +3659,14 @@ void UITask::refreshNodeInfo() {
   const NodePrefs* p = _node_prefs;
   char buf[700];
   int n = 0;
+#ifndef LVGL_GUI_VERSION
+  #define LVGL_GUI_VERSION "v?"
+#endif
+#ifndef FW_GIT_REV
+  #define FW_GIT_REV "nogit"
+#endif
+  n += snprintf(buf + n, sizeof(buf) - n, "MeshCore: %s\n", mproxy::firmwareVersion());
+  n += snprintf(buf + n, sizeof(buf) - n, "LVGL-GUI: %s (%s, %s)\n", LVGL_GUI_VERSION, FW_GIT_REV, __DATE__);
   n += snprintf(buf + n, sizeof(buf) - n, "Name: %s\n", p ? p->node_name : "?");
   n += snprintf(buf + n, sizeof(buf) - n, "Key: %.16s...\n", keyhex);
   if (p) n += snprintf(buf + n, sizeof(buf) - n, "Radio: %g MHz  SF%u  BW%g  CR%u  %ddBm\n",

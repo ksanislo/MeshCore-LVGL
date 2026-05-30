@@ -284,6 +284,8 @@ void pushEvent(const UiEvent& ev) {
   if (s_ev_q) xQueueSend(s_ev_q, &ev, 0);
 }
 
+const char* firmwareVersion() { return FIRMWARE_VERSION; }   // from MyMesh.h
+
 void updateStats(MyMesh& mesh) {
   NodeStats t;
   mesh.getNodeStats(t);                 // reads dispatcher/radio counters (backend core)

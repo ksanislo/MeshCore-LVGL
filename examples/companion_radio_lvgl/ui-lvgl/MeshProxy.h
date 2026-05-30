@@ -127,6 +127,7 @@ void endUiRead();
 uint32_t snapshotVersion();
 bool     hasConnection();
 const uint8_t* selfPubKey();
+const char* firmwareVersion();     // upstream MeshCore FIRMWARE_VERSION string
 int  getNumContacts();
 bool getContactByIdx(int idx, ContactInfo& out);
 const ContactInfo* lookupContactByPubKey(const uint8_t* key, int prefix_len);
