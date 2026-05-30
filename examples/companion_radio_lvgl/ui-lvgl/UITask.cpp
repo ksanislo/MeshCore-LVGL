@@ -1,6 +1,7 @@
 #include "UITask.h"
 #include "meshcore_assets.h"
 #include "MeshProxy.h"                  // UI talks to the backend only through this
+#include "ui_theme.h"                   // UI kit: color/layout tokens, avatar palette
 #include <helpers/AdvertDataHelpers.h>  // ADV_TYPE_*
 #include <helpers/ContactInfo.h>        // ContactInfo (read-model copies)
 #include <Utils.h>                      // mesh::Utils::toHex
@@ -25,7 +26,17 @@ extern "C" __attribute__((weak)) void board_set_backlight(uint8_t duty) { (void)
 
 static void sanitizeForFont(const char* in, char* out, size_t cap);
 static bool containsCI(const char* hay, const char* needle);
+static void firstGrapheme(const char* in, char* out, size_t cap);  // first UTF-8 codepoint (avatar glyph)
 static const lv_font_t* withEmoji(const lv_font_t* base);  // base font + emoji/unicode fallback
+
+// Type ramp: one place that maps a text role to a size (all emoji/unicode-capable).
+// hero=page name, title=screen header, heading=section/dialog title, body=default,
+// caption=metadata/secondary. Prefer these over naming a montserrat size directly.
+static const lv_font_t* fontHero();
+static const lv_font_t* fontTitle();
+static const lv_font_t* fontHeading();
+static const lv_font_t* fontBody();
+static const lv_font_t* fontCaption();
 
 UITask* UITask::_instance = NULL;
 
@@ -93,9 +104,6 @@ void UITask::dismiss_kb_cb(lv_event_t* e) {
   for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
 }
 
-// meshcore.io page background
-static constexpr uint32_t BG_HEX = 0x111827;
-
 static void styleAsDarkScreen(lv_obj_t* scr) {
   lv_obj_set_style_bg_color(scr, lv_color_hex(BG_HEX), 0);
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
@@ -103,7 +111,7 @@ static void styleAsDarkScreen(lv_obj_t* scr) {
   // text_font is inherited, so this gives every default-font field on the screen
   // (compose box, name/nickname inputs, channel list, search, etc.) emoji/unicode
   // support. Widgets with an explicit larger font wrap it via withEmoji() too.
-  lv_obj_set_style_text_font(scr, withEmoji(&lv_font_montserrat_14), 0);
+  lv_obj_set_style_text_font(scr, fontBody(), 0);
 }
 
 // ---- draggable scrollbar handle ------------------------------------------
@@ -187,8 +195,87 @@ static constexpr int HEADER_H     = 48;
 static constexpr int TABBAR_H     = 56;
 static constexpr int COMPOSE_H    = 50;
 static constexpr int SEARCH_BAR_H = 44;
-static constexpr uint32_t FG_HEX = 0xD1D5DB;  // tailwind gray-300
-static constexpr uint32_t DIM_HEX = 0x6B7280; // tailwind gray-500
+
+// Standard 36px square back-target (whole corner is tappable), arrow centered.
+lv_obj_t* UITask::makeBackButton(lv_obj_t* bar, lv_event_cb_t cb) {
+  lv_obj_t* back = lv_btn_create(bar);
+  lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_shadow_width(back, 0, 0);
+  lv_obj_set_style_pad_all(back, 0, 0);
+  lv_obj_set_size(back, 36, 36);
+  lv_obj_add_event_cb(back, cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* bl = lv_label_create(back);
+  lv_label_set_text(bl, LV_SYMBOL_LEFT);
+  lv_obj_set_style_text_color(bl, lv_color_hex(FG_HEX), 0);
+  lv_obj_center(bl);
+  return back;
+}
+
+// Standard screen header: fixed UI_SURFACE bar, flex row of [back][title(grows)].
+// Callers append right-side actions as further flex children (they sit to the right
+// of the grown title).
+lv_obj_t* UITask::makeHeaderBar(lv_obj_t* parent, const char* title, lv_event_cb_t back_cb) {
+  lv_obj_t* bar = lv_obj_create(parent);
+  lv_obj_set_size(bar, _screen_w, HEADER_H);
+  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
+  lv_obj_set_style_bg_color(bar, lv_color_hex(UI_SURFACE), 0);
+  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(bar, 0, 0);
+  lv_obj_set_style_radius(bar, 0, 0);
+  lv_obj_set_style_pad_hor(bar, 6, 0);
+  lv_obj_set_style_pad_ver(bar, 4, 0);
+  lv_obj_set_style_pad_column(bar, 6, 0);
+  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  makeBackButton(bar, back_cb);
+  if (title) {
+    lv_obj_t* bt = lv_label_create(bar);
+    lv_obj_set_flex_grow(bt, 1);
+    lv_label_set_long_mode(bt, LV_LABEL_LONG_DOT);
+    lv_label_set_text(bt, title);
+    lv_obj_set_style_text_color(bt, lv_color_hex(FG_HEX), 0);
+    lv_obj_set_style_text_font(bt, fontTitle(), 0);
+  }
+  return bar;
+}
+
+// Dim full-screen overlay on the top layer. Shared by every popup so the scrim and
+// tap-to-dismiss behave identically. tap_cb (optional) fires on a backdrop tap.
+lv_obj_t* UITask::makeBackdrop(lv_event_cb_t tap_cb) {
+  lv_obj_t* bd = lv_obj_create(lv_layer_top());
+  lv_obj_set_size(bd, _screen_w, _screen_h);
+  lv_obj_set_pos(bd, 0, 0);
+  lv_obj_set_style_bg_color(bd, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(bd, LV_OPA_60, 0);
+  lv_obj_set_style_border_width(bd, 0, 0);
+  lv_obj_set_style_pad_all(bd, 0, 0);
+  lv_obj_clear_flag(bd, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(bd, LV_OBJ_FLAG_CLICKABLE);   // swallow taps behind the popup
+  if (tap_cb) lv_obj_add_event_cb(bd, tap_cb, LV_EVENT_CLICKED, NULL);
+  return bd;
+}
+
+lv_obj_t* UITask::makeModalCard(lv_obj_t** backdrop_out, lv_event_cb_t backdrop_tap_cb) {
+  lv_obj_t* bd = makeBackdrop(backdrop_tap_cb);
+  lv_obj_t* card = lv_obj_create(bd);
+  lv_obj_set_width(card, LV_PCT(88));
+  lv_obj_set_height(card, LV_SIZE_CONTENT);
+  lv_obj_set_style_max_height(card, LV_PCT(85), 0);
+  lv_obj_center(card);
+  lv_obj_set_style_bg_color(card, lv_color_hex(UI_SURFACE), 0);
+  lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(card, 0, 0);
+  lv_obj_set_style_radius(card, 8, 0);
+  lv_obj_set_style_pad_all(card, 14, 0);
+  lv_obj_set_style_pad_row(card, 10, 0);
+  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+  lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);   // consume taps so backdrop dismiss doesn't fire
+
+  if (backdrop_out) *backdrop_out = bd;
+  return card;
+}
 
 lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_t* scr = lv_obj_create(NULL);
@@ -199,7 +286,7 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_t* header = lv_obj_create(scr);
   lv_obj_set_size(header, _screen_w, HEADER_H);
   lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 0);
-  lv_obj_set_style_bg_color(header, lv_color_hex(0x1F2937), 0);  // gray-800
+  lv_obj_set_style_bg_color(header, lv_color_hex(UI_SURFACE), 0);  // gray-800
   lv_obj_set_style_bg_opa(header, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(header, 0, 0);
   lv_obj_set_style_radius(header, 0, 0);
@@ -209,7 +296,7 @@ lv_obj_t* UITask::buildHomeScreen() {
   _header_label = lv_label_create(header);
   lv_label_set_text(_header_label, "MeshCore");
   lv_obj_set_style_text_color(_header_label, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(_header_label, &lv_font_montserrat_20, 0);
+  lv_obj_set_style_text_font(_header_label, fontTitle(), 0);
   lv_obj_align(_header_label, LV_ALIGN_LEFT_MID, 4, 0);
 
   // Live device clock (right side of the header), updated once a second in loop().
@@ -230,7 +317,7 @@ lv_obj_t* UITask::buildHomeScreen() {
 
   // tab bar styling
   lv_obj_t* tab_btns = lv_tabview_get_tab_btns(_tabview);
-  lv_obj_set_style_bg_color(tab_btns, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_color(tab_btns, lv_color_hex(UI_SURFACE), 0);
   lv_obj_set_style_text_color(tab_btns, lv_color_hex(DIM_HEX), 0);
   lv_obj_set_style_text_color(tab_btns, lv_color_hex(FG_HEX),
                               LV_PART_ITEMS | LV_STATE_CHECKED);
@@ -284,31 +371,7 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_label_set_text(fbl, LV_SYMBOL_LIST);
   lv_obj_center(fbl);
 
-  _contacts_table = lv_table_create(_tab_contacts);
-  lv_obj_set_width(_contacts_table, LV_PCT(100));
-  lv_obj_set_flex_grow(_contacts_table, 1);            // fill remaining height -> internal scroll
-  lv_obj_set_style_bg_color(_contacts_table, lv_color_hex(BG_HEX), 0);
-  lv_obj_set_style_bg_opa(_contacts_table, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(_contacts_table, 0, 0);
-  lv_obj_set_style_radius(_contacts_table, 0, 0);
-  lv_obj_set_style_bg_color(_contacts_table, lv_color_hex(BG_HEX), LV_PART_ITEMS);
-  lv_obj_set_style_bg_opa(_contacts_table, LV_OPA_COVER, LV_PART_ITEMS);
-  lv_obj_set_style_text_color(_contacts_table, lv_color_hex(FG_HEX), LV_PART_ITEMS);
-  lv_obj_set_style_text_font(_contacts_table, withEmoji(&lv_font_montserrat_14), LV_PART_ITEMS);
-  lv_obj_set_style_pad_top(_contacts_table, 10, LV_PART_ITEMS);
-  lv_obj_set_style_pad_bottom(_contacts_table, 10, LV_PART_ITEMS);
-  lv_obj_set_style_pad_left(_contacts_table, 8, LV_PART_ITEMS);
-  lv_obj_set_style_border_color(_contacts_table, lv_color_hex(0x374151), LV_PART_ITEMS);
-  lv_obj_set_style_border_width(_contacts_table, 1, LV_PART_ITEMS);
-  lv_obj_set_style_border_side(_contacts_table, LV_BORDER_SIDE_BOTTOM, LV_PART_ITEMS);
-  lv_table_set_col_cnt(_contacts_table, 2);
-  lv_table_set_col_width(_contacts_table, 0, _screen_w - 64);
-  lv_table_set_col_width(_contacts_table, 1, 56);
-  // lv_table reports the tapped cell via VALUE_CHANGED on release (and only when
-  // not scrolling), then clears the selection -- so CLICKED would see CELL_NONE.
-  lv_obj_add_event_cb(_contacts_table, contacts_table_cb, LV_EVENT_VALUE_CHANGED, NULL);
-  lv_obj_add_event_cb(_contacts_table, contacts_table_draw_cb, LV_EVENT_DRAW_PART_BEGIN, NULL);
-  _contacts_sb = attachScrollHandle(_contacts_table);
+  buildContactRows(_tab_contacts);
 
   // Search keyboard (hidden; overlays the home screen, like the settings one).
   _contacts_kb = lv_keyboard_create(scr);
@@ -357,7 +420,18 @@ static void formatLastSeen(char* out, size_t cap, uint32_t lastmod_secs, uint32_
 }
 
 static constexpr uint8_t CONTACT_FLAG_FAVOURITE = 0x01;  // matches firmware
-static constexpr uint32_t FAV_HEX = 0xFBBF24;            // amber-400 accent
+
+// Short route descriptor for a contact's outbound path: "Direct", "Flood", or
+// "N hops". NOTE: out_path_len is an ENCODED value (see Packet::isValidPathLen) --
+// low 6 bits = hop count, high 2 bits = hash_size-1 (bytes per hop). So 0x80 means
+// 0 hops / hash_size 3 = direct, NOT 128 bytes. Decode it; never treat it as a
+// raw length (that both miscounts and reads out of bounds on out_path[]).
+static void routeStatus(const ContactInfo& c, char* out, size_t cap) {
+  if (c.out_path_len == OUT_PATH_UNKNOWN) { snprintf(out, cap, "Flood"); return; }
+  int hops = c.out_path_len & 63;
+  if (hops == 0) { snprintf(out, cap, "Direct"); return; }
+  snprintf(out, cap, "%d hop%s", hops, hops == 1 ? "" : "s");
+}
 
 // (contactsSignature() moved to the backend — see mproxy::publishIfChanged in
 // MeshProxy.cpp. The UI now rebuilds when the snapshot version changes.)
@@ -428,7 +502,7 @@ int UITask::crow_cmp(const void* pa, const void* pb) {
 }
 
 void UITask::rebuildContactsList() {
-  if (!_contacts_table) return;
+  if (!_contacts_scroll) return;
   _contacts_dirty = false;
   _contacts_rebuilt_ms = millis();
 
@@ -451,63 +525,253 @@ void UITask::rebuildContactsList() {
   qsort(_crows, _crow_count, sizeof(ContactDispRow), crow_cmp);
 
   if (_crow_count == 0) {
-    lv_table_set_row_cnt(_contacts_table, 1);
-    lv_table_set_cell_value(_contacts_table, 0, 0,
-        mproxy::getNumContacts() > 0 ? "No contacts match." : "No contacts yet. Waiting for adverts...");
-    lv_table_set_cell_value(_contacts_table, 0, 1, "");
-    sb_update(_contacts_table, _contacts_sb);   // nothing to scroll -> hide thumb
+    lv_obj_set_height(_contacts_spacer, 0);
+    for (int s = 0; s < _row_pool_n; s++) {
+      lv_obj_add_flag(_rowpool[s].root, LV_OBJ_FLAG_HIDDEN);
+      _row_bound_idx[s] = -1;
+    }
+    if (_contacts_empty) {
+      lv_label_set_text(_contacts_empty, mproxy::getNumContacts() > 0
+          ? "No contacts match." : "No contacts yet.\nWaiting for adverts...");
+      lv_obj_clear_flag(_contacts_empty, LV_OBJ_FLAG_HIDDEN);
+    }
+    sb_update(_contacts_scroll, _contacts_sb);   // nothing to scroll -> hide thumb
     return;
   }
+  if (_contacts_empty) lv_obj_add_flag(_contacts_empty, LV_OBJ_FLAG_HIDDEN);
 
-  uint32_t now = mproxy::rtcSeconds();
-  lv_table_set_row_cnt(_contacts_table, _crow_count);
-  for (int r = 0; r < _crow_count; r++) {
-    ContactInfo c;
-    if (!mproxy::getContactByIdx(_crows[r].idx, c)) continue;
-    char dn[CHAT_PEER_NAME_MAX];
-    displayName(c.id.pub_key, c.name, dn, sizeof(dn));
-    char clean[CHAT_PEER_NAME_MAX + 4];
-    sanitizeForFont(dn[0] ? dn : "(unnamed)", clean, sizeof(clean));
-    char cell[CHAT_PEER_NAME_MAX + 12];
-    snprintf(cell, sizeof(cell), "%s %s", contactSymbol(c.type), clean);
-    lv_table_set_cell_value(_contacts_table, r, 0, cell);
-    char ago[16];
-    // lastmod = when WE last heard them (our clock). last_advert_timestamp is
-    // THEIR clock and can't be trusted (bad RTCs report wild times).
-    formatLastSeen(ago, sizeof(ago), c.lastmod, now);
-    lv_table_set_cell_value(_contacts_table, r, 1, ago);
-  }
-  lv_obj_scroll_to_y(_contacts_table, 0, LV_ANIM_OFF);
-  lv_obj_update_layout(_contacts_table);   // refresh scroll range -> resize/show the drag thumb
-  sb_update(_contacts_table, _contacts_sb);
+  // Size the virtual content to the full list, reset to the top, and force a full
+  // re-window (contact data / unread state may have changed under the visible rows).
+  lv_obj_set_height(_contacts_spacer, _crow_count * UI_CONTACT_ROW_H);
+  lv_obj_scroll_to_y(_contacts_scroll, 0, LV_ANIM_OFF);
+  for (int s = 0; s < _row_pool_n; s++) _row_bound_idx[s] = -1;
+  _first_visible = -1;
+  relayoutContactRows();
+  lv_obj_update_layout(_contacts_scroll);   // refresh scroll range -> drag thumb
+  sb_update(_contacts_scroll, _contacts_sb);
 }
 
-void UITask::contacts_table_cb(lv_event_t* e) {
-  if (!_instance) return;
-  uint16_t row = 0, col = 0;
-  lv_table_get_selected_cell(lv_event_get_target(e), &row, &col);
-  if (row == LV_TABLE_CELL_NONE || (int)row >= _instance->_crow_count) return;
+// Unread marker: a bold red right-pointing chevron ">" (a concave dart) drawn once
+// into a shared image and layered between the avatar circle and its letter. Spans the
+// avatar's left half: rear arms at the box's left edge 2px from top/bottom, tip in at
+// the center (behind the letter), back notch pushed in ~1/3 so it stays thick. A thin
+// background-colored outline separates the red from the avatar color underneath.
+#define UNREAD_MARK_W 22
+#define UNREAD_MARK_H 40
+static uint8_t s_mark_buf[LV_CANVAS_BUF_SIZE_TRUE_COLOR_ALPHA(UNREAD_MARK_W, UNREAD_MARK_H)];
+static lv_img_dsc_t s_mark_img;
+static void buildUnreadMark() {
+  static bool built = false;
+  if (built) return;
+  built = true;
+  lv_obj_t* cv = lv_canvas_create(lv_layer_top());   // temp; draw is immediate into the buffer
+  lv_canvas_set_buffer(cv, s_mark_buf, UNREAD_MARK_W, UNREAD_MARK_H, LV_IMG_CF_TRUE_COLOR_ALPHA);
+  lv_canvas_fill_bg(cv, lv_color_black(), LV_OPA_TRANSP);
+  // top rear arm -> front tip (box center) -> bottom rear arm -> back notch (1/3 in).
+  lv_point_t pts[4] = {
+    { 0, 2 }, { 13, UNREAD_MARK_H / 2 }, { 0, UNREAD_MARK_H - 2 }, { 4, UNREAD_MARK_H / 2 },
+  };
+  // Outline FIRST: a thick BG-colored loop straddling the silhouette edges. The red
+  // fill (drawn next) then covers the inner half, leaving the outline OUTSIDE the red
+  // -- so the points keep full oomph instead of being masked. Where the marker
+  // overhangs onto the row background the BG outline blends away, so it only reads
+  // where the red sits over the avatar circle.
+  lv_draw_line_dsc_t ld; lv_draw_line_dsc_init(&ld);
+  ld.color = lv_color_hex(BG_HEX); ld.width = 2; ld.round_start = 1; ld.round_end = 1;
+  lv_point_t loop[5] = { pts[0], pts[1], pts[2], pts[3], pts[0] };
+  lv_canvas_draw_line(cv, loop, 5, &ld);
+  lv_draw_rect_dsc_t d; lv_draw_rect_dsc_init(&d);
+  d.bg_color = lv_color_hex(0xFF0000); d.bg_opa = LV_OPA_COVER;   // pure red -- with the outline it has the pop
+  // LVGL's canvas polygon fill is convex-only; this chevron is concave (the notch),
+  // so fill it as two triangles meeting at the front spine (notch <-> tip).
+  lv_point_t tri_top[3] = { pts[0], pts[1], pts[3] };
+  lv_point_t tri_bot[3] = { pts[2], pts[1], pts[3] };
+  lv_canvas_draw_polygon(cv, tri_top, 3, &d);
+  lv_canvas_draw_polygon(cv, tri_bot, 3, &d);
+  lv_obj_del(cv);
+  s_mark_img.header.cf = LV_IMG_CF_TRUE_COLOR_ALPHA;
+  s_mark_img.header.w  = UNREAD_MARK_W;
+  s_mark_img.header.h  = UNREAD_MARK_H;
+  s_mark_img.data_size = sizeof(s_mark_buf);
+  s_mark_img.data      = s_mark_buf;
+}
+
+// Create the scroll container, content spacer, empty-placeholder, and the recycled
+// pool of row widgets (avatar + name + last-seen + unread marker).
+void UITask::buildContactRows(lv_obj_t* parent) {
+  buildUnreadMark();
+  _contacts_scroll = lv_obj_create(parent);
+  lv_obj_set_width(_contacts_scroll, LV_PCT(100));
+  lv_obj_set_flex_grow(_contacts_scroll, 1);            // fill remaining height
+  lv_obj_set_style_bg_color(_contacts_scroll, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(_contacts_scroll, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(_contacts_scroll, 0, 0);
+  lv_obj_set_style_radius(_contacts_scroll, 0, 0);
+  lv_obj_set_style_pad_all(_contacts_scroll, 0, 0);
+  lv_obj_set_scroll_dir(_contacts_scroll, LV_DIR_VER);
+  // Deliberately NO layout: rows are positioned manually in content space so they
+  // can be recycled (a layout would override our lv_obj_set_y).
+
+  _contacts_spacer = lv_obj_create(_contacts_scroll);
+  lv_obj_remove_style_all(_contacts_spacer);
+  lv_obj_set_pos(_contacts_spacer, 0, 0);
+  lv_obj_set_size(_contacts_spacer, 1, 0);
+  lv_obj_clear_flag(_contacts_spacer, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+  _contacts_empty = lv_label_create(_contacts_scroll);
+  lv_obj_set_style_text_color(_contacts_empty, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_align(_contacts_empty, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_add_flag(_contacts_empty, LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN);
+  lv_obj_align(_contacts_empty, LV_ALIGN_TOP_MID, 0, 16);
+
+  int pool = _screen_h / UI_CONTACT_ROW_H + 3;   // cover the viewport + overscan
+  if (pool > CONTACT_POOL_MAX) pool = CONTACT_POOL_MAX;
+  if (pool < 1) pool = 1;
+  _row_pool_n = pool;
+
+  for (int s = 0; s < _row_pool_n; s++) {
+    _row_bound_idx[s] = -1;
+    lv_obj_t* row = lv_obj_create(_contacts_scroll);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), UI_CONTACT_ROW_H);
+    lv_obj_set_style_bg_color(row, lv_color_hex(BG_HEX), 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(row, lv_color_hex(UI_BORDER), 0);
+    lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_pad_left(row, 8, 0);
+    lv_obj_set_style_pad_right(row, 8, 0);
+    lv_obj_set_style_pad_column(row, 10, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_event_cb(row, contact_row_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* av = lv_obj_create(row);
+    lv_obj_remove_style_all(av);
+    lv_obj_set_size(av, UI_AVATAR_D, UI_AVATAR_D);
+    lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    // Unread marker: the shared red chevron, a child of the avatar created BEFORE the
+    // letter, so the draw order is circle -> dart -> letter (the letter stays on top
+    // and crisp). Pushed to the avatar's left edge so the rear arms overhang the
+    // circle's curve, tip aimed in at the letter.
+    lv_obj_t* dot = lv_img_create(av);
+    lv_img_set_src(dot, &s_mark_img);
+    lv_obj_add_flag(dot, LV_OBJ_FLAG_FLOATING);
+    lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_align(dot, LV_ALIGN_LEFT_MID, 0, 0);   // canvas maps 1:1 onto the avatar's left half
+
+    lv_obj_t* avl = lv_label_create(av);
+    lv_obj_center(avl);
+    lv_obj_set_style_text_color(avl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(avl, fontHeading(), 0);
+
+    lv_obj_t* nm = lv_label_create(row);
+    lv_obj_set_flex_grow(nm, 1);
+    lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(nm, fontBody(), 0);
+    lv_obj_set_style_text_color(nm, lv_color_hex(FG_HEX), 0);
+
+    lv_obj_t* sn = lv_label_create(row);
+    lv_obj_set_style_text_color(sn, lv_color_hex(DIM_HEX), 0);
+    lv_obj_set_style_text_font(sn, fontBody(), 0);
+
+    _rowpool[s].root = row; _rowpool[s].avatar = av; _rowpool[s].avatar_lbl = avl;
+    _rowpool[s].name = nm; _rowpool[s].seen = sn; _rowpool[s].dot = dot;
+  }
+
+  _contacts_sb = attachScrollHandle(_contacts_scroll);
+  lv_obj_add_event_cb(_contacts_scroll, contacts_scroll_cb, LV_EVENT_SCROLL, NULL);
+}
+
+// Bind pool slot `slot` to display index `disp` (a _crows entry).
+void UITask::bindContactRow(int slot, int disp) {
+  ContactRow& w = _rowpool[slot];
   ContactInfo c;
-  if (!mproxy::getContactByIdx(_instance->_crows[row].idx, c)) return;
+  if (!mproxy::getContactByIdx(_crows[disp].idx, c)) return;
+  char dn[CHAT_PEER_NAME_MAX];
+  displayName(c.id.pub_key, c.name, dn, sizeof(dn));
+  char clean[CHAT_PEER_NAME_MAX + 4];
+  sanitizeForFont(dn[0] ? dn : "(unnamed)", clean, sizeof(clean));
+  lv_label_set_text(w.name, clean);
+
+  // Chat contacts get a name-seeded color circle + first grapheme; repeater/room/
+  // sensor keep their type glyph on a neutral circle.
+  bool is_chat = (c.type == ADV_TYPE_CHAT || c.type == 0);
+  if (is_chat) {
+    char g[8]; firstGrapheme(clean, g, sizeof(g));
+    lv_label_set_text(w.avatar_lbl, g[0] ? g : "?");
+    lv_obj_set_style_bg_color(w.avatar, lv_color_hex(nameColor(dn)), 0);
+  } else {
+    lv_label_set_text(w.avatar_lbl, contactSymbol(c.type));
+    lv_obj_set_style_bg_color(w.avatar, lv_color_hex(UI_AVATAR_NEUT), 0);
+  }
+
+  char ago[16];   // lastmod = OUR clock (last_advert_timestamp is the remote's, untrusted)
+  formatLastSeen(ago, sizeof(ago), c.lastmod, mproxy::rtcSeconds());
+  lv_label_set_text(w.seen, ago);
+
+  char ckey[CHAT_PEER_NAME_MAX];
+  convKey(c.id.pub_key, false, ckey, sizeof(ckey));
+  bool unread = isUnread(ckey);
+  bool fav = (c.flags & CONTACT_FLAG_FAVOURITE);
+  if (unread) lv_obj_clear_flag(w.dot, LV_OBJ_FLAG_HIDDEN);
+  else        lv_obj_add_flag(w.dot, LV_OBJ_FLAG_HIDDEN);
+  // The red chevron carries the unread signal now, so the name keeps its normal
+  // color (amber for favourites, default otherwise).
+  lv_obj_set_style_text_color(w.name, lv_color_hex(fav ? FAV_HEX : FG_HEX), 0);
+
+  lv_obj_set_user_data(w.root, (void*)(intptr_t)disp);
+}
+
+// Re-window the pool to the current scroll position. A display index maps to slot
+// (disp % pool_n), so scrolling by one row rebinds exactly one slot.
+void UITask::relayoutContactRows() {
+  if (!_contacts_scroll || _row_pool_n == 0 || _crow_count == 0) return;
+  int sy = lv_obj_get_scroll_y(_contacts_scroll);
+  if (sy < 0) sy = 0;
+  int top = sy / UI_CONTACT_ROW_H;
+  if (top == _first_visible) return;   // window unchanged -> no churn
+  _first_visible = top;
+  for (int i = 0; i < _row_pool_n; i++) {
+    int disp = top + i;
+    int slot = disp % _row_pool_n;
+    ContactRow& w = _rowpool[slot];
+    if (disp >= _crow_count) {
+      if (_row_bound_idx[slot] != -1) {
+        lv_obj_add_flag(w.root, LV_OBJ_FLAG_HIDDEN);
+        _row_bound_idx[slot] = -1;
+      }
+      continue;
+    }
+    if (_row_bound_idx[slot] != disp) {
+      bindContactRow(slot, disp);
+      lv_obj_set_y(w.root, disp * UI_CONTACT_ROW_H);
+      lv_obj_clear_flag(w.root, LV_OBJ_FLAG_HIDDEN);
+      _row_bound_idx[slot] = disp;
+    }
+  }
+}
+
+void UITask::contacts_scroll_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->relayoutContactRows();
+}
+
+void UITask::contact_row_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* row = lv_event_get_target(e);
+  int disp = (int)(intptr_t)lv_obj_get_user_data(row);
+  if (disp < 0 || disp >= _instance->_crow_count) return;
+  ContactInfo c;
+  if (!mproxy::getContactByIdx(_instance->_crows[disp].idx, c)) return;
   _instance->_chat_is_channel = false;
   memcpy(_instance->_chat_pubkey, c.id.pub_key, 6);
   _instance->openChat(c.name);
-}
-
-void UITask::contacts_table_draw_cb(lv_event_t* e) {
-  if (!_instance) return;
-  lv_obj_draw_part_dsc_t* dsc = lv_event_get_draw_part_dsc(e);
-  if (dsc->part != LV_PART_ITEMS || dsc->label_dsc == NULL) return;
-  uint16_t cols = lv_table_get_col_cnt(lv_event_get_target(e));
-  uint32_t row = dsc->id / cols;
-  uint32_t col = dsc->id % cols;
-  if (col == 1) {
-    dsc->label_dsc->color = lv_color_hex(DIM_HEX);                 // age column
-  } else if ((int)row < _instance->_crow_count && _instance->_crows[row].fav) {
-    dsc->label_dsc->color = lv_color_hex(FAV_HEX);                 // favourite name
-  } else {
-    dsc->label_dsc->color = lv_color_hex(FG_HEX);
-  }
 }
 
 void UITask::contacts_search_ta_cb(lv_event_t* e) {
@@ -564,36 +828,19 @@ static lv_obj_t* addRadioRow(lv_obj_t* grp, const char* text, int value, lv_even
 static lv_obj_t* addFilterHeader(lv_obj_t* card, const char* text) {
   lv_obj_t* h = lv_label_create(card);
   lv_label_set_text(h, text);
-  lv_obj_set_style_text_color(h, lv_color_hex(0x60A5FA), 0);
-  lv_obj_set_style_text_font(h, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_color(h, lv_color_hex(UI_ACCENT), 0);
+  lv_obj_set_style_text_font(h, fontHeading(), 0);
   lv_obj_set_style_pad_top(h, 4, 0);
   return h;
 }
 
 void UITask::showContactsFilter() {
   if (!_cfilt_popup) {
-    _cfilt_popup = lv_obj_create(lv_layer_top());
-    lv_obj_set_size(_cfilt_popup, _screen_w, _screen_h);
-    lv_obj_set_pos(_cfilt_popup, 0, 0);
-    lv_obj_set_style_bg_color(_cfilt_popup, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(_cfilt_popup, LV_OPA_50, 0);
-    lv_obj_set_style_border_width(_cfilt_popup, 0, 0);
-    lv_obj_set_style_pad_all(_cfilt_popup, 0, 0);
-    lv_obj_add_flag(_cfilt_popup, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(_cfilt_popup, [](lv_event_t* ev) {  // tap backdrop to close
-      if (_instance && lv_event_get_target(ev) == _instance->_cfilt_popup)
-        lv_obj_add_flag(_instance->_cfilt_popup, LV_OBJ_FLAG_HIDDEN);
-    }, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t* card = lv_obj_create(_cfilt_popup);
+    lv_obj_t* card = makeModalCard(&_cfilt_popup, [](lv_event_t* ev) {  // tap backdrop to close
+      (void)ev; if (_instance) lv_obj_add_flag(_instance->_cfilt_popup, LV_OBJ_FLAG_HIDDEN);
+    });
     lv_obj_set_width(card, LV_PCT(80));
-    lv_obj_set_height(card, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_height(card, LV_PCT(90), 0);
     lv_obj_align(card, LV_ALIGN_TOP_RIGHT, -6, HEADER_H + 6);  // drop down from the filter button
-    lv_obj_set_style_bg_color(card, lv_color_hex(0x1F2937), 0);
-    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(card, 0, 0);
-    lv_obj_set_style_radius(card, 8, 0);
     lv_obj_set_style_pad_all(card, 10, 0);
     lv_obj_set_style_pad_row(card, 2, 0);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
@@ -698,7 +945,7 @@ void UITask::rebuildChannelsList() {
   {
     lv_obj_t* addb = lv_list_add_btn(_channels_list, LV_SYMBOL_PLUS, "New channel");
     lv_obj_set_style_bg_color(addb, lv_color_hex(BG_HEX), 0);
-    lv_obj_set_style_text_color(addb, lv_color_hex(0x60A5FA), 0);
+    lv_obj_set_style_text_color(addb, lv_color_hex(UI_ACCENT), 0);
     lv_obj_set_style_border_color(addb, lv_color_hex(0x374151), 0);
     lv_obj_set_style_border_side(addb, LV_BORDER_SIDE_BOTTOM, 0);
     lv_obj_set_style_border_width(addb, 1, 0);
@@ -711,13 +958,16 @@ void UITask::rebuildChannelsList() {
     ChannelDetails ch;
     if (!mproxy::getChannel(idx, ch) || ch.name[0] == 0) continue;
 
+    char ckey[CHAT_PEER_NAME_MAX];
+    convKey(ch.channel.secret, true, ckey, sizeof(ckey));
+    bool unread = isUnread(ckey);
     char cname[CHAT_PEER_NAME_MAX + 4];
     sanitizeForFont(ch.name, cname, sizeof(cname));
-    char label[48];
-    snprintf(label, sizeof(label), "# %s", cname);
+    char label[56];
+    snprintf(label, sizeof(label), "%s# %s", unread ? LV_SYMBOL_BELL " " : "", cname);
     lv_obj_t* btn = lv_list_add_btn(_channels_list, NULL, label);
     lv_obj_set_style_bg_color(btn, lv_color_hex(BG_HEX), 0);
-    lv_obj_set_style_text_color(btn, lv_color_hex(FG_HEX), 0);
+    lv_obj_set_style_text_color(btn, lv_color_hex(unread ? UI_UNREAD : FG_HEX), 0);
     lv_obj_set_style_border_color(btn, lv_color_hex(0x374151), 0);
     lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, 0);
     lv_obj_set_style_border_width(btn, 1, 0);
@@ -865,14 +1115,14 @@ void UITask::ensureInsertPopup() {
   lv_obj_set_height(_insert_list, LV_SIZE_CONTENT);
   lv_obj_set_style_max_height(_insert_list, LV_PCT(72), 0);
   lv_obj_center(_insert_list);
-  lv_obj_set_style_bg_color(_insert_list, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_color(_insert_list, lv_color_hex(UI_SURFACE), 0);
   lv_obj_set_style_border_width(_insert_list, 0, 0);
 
   lv_obj_add_flag(_insert_popup, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void styleMenuBtn(lv_obj_t* b) {
-  lv_obj_set_style_bg_color(b, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_color(b, lv_color_hex(UI_SURFACE), 0);
   lv_obj_set_style_text_color(b, lv_color_hex(0xF3F4F6), 0);
   lv_obj_set_style_border_color(b, lv_color_hex(0x374151), 0);
   lv_obj_set_style_border_side(b, LV_BORDER_SIDE_BOTTOM, 0);
@@ -922,7 +1172,7 @@ void UITask::buildContactPickerScreen() {
   lv_obj_t* bar = lv_obj_create(_pick_popup);
   lv_obj_set_width(bar, LV_PCT(100));
   lv_obj_set_height(bar, HEADER_H);
-  lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_color(bar, lv_color_hex(UI_SURFACE), 0);
   lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(bar, 0, 0);
   lv_obj_set_style_radius(bar, 0, 0);
@@ -930,7 +1180,7 @@ void UITask::buildContactPickerScreen() {
   lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
   _pick_title = lv_label_create(bar);
   lv_obj_set_style_text_color(_pick_title, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(_pick_title, &lv_font_montserrat_20, 0);
+  lv_obj_set_style_text_font(_pick_title, fontTitle(), 0);
   lv_obj_align(_pick_title, LV_ALIGN_LEFT_MID, 4, 0);
   lv_obj_t* close = lv_btn_create(bar);
   lv_obj_set_style_bg_opa(close, LV_OPA_TRANSP, 0);
@@ -966,7 +1216,7 @@ void UITask::buildContactPickerScreen() {
   lv_obj_set_style_bg_color(_pick_table, lv_color_hex(BG_HEX), LV_PART_ITEMS);
   lv_obj_set_style_bg_opa(_pick_table, LV_OPA_COVER, LV_PART_ITEMS);
   lv_obj_set_style_text_color(_pick_table, lv_color_hex(FG_HEX), LV_PART_ITEMS);
-  lv_obj_set_style_text_font(_pick_table, withEmoji(&lv_font_montserrat_14), LV_PART_ITEMS);
+  lv_obj_set_style_text_font(_pick_table, fontBody(), LV_PART_ITEMS);
   lv_obj_set_style_pad_top(_pick_table, 10, LV_PART_ITEMS);
   lv_obj_set_style_pad_bottom(_pick_table, 10, LV_PART_ITEMS);
   lv_obj_set_style_pad_left(_pick_table, 8, LV_PART_ITEMS);
@@ -1469,7 +1719,14 @@ static const lv_font_t* withEmoji(const lv_font_t* base) {
   return &cache[n++].font;
 }
 
-static const lv_font_t* msgFont() { return withEmoji(&lv_font_montserrat_14); }
+static const lv_font_t* msgFont() { return fontBody(); }
+
+// Type ramp definitions (see forward decls up top).
+static const lv_font_t* fontHero()    { return withEmoji(&lv_font_montserrat_28); }
+static const lv_font_t* fontTitle()   { return withEmoji(&lv_font_montserrat_20); }
+static const lv_font_t* fontHeading() { return withEmoji(&lv_font_montserrat_16); }
+static const lv_font_t* fontBody()    { return withEmoji(&lv_font_montserrat_14); }
+static const lv_font_t* fontCaption() { return withEmoji(&lv_font_montserrat_12); }
 
 static void addMessageText(lv_obj_t* bubble, const char* text) {
   static const uint32_t FG_TEXT = 0xF3F4F6;
@@ -1661,7 +1918,7 @@ void UITask::buildContactCard(lv_obj_t* bubble, const ChatMessage* m,
   lv_obj_t* nm = lv_label_create(bubble);
   lv_label_set_text(nm, sname);
   lv_obj_set_style_text_color(nm, lv_color_hex(0xF3F4F6), 0);
-  lv_obj_set_style_text_font(nm, withEmoji(&lv_font_montserrat_14), 0);
+  lv_obj_set_style_text_font(nm, fontBody(), 0);
 
   char hex[2 * PUB_KEY_SIZE + 1];
   mesh::Utils::toHex(hex, pubkey, PUB_KEY_SIZE);
@@ -1804,7 +2061,7 @@ void UITask::rebuildChatHistory() {
       sanitizeForFont(m->sender[0] ? m->sender : "?", sname, sizeof(sname));
       lv_label_set_text(name, sname);
       lv_obj_set_style_text_color(name, lv_color_hex(0x9CA3AF), 0);  // gray-400
-      lv_obj_set_style_text_font(name, withEmoji(&lv_font_montserrat_12), 0);
+      lv_obj_set_style_text_font(name, fontCaption(), 0);
     }
 
     // Full-width row wrapper so we can left/right-align the bubble inside it.
@@ -1823,7 +2080,7 @@ void UITask::rebuildChatHistory() {
     lv_obj_set_style_border_width(bubble, 0, 0);
     lv_obj_set_style_radius(bubble, 10, 0);
     lv_obj_clear_flag(bubble, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(bubble, lv_color_hex(m->outgoing ? 0x2563EB : 0x374151), 0);
+    lv_obj_set_style_bg_color(bubble, lv_color_hex(m->outgoing ? UI_MSG_OUT : UI_MSG_IN), 0);
     lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, 0);
     lv_obj_align(bubble, m->outgoing ? LV_ALIGN_TOP_RIGHT : LV_ALIGN_TOP_LEFT, 0, 0);
 
@@ -1875,7 +2132,7 @@ void UITask::rebuildChatHistory() {
       lv_label_set_text(tl, ftxt);
       lv_obj_set_width(tl, LV_PCT(100));
       lv_obj_set_style_text_align(tl, m->outgoing ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
-      lv_obj_set_style_text_color(tl, lv_color_hex(failed ? 0xF87171 : DIM_HEX), 0);
+      lv_obj_set_style_text_color(tl, lv_color_hex(failed ? UI_ERROR : DIM_HEX), 0);
       lv_obj_set_style_text_font(tl, &lv_font_montserrat_12, 0);
       if (sending) _sending_lbl = tl;  // animate this one's dots in loop()
     }
@@ -1891,6 +2148,39 @@ void UITask::rebuildChatHistory() {
   sb_update(_chat_history, _chat_sb);
 }
 
+// Refresh the chat header (name + avatar + route status) from the current snapshot.
+// Called on open and again whenever the snapshot changes while the chat is on screen,
+// so a learned/changed route or rename shows up live.
+void UITask::updateChatHeader() {
+  if (!_chat_title) return;
+  char dn[CHAT_PEER_NAME_MAX];
+  const char* shown = _chat_is_channel ? _chat_peer
+                                       : displayName(_chat_pubkey, _chat_peer, dn, sizeof(dn));
+  char tname[CHAT_PEER_NAME_MAX + 4];
+  sanitizeForFont(shown, tname, sizeof(tname));
+  lv_label_set_text(_chat_title, tname);
+
+  if (_chat_is_channel) {
+    lv_label_set_text(_chat_avatar_lbl, "#");
+    lv_obj_set_style_bg_color(_chat_avatar, lv_color_hex(UI_AVATAR_NEUT), 0);
+    lv_label_set_text(_chat_status, "Channel");
+    return;
+  }
+  const ContactInfo* c = mproxy::lookupContactByPubKey(_chat_pubkey, 6);
+  if (!c || c->type == ADV_TYPE_CHAT || c->type == 0) {
+    char g[8]; firstGrapheme(tname, g, sizeof(g));
+    lv_label_set_text(_chat_avatar_lbl, g[0] ? g : "?");
+    lv_obj_set_style_bg_color(_chat_avatar, lv_color_hex(nameColor(shown)), 0);
+  } else {
+    lv_label_set_text(_chat_avatar_lbl, contactSymbol(c->type));
+    lv_obj_set_style_bg_color(_chat_avatar, lv_color_hex(UI_AVATAR_NEUT), 0);
+  }
+  char rs[24];
+  if (c) routeStatus(*c, rs, sizeof(rs));
+  else   snprintf(rs, sizeof(rs), "Flood");
+  lv_label_set_text(_chat_status, rs);
+}
+
 void UITask::openChat(const char* peer_name) {
   strncpy(_chat_peer, peer_name ? peer_name : "", CHAT_PEER_NAME_MAX - 1);
   _chat_peer[CHAT_PEER_NAME_MAX - 1] = 0;
@@ -1901,39 +2191,63 @@ void UITask::openChat(const char* peer_name) {
     styleAsDarkScreen(_chat_screen);
     lv_obj_set_style_pad_all(_chat_screen, 0, 0);
 
-    // Fixed top bar (back + title).
+    // Fixed top bar: back | avatar | (name / route status) | kebab.
     lv_obj_t* bar = lv_obj_create(_chat_screen);
     lv_obj_set_size(bar, _screen_w, HEADER_H);
     lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(UI_SURFACE), 0);
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_style_radius(bar, 0, 0);
-    lv_obj_set_style_pad_all(bar, 6, 0);
+    lv_obj_set_style_pad_hor(bar, 6, 0);
+    lv_obj_set_style_pad_ver(bar, 4, 0);
+    lv_obj_set_style_pad_column(bar, 8, 0);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    lv_obj_t* back = lv_btn_create(bar);
-    lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_shadow_width(back, 0, 0);
-    lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_add_event_cb(back, chat_back_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t* back_lbl = lv_label_create(back);
-    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
-    lv_obj_set_style_text_color(back_lbl, lv_color_hex(FG_HEX), 0);
+    makeBackButton(bar, chat_back_cb);
 
-    _chat_title = lv_label_create(bar);
+    // Avatar circle -- same branding as the contacts list (set per-open in openChat).
+    _chat_avatar = lv_obj_create(bar);
+    lv_obj_remove_style_all(_chat_avatar);
+    lv_obj_set_size(_chat_avatar, 34, 34);
+    lv_obj_set_style_radius(_chat_avatar, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(_chat_avatar, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(_chat_avatar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    _chat_avatar_lbl = lv_label_create(_chat_avatar);
+    lv_obj_center(_chat_avatar_lbl);
+    lv_obj_set_style_text_color(_chat_avatar_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(_chat_avatar_lbl, fontHeading(), 0);
+
+    // Name (top) + route status (bottom). Tap anywhere here -> Contact Info.
+    lv_obj_t* col = lv_obj_create(bar);
+    lv_obj_remove_style_all(col);
+    lv_obj_set_flex_grow(col, 1);
+    lv_obj_set_height(col, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(col, 1, 0);
+    lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(col, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(col, cinfo_name_clicked_cb, LV_EVENT_CLICKED, NULL);
+
+    _chat_title = lv_label_create(col);
+    lv_obj_set_width(_chat_title, LV_PCT(100));
+    lv_label_set_long_mode(_chat_title, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(_chat_title, lv_color_hex(FG_HEX), 0);
-    lv_obj_set_style_text_font(_chat_title, withEmoji(&lv_font_montserrat_20), 0);
-    lv_obj_align(_chat_title, LV_ALIGN_LEFT_MID, 40, 0);
-    // Tap the contact name to open Contact Info (no-op for channels).
-    lv_obj_add_flag(_chat_title, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(_chat_title, cinfo_name_clicked_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_style_text_font(_chat_title, fontHeading(), 0);
 
-    // Overflow (kebab) menu, right-aligned.
+    _chat_status = lv_label_create(col);
+    lv_obj_set_width(_chat_status, LV_PCT(100));
+    lv_label_set_long_mode(_chat_status, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(_chat_status, lv_color_hex(DIM_HEX), 0);
+    lv_obj_set_style_text_font(_chat_status, fontCaption(), 0);
+
+    // Overflow (kebab) menu.
     lv_obj_t* kebab = lv_btn_create(bar);
     lv_obj_set_style_bg_opa(kebab, LV_OPA_TRANSP, 0);
     lv_obj_set_style_shadow_width(kebab, 0, 0);
-    lv_obj_align(kebab, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_pad_all(kebab, 4, 0);
     lv_obj_add_event_cb(kebab, chat_kebab_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t* kl = lv_label_create(kebab);
     lv_label_set_text(kl, LV_SYMBOL_LIST);
@@ -1981,7 +2295,7 @@ void UITask::openChat(const char* peer_name) {
 
     // Fixed compose band: textarea (grows) + send button.
     _chat_compose = lv_obj_create(_chat_screen);
-    lv_obj_set_style_bg_color(_chat_compose, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_bg_color(_chat_compose, lv_color_hex(UI_SURFACE), 0);
     lv_obj_set_style_bg_opa(_chat_compose, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(_chat_compose, 0, 0);
     lv_obj_set_style_radius(_chat_compose, 0, 0);
@@ -2030,12 +2344,7 @@ void UITask::openChat(const char* peer_name) {
   lv_textarea_set_text(_chat_input, "");
   layoutChatBody(false);  // keyboard hidden on (re)open
 
-  char dn[CHAT_PEER_NAME_MAX];
-  const char* shown = _chat_is_channel ? _chat_peer
-                                       : displayName(_chat_pubkey, _chat_peer, dn, sizeof(dn));
-  char tname[CHAT_PEER_NAME_MAX + 4];
-  sanitizeForFont(shown, tname, sizeof(tname));
-  lv_label_set_text(_chat_title, tname);
+  updateChatHeader();   // name + avatar + route status (also refreshed live, see loop())
 
   // Stable per-conversation storage key (pubkey for contacts, channel secret for channels).
   if (_chat_is_channel) {
@@ -2044,6 +2353,13 @@ void UITask::openChat(const char* peer_name) {
     else _chat_key[0] = 0;
   } else {
     convKey(_chat_pubkey, false, _chat_key, sizeof(_chat_key));
+  }
+
+  // Opening a conversation marks it read; drop any unread flag + repaint its list.
+  if (_chat_key[0]) {
+    clearUnread(_chat_key);
+    if (_chat_is_channel) _channels_pending = true;
+    else                  _contacts_dirty = true;
   }
 
   // Remember the contact type so the compose bar / kebab can offer login + CLI for
@@ -2170,6 +2486,15 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   lv_timer_t* t = lv_timer_create(splash_dismiss_cb, 2500, this);
   lv_timer_set_repeat_count(t, 1);
 
+  ensureBanner();   // pre-build so the first notification frame stays light
+
+#ifdef PIN_BUZZER
+  // Notification chimes. quiet() honors the persisted buzzer_quiet; the genericBuzzer
+  // also early-returns when quiet, so notify() needs no extra sound gate.
+  _buzzer.begin();
+  _buzzer.quiet(_node_prefs && _node_prefs->buzzer_quiet);
+#endif
+
   _started = true;
   _last_tick_ms = millis();
 }
@@ -2245,7 +2570,232 @@ void UITask::sentMsg(const char* peer, const char* text) {
 }
 
 void UITask::notify(UIEventType t) {
+#ifdef PIN_BUZZER
+  if (!notifyEnabled()) return;   // master toggle off -> silent (buzzer_quiet also gates internally)
+  switch (t) {
+    case UIEventType::contactMessage:
+    case UIEventType::newContactMessage:
+      _buzzer.play("MsgRcv3:d=4,o=6,b=200:32e,32g,32b,16c7");  // 3-note rising chime
+      break;
+    case UIEventType::roomMessage:
+    case UIEventType::channelMessage:
+      _buzzer.play("kerplop:d=16,o=6,b=120:32g#,32c#");        // short blip
+      break;
+    case UIEventType::ack:
+      _buzzer.play("ack:d=32,o=8,b=120:c");                    // single high tick
+      break;
+    default:
+      break;
+  }
+#else
   (void)t;
+#endif
+}
+
+// ===== Notifications =====================================================
+
+// Copy the first UTF-8 codepoint of `in` into `out` (1-4 bytes + NUL), uppercasing
+// a lone ASCII letter. Used for the avatar grapheme; routes through withEmoji so an
+// emoji/CJK leading character renders. Empty if `in` is empty.
+static void firstGrapheme(const char* in, char* out, size_t cap) {
+  out[0] = 0;
+  if (!in || !in[0] || cap < 5) return;
+  uint32_t next = 0;
+  _lv_txt_encoded_next(in, &next);   // advances `next` past one UTF-8 char
+  if (next == 0 || next >= cap) return;
+  memcpy(out, in, next);   // first character as-is (preserve case, emoji, CJK)
+  out[next] = 0;
+}
+
+bool UITask::isUnread(const char* key) const {
+  if (!key) return false;
+  for (uint8_t i = 0; i < _unread_count; i++)
+    if (strncmp(_unread_keys[i], key, CHAT_PEER_NAME_MAX) == 0) return true;
+  return false;
+}
+
+void UITask::markUnread(const char* key) {
+  if (!key || !key[0] || isUnread(key)) return;
+  if (_unread_count >= UNREAD_MAX) {   // full: drop the oldest, keep newest convs marked
+    memmove(_unread_keys[0], _unread_keys[1], (size_t)(UNREAD_MAX - 1) * CHAT_PEER_NAME_MAX);
+    _unread_count = UNREAD_MAX - 1;
+  }
+  strncpy(_unread_keys[_unread_count], key, CHAT_PEER_NAME_MAX - 1);
+  _unread_keys[_unread_count][CHAT_PEER_NAME_MAX - 1] = 0;
+  _unread_count++;
+}
+
+void UITask::clearUnread(const char* key) {
+  if (!key) return;
+  for (uint8_t i = 0; i < _unread_count; i++) {
+    if (strncmp(_unread_keys[i], key, CHAT_PEER_NAME_MAX) == 0) {
+      if (i != _unread_count - 1)   // compact: move the last entry into this slot
+        memcpy(_unread_keys[i], _unread_keys[_unread_count - 1], CHAT_PEER_NAME_MAX);
+      _unread_count--;
+      return;
+    }
+  }
+}
+
+// Incoming message for a conversation the user isn't looking at: wake the screen,
+// pop the banner, chime. (Caller already marked it unread; mute gating is added in
+// Phase D.)
+// Wake the screen + show the banner for a message in a conversation you're NOT
+// looking at. The chime is separate (fires for every non-muted message, viewed or
+// not -- phone-style) and is deferred in drainEvents/loop so its first note isn't
+// stretched by this draw work.
+void UITask::onIncomingNotify(const char* conv_key, const char* sender,
+                              const char* text, bool is_channel) {
+  _last_input_ms = millis();                         // restart the idle-off timer
+  if (_display_off) { board_set_backlight(_backlight_duty); _display_off = false; }
+  showBanner(conv_key, sender, text, is_channel);
+}
+
+// Build the (reused) banner widgets once. Called at startup so the first real
+// notification only repopulates labels -- not ~15 widget creations in the same
+// frame the chime starts (which would stretch the first note).
+void UITask::ensureBanner() {
+  if (_banner) return;
+  {
+    _banner = lv_obj_create(lv_layer_top());
+    lv_obj_set_width(_banner, _screen_w);
+    lv_obj_set_height(_banner, LV_SIZE_CONTENT);
+    lv_obj_align(_banner, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_color(_banner, lv_color_hex(UI_SURFACE), 0);
+    lv_obj_set_style_bg_opa(_banner, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(_banner, 2, 0);
+    lv_obj_set_style_border_side(_banner, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_color(_banner, lv_color_hex(UI_ACCENT), 0);
+    lv_obj_set_style_radius(_banner, 0, 0);
+    lv_obj_set_style_pad_all(_banner, 8, 0);
+    lv_obj_set_style_pad_column(_banner, 8, 0);
+    lv_obj_clear_flag(_banner, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(_banner, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(_banner, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_flag(_banner, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_banner, banner_body_cb, LV_EVENT_CLICKED, NULL);
+
+    _banner_avatar = lv_obj_create(_banner);
+    lv_obj_set_size(_banner_avatar, 36, 36);
+    lv_obj_set_style_radius(_banner_avatar, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(_banner_avatar, 0, 0);
+    lv_obj_set_style_pad_all(_banner_avatar, 0, 0);
+    lv_obj_clear_flag(_banner_avatar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    _banner_avatar_lbl = lv_label_create(_banner_avatar);
+    lv_obj_center(_banner_avatar_lbl);
+    lv_obj_set_style_text_color(_banner_avatar_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(_banner_avatar_lbl, fontHeading(), 0);
+
+    lv_obj_t* col = lv_obj_create(_banner);
+    lv_obj_set_flex_grow(col, 1);
+    lv_obj_set_height(col, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(col, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(col, 0, 0);
+    lv_obj_set_style_pad_all(col, 0, 0);
+    lv_obj_set_style_pad_row(col, 2, 0);
+    lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    _banner_title = lv_label_create(col);
+    lv_obj_set_style_text_color(_banner_title, lv_color_hex(UI_FG_BRIGHT), 0);
+    lv_obj_set_style_text_font(_banner_title, fontBody(), 0);
+    _banner_body = lv_label_create(col);
+    lv_obj_set_width(_banner_body, LV_PCT(100));
+    lv_label_set_long_mode(_banner_body, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(_banner_body, lv_color_hex(UI_FG), 0);
+    lv_obj_set_style_text_font(_banner_body, fontBody(), 0);
+
+    lv_obj_t* x = lv_btn_create(_banner);
+    lv_obj_set_style_bg_opa(x, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_width(x, 0, 0);
+    lv_obj_add_event_cb(x, banner_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* xl = lv_label_create(x);
+    lv_label_set_text(xl, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_color(xl, lv_color_hex(UI_DIM), 0);
+  }
+  lv_obj_add_flag(_banner, LV_OBJ_FLAG_HIDDEN);   // built hidden; showBanner reveals it
+}
+
+void UITask::showBanner(const char* conv_key, const char* sender,
+                        const char* text, bool is_channel) {
+  ensureBanner();
+
+  strncpy(_banner_key, conv_key ? conv_key : "", sizeof(_banner_key) - 1);
+  _banner_key[sizeof(_banner_key) - 1] = 0;
+
+  const char* who = (sender && sender[0]) ? sender : "(unknown)";
+  char glyph[8];
+  firstGrapheme(who, glyph, sizeof(glyph));
+  lv_label_set_text(_banner_avatar_lbl, glyph[0] ? glyph : "?");
+  lv_obj_set_style_bg_color(_banner_avatar,
+      lv_color_hex(is_channel ? UI_AVATAR_NEUT : nameColor(who)), 0);
+
+  char clean[CHAT_PEER_NAME_MAX + 4];
+  sanitizeForFont(who, clean, sizeof(clean));
+  lv_label_set_text(_banner_title, clean);
+  char body[CHAT_MSG_TEXT_MAX + 4];
+  sanitizeForFont(text ? text : "", body, sizeof(body));
+  lv_label_set_text(_banner_body, body);
+
+  lv_obj_clear_flag(_banner, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_banner);
+
+  if (_banner_timer) { lv_timer_del(_banner_timer); _banner_timer = NULL; }
+  _banner_timer = lv_timer_create(banner_timer_cb, 5000, NULL);
+  lv_timer_set_repeat_count(_banner_timer, 1);
+}
+
+void UITask::hideBanner() {
+  if (_banner_timer) { lv_timer_del(_banner_timer); _banner_timer = NULL; }
+  if (_banner) lv_obj_add_flag(_banner, LV_OBJ_FLAG_HIDDEN);
+}
+
+bool UITask::openConversationByKey(const char* conv_key) {
+  if (!conv_key || !conv_key[0]) return false;
+  if (strncmp(conv_key, "ch_", 3) == 0) {
+    uint8_t secret6[6];
+    if (!mesh::Utils::fromHex(secret6, 6, conv_key + 3)) return false;
+    for (int idx = 0; idx < MAX_GROUP_CHANNELS; idx++) {
+      ChannelDetails ch;
+      if (!mproxy::getChannel(idx, ch) || ch.name[0] == 0) continue;
+      if (memcmp(ch.channel.secret, secret6, 6) == 0) {
+        _chat_is_channel = true;
+        _chat_channel_idx = idx;
+        openChat(ch.name);
+        return true;
+      }
+    }
+    return false;
+  }
+  uint8_t pk6[6];
+  if (!mesh::Utils::fromHex(pk6, 6, conv_key)) return false;
+  const ContactInfo* c = mproxy::lookupContactByPubKey(pk6, 6);
+  if (!c) return false;
+  _chat_is_channel = false;
+  memcpy(_chat_pubkey, c->id.pub_key, 6);
+  openChat(c->name);
+  return true;
+}
+
+void UITask::banner_body_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  char key[CHAT_PEER_NAME_MAX];
+  strncpy(key, _instance->_banner_key, sizeof(key) - 1);
+  key[sizeof(key) - 1] = 0;
+  _instance->hideBanner();
+  _instance->openConversationByKey(key);
+}
+
+void UITask::banner_close_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->hideBanner();
+}
+
+void UITask::banner_timer_cb(lv_timer_t* t) {
+  (void)t;
+  if (!_instance) return;
+  _instance->_banner_timer = NULL;   // one-shot: LVGL deletes it after this returns
+  _instance->hideBanner();
 }
 
 // ===== Contact Info page =================================================
@@ -2304,28 +2854,7 @@ void UITask::buildContactInfoScreen() {
   lv_obj_set_style_pad_all(_cinfo_screen, 0, 0);
 
   // fixed top bar
-  lv_obj_t* bar = lv_obj_create(_cinfo_screen);
-  lv_obj_set_size(bar, _screen_w, HEADER_H);
-  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
-  lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
-  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(bar, 0, 0);
-  lv_obj_set_style_radius(bar, 0, 0);
-  lv_obj_set_style_pad_all(bar, 6, 0);
-  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_t* back = lv_btn_create(bar);
-  lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_shadow_width(back, 0, 0);
-  lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
-  lv_obj_add_event_cb(back, cinfo_back_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* bl = lv_label_create(back);
-  lv_label_set_text(bl, LV_SYMBOL_LEFT);
-  lv_obj_set_style_text_color(bl, lv_color_hex(FG_HEX), 0);
-  lv_obj_t* bt = lv_label_create(bar);
-  lv_label_set_text(bt, "Contact");
-  lv_obj_set_style_text_color(bt, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(bt, &lv_font_montserrat_20, 0);
-  lv_obj_align(bt, LV_ALIGN_LEFT_MID, 40, 0);
+  makeHeaderBar(_cinfo_screen, "Contact", cinfo_back_cb);
 
   // scrollable body
   _cinfo_body = lv_obj_create(_cinfo_screen);
@@ -2340,9 +2869,32 @@ void UITask::buildContactInfoScreen() {
   lv_obj_set_style_pad_row(_cinfo_body, 8, 0);
   lv_obj_set_flex_flow(_cinfo_body, LV_FLEX_FLOW_COLUMN);
 
-  _cinfo_title = lv_label_create(_cinfo_body);
+  // Hero: avatar circle + name -- contact branding, same scheme as the list/chat header.
+  lv_obj_t* hero = lv_obj_create(_cinfo_body);
+  lv_obj_remove_style_all(hero);
+  lv_obj_set_width(hero, LV_PCT(100));
+  lv_obj_set_height(hero, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(hero, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(hero, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(hero, 12, 0);
+  lv_obj_clear_flag(hero, LV_OBJ_FLAG_SCROLLABLE);
+
+  _cinfo_avatar = lv_obj_create(hero);
+  lv_obj_remove_style_all(_cinfo_avatar);
+  lv_obj_set_size(_cinfo_avatar, 56, 56);
+  lv_obj_set_style_radius(_cinfo_avatar, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_opa(_cinfo_avatar, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(_cinfo_avatar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  _cinfo_avatar_lbl = lv_label_create(_cinfo_avatar);
+  lv_obj_center(_cinfo_avatar_lbl);
+  lv_obj_set_style_text_color(_cinfo_avatar_lbl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(_cinfo_avatar_lbl, fontHero(), 0);
+
+  _cinfo_title = lv_label_create(hero);
+  lv_obj_set_flex_grow(_cinfo_title, 1);
+  lv_label_set_long_mode(_cinfo_title, LV_LABEL_LONG_DOT);
   lv_obj_set_style_text_color(_cinfo_title, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(_cinfo_title, withEmoji(&lv_font_montserrat_28), 0);
+  lv_obj_set_style_text_font(_cinfo_title, fontHero(), 0);
 
   _cinfo_key = lv_label_create(_cinfo_body);
   lv_obj_set_style_text_color(_cinfo_key, lv_color_hex(DIM_HEX), 0);
@@ -2400,7 +2952,7 @@ void UITask::buildContactInfoScreen() {
   _cinfo_realname = lv_label_create(ncap);
   lv_label_set_text(_cinfo_realname, "");
   lv_obj_set_style_text_color(_cinfo_realname, lv_color_hex(DIM_HEX), 0);
-  lv_obj_set_style_text_font(_cinfo_realname, withEmoji(&lv_font_montserrat_12), 0);
+  lv_obj_set_style_text_font(_cinfo_realname, fontCaption(), 0);
   _cinfo_name_ta = lv_textarea_create(fn);
   lv_textarea_set_one_line(_cinfo_name_ta, true);
   lv_obj_set_width(_cinfo_name_ta, LV_PCT(100));
@@ -2514,6 +3066,16 @@ void UITask::populateContactInfo() {
   char nm[CHAT_PEER_NAME_MAX + 4];
   sanitizeForFont(shown[0] ? shown : "(unnamed)", nm, sizeof(nm));
   lv_label_set_text(_cinfo_title, nm);
+  if (_cinfo_avatar) {
+    if (c->type == ADV_TYPE_CHAT || c->type == 0) {
+      char g[8]; firstGrapheme(nm, g, sizeof(g));
+      lv_label_set_text(_cinfo_avatar_lbl, g[0] ? g : "?");
+      lv_obj_set_style_bg_color(_cinfo_avatar, lv_color_hex(nameColor(shown)), 0);
+    } else {
+      lv_label_set_text(_cinfo_avatar_lbl, contactSymbol(c->type));
+      lv_obj_set_style_bg_color(_cinfo_avatar, lv_color_hex(UI_AVATAR_NEUT), 0);
+    }
+  }
   lv_textarea_set_text(_cinfo_name_ta, shown);
   if (_cinfo_realname) {
     if (overridden) {
@@ -2558,32 +3120,35 @@ void UITask::populateContactInfo() {
     lv_label_set_text(_cinfo_telem, have ? _telem_text : "(tap Telem to request)");
   }
 
-  int hashSize = (_node_prefs ? _node_prefs->path_hash_mode : 0) + 1;
-  if (hashSize < 1) hashSize = 1;
-  // A zero/empty out_path is a direct (0-hop) route -- the phone app stores a
-  // full zero-filled path for "direct", which we'd otherwise show as N zero hops.
-  bool allzero = (c->out_path_len != OUT_PATH_UNKNOWN);
-  for (int i = 0; i < c->out_path_len && c->out_path_len != OUT_PATH_UNKNOWN; i++)
-    if (c->out_path[i]) { allzero = false; break; }
+  // out_path_len is an ENCODED Packet path_len (low 6 bits = hop count, high 2 bits =
+  // hash_size-1 = bytes/hop). Decode it; the real byte length is count*size -- never
+  // iterate out_path_len directly (it miscounts and reads past out_path[]).
+  int hopCount = c->out_path_len & 63;
+  int hashSize = (c->out_path_len >> 6) + 1;
+  int byteLen  = hopCount * hashSize;
+  if (byteLen > MAX_PATH_SIZE) byteLen = MAX_PATH_SIZE;  // safety clamp
+  // A phone-app "direct" route is a zero-filled path, so also treat all-zero as direct.
+  bool allzero = true;
+  for (int i = 0; i < byteLen; i++) if (c->out_path[i]) { allzero = false; break; }
   if (c->out_path_len == OUT_PATH_UNKNOWN) {
     lv_label_set_text(_cinfo_hops, "Hops Away: flood (unknown)");
     lv_obj_add_flag(_cinfo_hops_x, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(_cinfo_outpath, "Out Path: (flood)");
-  } else if (c->out_path_len == 0 || allzero) {
+  } else if (hopCount == 0 || allzero) {
     lv_label_set_text(_cinfo_hops, "Hops Away: direct");
     lv_obj_clear_flag(_cinfo_hops_x, LV_OBJ_FLAG_HIDDEN);  // allow reset to flood
     lv_label_set_text(_cinfo_outpath, "Out Path: (direct)");
   } else {
     char hb[32];
-    snprintf(hb, sizeof(hb), "Hops Away: %d", c->out_path_len / hashSize);
+    snprintf(hb, sizeof(hb), "Hops Away: %d", hopCount);
     lv_label_set_text(_cinfo_hops, hb);
     lv_obj_clear_flag(_cinfo_hops_x, LV_OBJ_FLAG_HIDDEN);
     char op[3 * MAX_PATH_SIZE + 16];
     int n = snprintf(op, sizeof(op), "Out Path: ");
-    for (int i = 0; i < c->out_path_len && n < (int)sizeof(op) - 4; i++) {
+    for (int i = 0; i < byteLen && n < (int)sizeof(op) - 4; i++) {
       n += snprintf(op + n, sizeof(op) - n, "%02x", c->out_path[i]);
       // comma only on hop boundaries (hashSize bytes per hop): e.g. "0000,0000"
-      if ((i % hashSize) == (hashSize - 1) && i + 1 < c->out_path_len)
+      if ((i % hashSize) == (hashSize - 1) && i + 1 < byteLen)
         n += snprintf(op + n, sizeof(op) - n, ",");
     }
     lv_label_set_text(_cinfo_outpath, op);
@@ -2735,24 +3300,17 @@ void UITask::cinfo_name_clicked_cb(lv_event_t* e) {
 // Shared top-layer popup (kebab menu / share menu / pickers).
 lv_obj_t* UITask::ensureMenuPopup() {
   if (!_menu_popup) {
-    _menu_popup = lv_obj_create(lv_layer_top());
-    lv_obj_set_size(_menu_popup, _screen_w, _screen_h);
-    lv_obj_set_pos(_menu_popup, 0, 0);
-    lv_obj_set_style_bg_color(_menu_popup, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(_menu_popup, LV_OPA_50, 0);
-    lv_obj_set_style_border_width(_menu_popup, 0, 0);
-    lv_obj_set_style_pad_all(_menu_popup, 0, 0);
-    lv_obj_add_flag(_menu_popup, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(_menu_popup, [](lv_event_t* ev) {
+    _menu_popup = makeBackdrop([](lv_event_t* ev) {
       (void)ev; if (_instance) _instance->closeMenuPopup();
-    }, LV_EVENT_CLICKED, NULL);
+    });
     _menu_list = lv_list_create(_menu_popup);
     lv_obj_set_width(_menu_list, LV_PCT(82));
     lv_obj_set_height(_menu_list, LV_SIZE_CONTENT);
     lv_obj_set_style_max_height(_menu_list, LV_PCT(72), 0);
     lv_obj_center(_menu_list);
-    lv_obj_set_style_bg_color(_menu_list, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_bg_color(_menu_list, lv_color_hex(UI_SURFACE), 0);
     lv_obj_set_style_border_width(_menu_list, 0, 0);
+    lv_obj_set_style_radius(_menu_list, 8, 0);   // match the modal-card radius
   }
   lv_obj_clean(_menu_list);
   return _menu_list;
@@ -2826,28 +3384,7 @@ void UITask::buildShareQRScreen() {
   lv_obj_set_style_pad_all(_qr_screen, 0, 0);
 
   // fixed top bar (back + title)
-  lv_obj_t* bar = lv_obj_create(_qr_screen);
-  lv_obj_set_size(bar, _screen_w, HEADER_H);
-  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
-  lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
-  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(bar, 0, 0);
-  lv_obj_set_style_radius(bar, 0, 0);
-  lv_obj_set_style_pad_all(bar, 6, 0);
-  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_t* back = lv_btn_create(bar);
-  lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_shadow_width(back, 0, 0);
-  lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
-  lv_obj_add_event_cb(back, qr_back_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* bl = lv_label_create(back);
-  lv_label_set_text(bl, LV_SYMBOL_LEFT);
-  lv_obj_set_style_text_color(bl, lv_color_hex(FG_HEX), 0);
-  lv_obj_t* bt = lv_label_create(bar);
-  lv_label_set_text(bt, "Share QR");
-  lv_obj_set_style_text_color(bt, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(bt, &lv_font_montserrat_20, 0);
-  lv_obj_align(bt, LV_ALIGN_LEFT_MID, 40, 0);
+  makeHeaderBar(_qr_screen, "Share QR", qr_back_cb);
 
   // body: name + truncated key (top band), QR centered below
   lv_obj_t* body = lv_obj_create(_qr_screen);
@@ -2865,7 +3402,7 @@ void UITask::buildShareQRScreen() {
 
   _qr_name_lbl = lv_label_create(body);
   lv_obj_set_style_text_color(_qr_name_lbl, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(_qr_name_lbl, withEmoji(&lv_font_montserrat_28), 0);
+  lv_obj_set_style_text_font(_qr_name_lbl, fontHero(), 0);
 
   _qr_key_lbl = lv_label_create(body);
   lv_obj_set_style_text_color(_qr_key_lbl, lv_color_hex(DIM_HEX), 0);
@@ -3040,30 +3577,8 @@ void UITask::buildPathEditorScreen() {
   styleAsDarkScreen(_path_screen);
   lv_obj_set_style_pad_all(_path_screen, 0, 0);
 
-  lv_obj_t* bar = lv_obj_create(_path_screen);
-  lv_obj_set_size(bar, _screen_w, HEADER_H);
-  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
-  lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
-  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(bar, 0, 0);
-  lv_obj_set_style_radius(bar, 0, 0);
-  lv_obj_set_style_pad_all(bar, 6, 0);
-  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_t* back = lv_btn_create(bar);
-  lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_shadow_width(back, 0, 0);
-  lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
-  lv_obj_add_event_cb(back, path_back_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* bl = lv_label_create(back);
-  lv_label_set_text(bl, LV_SYMBOL_LEFT);
-  lv_obj_set_style_text_color(bl, lv_color_hex(FG_HEX), 0);
-  lv_obj_t* bt = lv_label_create(bar);
-  lv_label_set_text(bt, "Out Path");
-  lv_obj_set_style_text_color(bt, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(bt, &lv_font_montserrat_20, 0);
-  lv_obj_align(bt, LV_ALIGN_LEFT_MID, 40, 0);
-  lv_obj_t* save = lv_btn_create(bar);
-  lv_obj_align(save, LV_ALIGN_RIGHT_MID, 0, 0);
+  lv_obj_t* bar = makeHeaderBar(_path_screen, "Out Path", path_back_cb);
+  lv_obj_t* save = lv_btn_create(bar);   // flexes to the right of the grown title
   lv_obj_add_event_cb(save, path_save_cb, LV_EVENT_CLICKED, NULL);
   lv_obj_t* svl = lv_label_create(save);
   lv_label_set_text(svl, LV_SYMBOL_OK);
@@ -3092,7 +3607,7 @@ void UITask::buildPathEditorScreen() {
 
   _path_err = lv_label_create(body);
   lv_label_set_text(_path_err, "");
-  lv_obj_set_style_text_color(_path_err, lv_color_hex(0xF87171), 0);
+  lv_obj_set_style_text_color(_path_err, lv_color_hex(UI_ERROR), 0);
   lv_obj_add_flag(_path_err, LV_OBJ_FLAG_HIDDEN);
 
   _path_kb = lv_keyboard_create(_path_screen);
@@ -3241,30 +3756,8 @@ void UITask::buildNewChannelScreen() {
   styleAsDarkScreen(_newchan_screen);
   lv_obj_set_style_pad_all(_newchan_screen, 0, 0);
 
-  lv_obj_t* bar = lv_obj_create(_newchan_screen);
-  lv_obj_set_size(bar, _screen_w, HEADER_H);
-  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
-  lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
-  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(bar, 0, 0);
-  lv_obj_set_style_radius(bar, 0, 0);
-  lv_obj_set_style_pad_all(bar, 6, 0);
-  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_t* back = lv_btn_create(bar);
-  lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_shadow_width(back, 0, 0);
-  lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
-  lv_obj_add_event_cb(back, newchan_back_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* bl = lv_label_create(back);
-  lv_label_set_text(bl, LV_SYMBOL_LEFT);
-  lv_obj_set_style_text_color(bl, lv_color_hex(FG_HEX), 0);
-  lv_obj_t* bt = lv_label_create(bar);
-  lv_label_set_text(bt, "New Channel");
-  lv_obj_set_style_text_color(bt, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(bt, &lv_font_montserrat_20, 0);
-  lv_obj_align(bt, LV_ALIGN_LEFT_MID, 40, 0);
-  lv_obj_t* save = lv_btn_create(bar);
-  lv_obj_align(save, LV_ALIGN_RIGHT_MID, 0, 0);
+  lv_obj_t* bar = makeHeaderBar(_newchan_screen, "New Channel", newchan_back_cb);
+  lv_obj_t* save = lv_btn_create(bar);   // flexes to the right of the grown title
   lv_obj_add_event_cb(save, newchan_save_cb, LV_EVENT_CLICKED, NULL);
   lv_obj_t* svl = lv_label_create(save);
   lv_label_set_text(svl, LV_SYMBOL_OK);
@@ -3294,7 +3787,7 @@ void UITask::buildNewChannelScreen() {
 
   _newchan_err = lv_label_create(body);
   lv_label_set_text(_newchan_err, "");
-  lv_obj_set_style_text_color(_newchan_err, lv_color_hex(0xF87171), 0);
+  lv_obj_set_style_text_color(_newchan_err, lv_color_hex(UI_ERROR), 0);
   lv_obj_add_flag(_newchan_err, LV_OBJ_FLAG_HIDDEN);
 
   _newchan_kb = lv_keyboard_create(_newchan_screen);
@@ -3456,36 +3949,14 @@ void UITask::pw_eye_cb(lv_event_t* e) {
 
 void UITask::buildLoginPopup() {
   if (_login_popup) return;
-  _login_popup = lv_obj_create(lv_layer_top());          // dimmed backdrop
-  lv_obj_set_size(_login_popup, _screen_w, _screen_h);
-  lv_obj_set_pos(_login_popup, 0, 0);
-  lv_obj_set_style_bg_color(_login_popup, lv_color_hex(0x000000), 0);
-  lv_obj_set_style_bg_opa(_login_popup, LV_OPA_60, 0);
-  lv_obj_set_style_border_width(_login_popup, 0, 0);
-  lv_obj_set_style_pad_all(_login_popup, 0, 0);
-  lv_obj_clear_flag(_login_popup, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(_login_popup, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(_login_popup, login_dismiss_cb, LV_EVENT_CLICKED, NULL);  // tap outside = cancel
-  lv_obj_add_flag(_login_popup, LV_OBJ_FLAG_HIDDEN);
-
-  _login_card = lv_obj_create(_login_popup);
-  lv_obj_set_width(_login_card, LV_PCT(90));
-  lv_obj_set_height(_login_card, LV_SIZE_CONTENT);
-  lv_obj_align(_login_card, LV_ALIGN_TOP_MID, 0, HEADER_H + 8);
-  lv_obj_set_style_bg_color(_login_card, lv_color_hex(0x1F2937), 0);
-  lv_obj_set_style_bg_opa(_login_card, LV_OPA_COVER, 0);
-  lv_obj_set_style_radius(_login_card, 8, 0);
-  lv_obj_set_style_border_width(_login_card, 0, 0);
-  lv_obj_set_style_pad_all(_login_card, 12, 0);
-  lv_obj_set_style_pad_row(_login_card, 8, 0);
-  lv_obj_clear_flag(_login_card, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_flex_flow(_login_card, LV_FLEX_FLOW_COLUMN);
-  lv_obj_add_flag(_login_card, LV_OBJ_FLAG_CLICKABLE);   // consume clicks (don't dismiss)
+  _login_card = makeModalCard(&_login_popup, login_dismiss_cb);  // tap outside = cancel
+  lv_obj_align(_login_card, LV_ALIGN_TOP_MID, 0, HEADER_H + 8);   // top -> room for the keyboard below
   lv_obj_add_event_cb(_login_card, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap card empty -> hide kb
+  lv_obj_add_flag(_login_popup, LV_OBJ_FLAG_HIDDEN);
 
   _login_title = lv_label_create(_login_card);
   lv_obj_set_style_text_color(_login_title, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(_login_title, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_font(_login_title, fontHeading(), 0);
   lv_label_set_text(_login_title, "Login");
 
   // Password row: [field with inline eye] [send].
@@ -3611,28 +4082,7 @@ void UITask::buildNodeInfoScreen() {
   styleAsDarkScreen(_nodeinfo_screen);
   lv_obj_set_style_pad_all(_nodeinfo_screen, 0, 0);
 
-  lv_obj_t* bar = lv_obj_create(_nodeinfo_screen);
-  lv_obj_set_size(bar, _screen_w, HEADER_H);
-  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
-  lv_obj_set_style_bg_color(bar, lv_color_hex(0x1F2937), 0);
-  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(bar, 0, 0);
-  lv_obj_set_style_radius(bar, 0, 0);
-  lv_obj_set_style_pad_all(bar, 6, 0);
-  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_t* back = lv_btn_create(bar);
-  lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_shadow_width(back, 0, 0);
-  lv_obj_align(back, LV_ALIGN_LEFT_MID, 0, 0);
-  lv_obj_add_event_cb(back, nodeinfo_back_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* bl = lv_label_create(back);
-  lv_label_set_text(bl, LV_SYMBOL_LEFT);
-  lv_obj_set_style_text_color(bl, lv_color_hex(FG_HEX), 0);
-  lv_obj_t* bt = lv_label_create(bar);
-  lv_label_set_text(bt, "Node Info");
-  lv_obj_set_style_text_color(bt, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(bt, &lv_font_montserrat_20, 0);
-  lv_obj_align(bt, LV_ALIGN_LEFT_MID, 40, 0);
+  makeHeaderBar(_nodeinfo_screen, "Node Info", nodeinfo_back_cb);
 
   lv_obj_t* body = lv_obj_create(_nodeinfo_screen);
   lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
@@ -3727,8 +4177,8 @@ static void addSettingsSection(lv_obj_t* body, const char* title) {
   lv_obj_t* h = lv_label_create(body);
   lv_label_set_text(h, title);
   lv_obj_set_width(h, LV_PCT(100));
-  lv_obj_set_style_text_color(h, lv_color_hex(0x60A5FA), 0);  // blue-400 accent
-  lv_obj_set_style_text_font(h, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_color(h, lv_color_hex(UI_ACCENT), 0);  // blue-400 accent
+  lv_obj_set_style_text_font(h, fontHeading(), 0);
   lv_obj_set_style_pad_top(h, 8, 0);
   lv_obj_set_style_pad_bottom(h, 4, 0);
   lv_obj_set_style_border_color(h, lv_color_hex(0x374151), 0);  // gray-700 underline
@@ -3793,13 +4243,55 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_pad_row(body, 8, 0);
   lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);  // tab page scrolls by default
 
-  // Node info / status screen (read-only health: uptime, RAM, packets, RSSI, ...).
-  lv_obj_t* ninfo = lv_btn_create(body);
-  lv_obj_set_width(ninfo, LV_PCT(100));
-  lv_obj_add_event_cb(ninfo, open_nodeinfo_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* nil = lv_label_create(ninfo);
-  lv_label_set_text(nil, LV_SYMBOL_LIST " Node Info");
-  lv_obj_center(nil);
+  // Owner profile hero: avatar + node name + key, same look as Contact Info. Tapping
+  // it opens Node Info (your details/health). Populated live in populateSettings().
+  lv_obj_t* prof = lv_obj_create(body);
+  lv_obj_remove_style_all(prof);
+  lv_obj_set_width(prof, LV_PCT(100));
+  lv_obj_set_height(prof, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_color(prof, lv_color_hex(UI_SURFACE), 0);
+  lv_obj_set_style_bg_opa(prof, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(prof, 8, 0);
+  lv_obj_set_style_pad_all(prof, 10, 0);
+  lv_obj_set_style_pad_column(prof, 12, 0);
+  lv_obj_set_flex_flow(prof, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(prof, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(prof, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(prof, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(prof, open_nodeinfo_cb, LV_EVENT_CLICKED, NULL);
+
+  _set_profile_avatar = lv_obj_create(prof);
+  lv_obj_remove_style_all(_set_profile_avatar);
+  lv_obj_set_size(_set_profile_avatar, 48, 48);
+  lv_obj_set_style_radius(_set_profile_avatar, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_opa(_set_profile_avatar, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(_set_profile_avatar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  _set_profile_avatar_lbl = lv_label_create(_set_profile_avatar);
+  lv_obj_center(_set_profile_avatar_lbl);
+  lv_obj_set_style_text_color(_set_profile_avatar_lbl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(_set_profile_avatar_lbl, fontTitle(), 0);
+
+  lv_obj_t* pcol = lv_obj_create(prof);
+  lv_obj_remove_style_all(pcol);
+  lv_obj_set_flex_grow(pcol, 1);
+  lv_obj_set_height(pcol, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(pcol, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(pcol, 2, 0);
+  lv_obj_clear_flag(pcol, LV_OBJ_FLAG_SCROLLABLE);
+  _set_profile_name = lv_label_create(pcol);
+  lv_obj_set_width(_set_profile_name, LV_PCT(100));
+  lv_label_set_long_mode(_set_profile_name, LV_LABEL_LONG_DOT);
+  lv_obj_set_style_text_color(_set_profile_name, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(_set_profile_name, fontHeading(), 0);
+  _set_profile_key = lv_label_create(pcol);
+  lv_obj_set_width(_set_profile_key, LV_PCT(100));
+  lv_label_set_long_mode(_set_profile_key, LV_LABEL_LONG_DOT);
+  lv_obj_set_style_text_color(_set_profile_key, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_font(_set_profile_key, fontCaption(), 0);
+
+  lv_obj_t* chev = lv_label_create(prof);
+  lv_label_set_text(chev, LV_SYMBOL_RIGHT);
+  lv_obj_set_style_text_color(chev, lv_color_hex(DIM_HEX), 0);
 
   // ===== Public Info =====
   addSettingsSection(body, "Public Info");
@@ -3886,8 +4378,8 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_flex_align(rhdr, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_t* rtitle = lv_label_create(rhdr);
   lv_label_set_text(rtitle, "Radio");
-  lv_obj_set_style_text_color(rtitle, lv_color_hex(0x60A5FA), 0);
-  lv_obj_set_style_text_font(rtitle, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_color(rtitle, lv_color_hex(UI_ACCENT), 0);
+  lv_obj_set_style_text_font(rtitle, fontHeading(), 0);
   lv_obj_t* preset = lv_btn_create(rhdr);
   lv_obj_set_style_pad_hor(preset, 10, 0);
   lv_obj_set_style_pad_ver(preset, 4, 0);
@@ -3960,6 +4452,13 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   _set_gps_interval_ta = makeNumberField(body, "GPS interval (s)", set_advnum_ta_event_cb);
 #endif
 
+  // ===== Notifications =====
+  addSettingsSection(body, "Notifications");
+  _set_notify_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_notify_chk, "New message alerts");
+  lv_obj_set_style_text_color(_set_notify_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_notify_chk, set_notify_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
   // ===== Power & Lock =====
   addSettingsSection(body, "Power & Lock");
   lv_obj_t* frd = makeField(body, "LoRa radio");
@@ -4026,7 +4525,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   // vs the hardware RESET line.
   lv_obj_t* reboot = lv_btn_create(body);
   lv_obj_set_width(reboot, LV_PCT(100));
-  lv_obj_set_style_bg_color(reboot, lv_color_hex(0x7F1D1D), 0);
+  lv_obj_set_style_bg_color(reboot, lv_color_hex(UI_DANGER), 0);
   lv_obj_add_event_cb(reboot, [](lv_event_t*){ esp_restart(); }, LV_EVENT_CLICKED, NULL);
   lv_obj_t* reboot_lbl = lv_label_create(reboot);
   lv_label_set_text(reboot_lbl, LV_SYMBOL_POWER " Reboot");
@@ -4044,6 +4543,8 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
 void UITask::populateSettings() {
   if (!_node_prefs) return;
   lv_textarea_set_text(_set_name_ta, _node_prefs->node_name);
+
+  updateOwnerProfile();
 
   if (_set_key_ta) {
     char hex[2 * PUB_KEY_SIZE + 1];
@@ -4109,6 +4610,10 @@ void UITask::populateSettings() {
     if (_node_prefs->persist_history != 0) lv_obj_add_state(_set_history_chk, LV_STATE_CHECKED);  // 0xFF/1 = on
     else                                   lv_obj_clear_state(_set_history_chk, LV_STATE_CHECKED);
   }
+  if (_set_notify_chk) {
+    if (_node_prefs->notify_enable != 0) lv_obj_add_state(_set_notify_chk, LV_STATE_CHECKED);
+    else                                 lv_obj_clear_state(_set_notify_chk, LV_STATE_CHECKED);
+  }
 
   // Telemetry policy dropdowns (mode value maps 1:1 to the dropdown index).
   if (_set_telem_base_dd) lv_dropdown_set_selected(_set_telem_base_dd, _node_prefs->telemetry_mode_base <= 2 ? _node_prefs->telemetry_mode_base : 0);
@@ -4151,7 +4656,25 @@ void UITask::commitNodeName() {
   _node_prefs->node_name[sizeof(_node_prefs->node_name) - 1] = 0;
   pushPrefs();
   pushAdvert();  // re-broadcast identity with the new name
+  updateOwnerProfile();   // refresh the profile hero (name + avatar)
   showToast("Name saved & advertised");
+}
+
+// Fill the Settings owner-profile hero from the current node name + self key. Same
+// avatar scheme as the contact list (name-seeded color + first grapheme).
+void UITask::updateOwnerProfile() {
+  if (!_set_profile_name || !_node_prefs) return;
+  const char* who = _node_prefs->node_name[0] ? _node_prefs->node_name : "(unnamed)";
+  char clean[CHAT_PEER_NAME_MAX + 4];
+  sanitizeForFont(who, clean, sizeof(clean));
+  lv_label_set_text(_set_profile_name, clean);
+  char g[8]; firstGrapheme(clean, g, sizeof(g));
+  lv_label_set_text(_set_profile_avatar_lbl, g[0] ? g : "?");
+  lv_obj_set_style_bg_color(_set_profile_avatar, lv_color_hex(nameColor(who)), 0);
+  char keyhex[2 * PUB_KEY_SIZE + 1] = "";
+  if (mproxy::selfPubKey()) mesh::Utils::toHex(keyhex, mproxy::selfPubKey(), PUB_KEY_SIZE);
+  char snip[20]; snprintf(snip, sizeof(snip), "%.12s...", keyhex);
+  lv_label_set_text(_set_profile_key, snip);
 }
 
 void UITask::applyRadioSettings() {
@@ -4348,6 +4871,18 @@ void UITask::set_clock_cb(lv_event_t* e) {
   pushPrefs();
 }
 
+void UITask::set_notify_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  _instance->_node_prefs->notify_enable = on ? 1 : 0;
+  pushPrefs();
+#ifdef PIN_BUZZER
+  // Master off silences the chime too (banner/wake are gated in drainEvents); the
+  // separate buzzer_quiet still applies when notifications are on.
+  _instance->_buzzer.quiet(!on || _instance->_node_prefs->buzzer_quiet);
+#endif
+}
+
 void UITask::set_history_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
@@ -4474,36 +5009,14 @@ void UITask::set_pin_btn_cb(lv_event_t* e) {
 
 void UITask::buildPinSetPopup() {
   if (_pinset_popup) return;
-  _pinset_popup = lv_obj_create(lv_layer_top());
-  lv_obj_set_size(_pinset_popup, _screen_w, _screen_h);
-  lv_obj_set_pos(_pinset_popup, 0, 0);
-  lv_obj_set_style_bg_color(_pinset_popup, lv_color_hex(0x000000), 0);
-  lv_obj_set_style_bg_opa(_pinset_popup, LV_OPA_60, 0);
-  lv_obj_set_style_border_width(_pinset_popup, 0, 0);
-  lv_obj_set_style_pad_all(_pinset_popup, 0, 0);
-  lv_obj_clear_flag(_pinset_popup, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(_pinset_popup, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(_pinset_popup, pinset_dismiss_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* card = makeModalCard(&_pinset_popup, pinset_dismiss_cb);
+  lv_obj_align(card, LV_ALIGN_TOP_MID, 0, HEADER_H + 8);   // top -> room for the keyboard below
   lv_obj_add_flag(_pinset_popup, LV_OBJ_FLAG_HIDDEN);
-
-  lv_obj_t* card = lv_obj_create(_pinset_popup);
-  lv_obj_set_width(card, LV_PCT(88));
-  lv_obj_set_height(card, LV_SIZE_CONTENT);
-  lv_obj_align(card, LV_ALIGN_TOP_MID, 0, HEADER_H + 8);
-  lv_obj_set_style_bg_color(card, lv_color_hex(0x1F2937), 0);
-  lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
-  lv_obj_set_style_radius(card, 8, 0);
-  lv_obj_set_style_border_width(card, 0, 0);
-  lv_obj_set_style_pad_all(card, 12, 0);
-  lv_obj_set_style_pad_row(card, 8, 0);
-  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-  lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
 
   lv_obj_t* title = lv_label_create(card);
   lv_label_set_text(title, "Set lock PIN (4-6 digits)");
   lv_obj_set_style_text_color(title, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_font(title, fontHeading(), 0);
 
   lv_obj_t* f1 = makeField(card, "PIN");
   _pinset_ta1 = lv_textarea_create(f1);
@@ -4525,7 +5038,7 @@ void UITask::buildPinSetPopup() {
 
   _pinset_err = lv_label_create(card);
   lv_label_set_text(_pinset_err, "");
-  lv_obj_set_style_text_color(_pinset_err, lv_color_hex(0xF87171), 0);
+  lv_obj_set_style_text_color(_pinset_err, lv_color_hex(UI_ERROR), 0);
   lv_obj_add_flag(_pinset_err, LV_OBJ_FLAG_HIDDEN);
 
   lv_obj_t* save = lv_btn_create(card);
@@ -4623,7 +5136,7 @@ void UITask::buildLockScreen() {
   lv_obj_set_width(card, LV_PCT(80));
   lv_obj_set_height(card, LV_SIZE_CONTENT);
   lv_obj_align(card, LV_ALIGN_TOP_MID, 0, HEADER_H + 8);
-  lv_obj_set_style_bg_color(card, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_color(card, lv_color_hex(UI_SURFACE), 0);
   lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
   lv_obj_set_style_radius(card, 8, 0);
   lv_obj_set_style_border_width(card, 0, 0);
@@ -4635,7 +5148,7 @@ void UITask::buildLockScreen() {
   lv_obj_t* title = lv_label_create(card);
   lv_label_set_text(title, LV_SYMBOL_SETTINGS "  Locked - enter PIN");
   lv_obj_set_style_text_color(title, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_font(title, fontHeading(), 0);
 
   lv_obj_t* row = lv_obj_create(card);
   lv_obj_set_width(row, LV_PCT(100));
@@ -4662,7 +5175,7 @@ void UITask::buildLockScreen() {
 
   _lock_err = lv_label_create(card);
   lv_label_set_text(_lock_err, "");
-  lv_obj_set_style_text_color(_lock_err, lv_color_hex(0xF87171), 0);
+  lv_obj_set_style_text_color(_lock_err, lv_color_hex(UI_ERROR), 0);
   lv_obj_add_flag(_lock_err, LV_OBJ_FLAG_HIDDEN);
 
   _lock_kb = lv_keyboard_create(_lock_screen);
@@ -4770,28 +5283,7 @@ void UITask::set_sharepos_cb(lv_event_t* e) {
 
 void UITask::showSharePosWarning() {
   if (!_confirm_popup) {
-    _confirm_popup = lv_obj_create(lv_layer_top());
-    lv_obj_set_size(_confirm_popup, _screen_w, _screen_h);
-    lv_obj_set_pos(_confirm_popup, 0, 0);
-    lv_obj_set_style_bg_color(_confirm_popup, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(_confirm_popup, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(_confirm_popup, 0, 0);
-    lv_obj_set_style_pad_all(_confirm_popup, 0, 0);
-    lv_obj_clear_flag(_confirm_popup, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(_confirm_popup, LV_OBJ_FLAG_CLICKABLE);  // swallow taps behind the modal
-
-    lv_obj_t* card = lv_obj_create(_confirm_popup);
-    lv_obj_set_width(card, LV_PCT(88));
-    lv_obj_set_height(card, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_height(card, LV_PCT(86), 0);
-    lv_obj_center(card);
-    lv_obj_set_style_bg_color(card, lv_color_hex(0x1F2937), 0);
-    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(card, 0, 0);
-    lv_obj_set_style_radius(card, 8, 0);
-    lv_obj_set_style_pad_all(card, 14, 0);
-    lv_obj_set_style_pad_row(card, 12, 0);
-    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_t* card = makeModalCard(&_confirm_popup, NULL);  // explicit buttons; no tap-to-dismiss
 
     lv_obj_t* warn = lv_label_create(card);
     lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
@@ -4821,7 +5313,7 @@ void UITask::showSharePosWarning() {
     lv_label_set_text(cl, "Cancel");
 
     lv_obj_t* ok = lv_btn_create(btns);
-    lv_obj_set_style_bg_color(ok, lv_color_hex(0x2563EB), 0);
+    lv_obj_set_style_bg_color(ok, lv_color_hex(UI_PRIMARY), 0);
     lv_obj_add_event_cb(ok, sharepos_confirm_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t* okl = lv_label_create(ok);
     lv_label_set_text(okl, "Enable");
@@ -4855,35 +5347,14 @@ void UITask::info_close_cb(lv_event_t* e) {
 
 void UITask::showInfoPopup(const char* title, const char* body) {
   if (!_info_popup) {
-    _info_popup = lv_obj_create(lv_layer_top());
-    lv_obj_set_size(_info_popup, _screen_w, _screen_h);
-    lv_obj_set_pos(_info_popup, 0, 0);
-    lv_obj_set_style_bg_color(_info_popup, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(_info_popup, LV_OPA_50, 0);
-    lv_obj_set_style_border_width(_info_popup, 0, 0);
-    lv_obj_set_style_pad_all(_info_popup, 0, 0);
-    lv_obj_add_flag(_info_popup, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(_info_popup, [](lv_event_t* ev) {  // tap backdrop closes
-      if (_instance && lv_event_get_target(ev) == _instance->_info_popup)
-        lv_obj_add_flag(_instance->_info_popup, LV_OBJ_FLAG_HIDDEN);
-    }, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t* card = lv_obj_create(_info_popup);
-    lv_obj_set_width(card, LV_PCT(86));
-    lv_obj_set_height(card, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_height(card, LV_PCT(80), 0);
-    lv_obj_center(card);
-    lv_obj_set_style_bg_color(card, lv_color_hex(0x1F2937), 0);
-    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(card, 0, 0);
-    lv_obj_set_style_radius(card, 8, 0);
-    lv_obj_set_style_pad_all(card, 14, 0);
-    lv_obj_set_style_pad_row(card, 10, 0);
-    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_t* card = makeModalCard(&_info_popup, [](lv_event_t* ev) {  // tap backdrop closes
+      (void)ev;
+      if (_instance) lv_obj_add_flag(_instance->_info_popup, LV_OBJ_FLAG_HIDDEN);
+    });
 
     _info_title_lbl = lv_label_create(card);
-    lv_obj_set_style_text_color(_info_title_lbl, lv_color_hex(0x60A5FA), 0);
-    lv_obj_set_style_text_font(_info_title_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(_info_title_lbl, lv_color_hex(UI_ACCENT), 0);
+    lv_obj_set_style_text_font(_info_title_lbl, fontHeading(), 0);
 
     _info_body_lbl = lv_label_create(card);
     lv_label_set_long_mode(_info_body_lbl, LV_LABEL_LONG_WRAP);
@@ -4999,6 +5470,10 @@ void UITask::loop() {
     _last_tick_ms = now;
   }
 
+#ifdef PIN_BUZZER
+  _buzzer.loop();   // non-blocking RTTTL state-stepping; run every pass, even display-off
+#endif
+
   // Pin the published snapshot for this UI pass, then apply backend events
   // (new/sent msgs, delivery, telemetry) to the store/LVGL on this (UI) core.
   mproxy::beginUiRead();
@@ -5007,7 +5482,11 @@ void UITask::loop() {
   // Backlight idle-off (battery). Touch resets _last_input_ms in touchpad_read_cb,
   // which also wakes it. The radio/mesh keep running on core 0 the whole time.
   uint16_t timeout_s = _node_prefs ? _node_prefs->screen_timeout_s : 0;
-  if (timeout_s && !_display_off && (uint32_t)(now - _last_input_ms) > (uint32_t)timeout_s * 1000) {
+  // `now` is sampled at the top of loop(); a notification wake (drainEvents) may have
+  // set _last_input_ms slightly LATER than `now`, so clamp to avoid the unsigned
+  // underflow that would instantly re-sleep the screen we just woke.
+  uint32_t idle_ms = (now >= _last_input_ms) ? (now - _last_input_ms) : 0;
+  if (timeout_s && !_display_off && idle_ms > (uint32_t)timeout_s * 1000) {
     board_set_backlight(0);
     _display_off = true;
   }
@@ -5065,6 +5544,8 @@ void UITask::loop() {
     if (const NodePrefs* p = mproxy::prefsSnap()) *_node_prefs = *p;  // pick up backend-side pref edits
     _contacts_pending = true;
     _channels_pending = true;
+    // Keep the chat header live (route learned/changed, rename) while it's on screen.
+    if (_chat_screen && lv_scr_act() == _chat_screen) updateChatHeader();
   }
 
   // Service a pending rebuild only when that list's tab is actually on screen
@@ -5086,6 +5567,15 @@ void UITask::loop() {
   }  // end if(!_display_off)
 
   lv_timer_handler();   // always: renders dirty areas (none while off) + polls touch (wakes us)
+
+  // Fire any pending notification chime AFTER the wake + banner draw above, so the
+  // slow first flush precedes the first note instead of stretching it. Subsequent
+  // frames are cheap (banner is static), so _buzzer.loop() ends each note on time.
+  if (_pending_chime != UIEventType::none) {
+    notify(_pending_chime);
+    _pending_chime = UIEventType::none;
+  }
+
   mproxy::endUiRead();
 }
 
@@ -5097,9 +5587,25 @@ void UITask::drainEvents() {
       case mproxy::EvKind::Msg: {
         if (ev.msgcount >= 0) _msgcount = ev.msgcount;
         storeAppend(ev.outgoing, ev.conv_key, ev.sender, ev.text, ev.ts);
-        if (_chat_screen && strncmp(ev.conv_key, _chat_key, CHAT_PEER_NAME_MAX) == 0)
-          rebuildChatHistory();
-        _contacts_dirty = true;   // "latest message" sort may have changed
+        // "Viewing" = the chat screen is the active screen AND it's this conversation
+        // (not merely that we last opened it -- you may have navigated back home).
+        bool is_channel = strncmp(ev.conv_key, "ch_", 3) == 0;
+        bool viewing = _chat_screen && lv_scr_act() == _chat_screen &&
+                       strncmp(ev.conv_key, _chat_key, CHAT_PEER_NAME_MAX) == 0;
+        if (viewing) rebuildChatHistory();
+        if (!ev.outgoing) {
+          bool muted = false;   // Phase D: isMuted(ev.conv_key)
+          if (!viewing) markUnread(ev.conv_key);   // unread mark only for chats you're not in
+          if (notifyEnabled() && !muted) {
+            // Phone-style: chime on every non-muted message (viewed or not). The
+            // banner + screen-wake only fire when you're NOT already looking at it.
+            if (!viewing) onIncomingNotify(ev.conv_key, ev.sender, ev.text, is_channel);
+            _pending_chime = is_channel ? UIEventType::channelMessage : UIEventType::contactMessage;
+          }
+        }
+        // Repaint the list that owns this conversation so its unread mark updates.
+        if (is_channel) _channels_pending = true;
+        else            _contacts_dirty = true;   // also covers the "latest message" re-sort
         break;
       }
       case mproxy::EvKind::SendResult: {

@@ -41,7 +41,21 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _tab_contacts;
   lv_obj_t*       _tab_channels;
   lv_obj_t*       _tab_settings;
-  lv_obj_t*       _contacts_table;      // lv_table inside _tab_contacts (rows drawn, not objects)
+  // Contacts list: a recycled pool of real row widgets (avatar circle + name +
+  // last-seen + unread dot) floating over a spacer that sizes the virtual content.
+  // ~pool_n widgets cover the viewport regardless of contact count -> scales + holds
+  // scroll perf. Rows are non-floating: they scroll natively with the container and
+  // are only rebound (text/avatar) when one recycles past the visible window.
+  lv_obj_t*       _contacts_scroll;     // scrollable container inside _tab_contacts
+  lv_obj_t*       _contacts_spacer;     // transparent child sized to _crow_count rows
+  lv_obj_t*       _contacts_empty;      // centered "no contacts" placeholder
+  static const int CONTACT_POOL_MAX = 14;
+  struct ContactRow { lv_obj_t* root; lv_obj_t* avatar; lv_obj_t* avatar_lbl;
+                      lv_obj_t* name; lv_obj_t* seen; lv_obj_t* dot; };
+  ContactRow      _rowpool[CONTACT_POOL_MAX];
+  int             _row_pool_n;          // realized pool size (<= CONTACT_POOL_MAX)
+  int             _row_bound_idx[CONTACT_POOL_MAX];  // display index in each slot (-1 = none)
+  int             _first_visible;       // top display index realized (scroll churn guard)
   lv_obj_t*       _contacts_sb;         // draggable scrollbar thumb for the contacts list
   lv_obj_t*       _contacts_search_ta;  // name search field
   lv_obj_t*       _contacts_kb;         // keyboard for the search field (overlays home screen)
@@ -58,6 +72,24 @@ class UITask : public AbstractUITask {
   uint32_t        _contacts_rebuilt_ms; // last rebuild time
   bool            _contacts_pending;    // snapshot changed -> rebuild contacts when its tab is shown
   bool            _channels_pending;    // snapshot changed -> rebuild channels when its tab is shown
+
+  // Notifications. _unread_keys is an in-RAM set of conv-keys (pubkey/secret hex)
+  // with at least one message arrived-but-not-viewed; cleared when the chat opens.
+  // (Not persisted across reboot in v1.) The banner is one reused top-layer card.
+  static const int UNREAD_MAX = 64;
+  char            _unread_keys[UNREAD_MAX][CHAT_PEER_NAME_MAX];
+  uint8_t         _unread_count;
+  lv_obj_t*       _banner;              // top-layer notification card (reused)
+  lv_obj_t*       _banner_avatar;       // colored circle / type-glyph holder
+  lv_obj_t*       _banner_avatar_lbl;   // grapheme / glyph inside the circle
+  lv_obj_t*       _banner_title;        // sender name
+  lv_obj_t*       _banner_body;         // 1-line message preview
+  lv_timer_t*     _banner_timer;        // auto-dismiss one-shot
+  char            _banner_key[CHAT_PEER_NAME_MAX];  // conv-key the banner opens on tap
+  UIEventType     _pending_chime;       // chime deferred to end of loop() (post-draw) so notes don't stretch
+#ifdef PIN_BUZZER
+  genericBuzzer   _buzzer;              // RTTTL notification chimes (gated by buzzer_quiet)
+#endif
 
   // Sorted/filtered view of the address book (favourites first, then recency).
   // Holds indices only -- no per-contact widgets -- so it scales to a full book.
@@ -94,6 +126,9 @@ class UITask : public AbstractUITask {
                    uint8_t status = 0, uint32_t ack = 0, uint32_t expiry_ms = 0, uint32_t cli = 0);
   lv_obj_t*       _chat_screen;
   lv_obj_t*       _chat_title;          // contact name in the chat top bar
+  lv_obj_t*       _chat_avatar;         // avatar circle in the chat top bar (branding)
+  lv_obj_t*       _chat_avatar_lbl;     // grapheme / type glyph inside the avatar
+  lv_obj_t*       _chat_status;         // route line under the name: Direct / Flood / N hops
   lv_obj_t*       _chat_history;        // scrollable message container (the VSA band)
   lv_obj_t*       _chat_sb;             // draggable scrollbar thumb for chat history
   lv_obj_t*       _chat_compose;        // fixed compose band (textarea + send)
@@ -123,6 +158,8 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _cinfo_screen;
   lv_obj_t*       _cinfo_body;          // scrollable form
   lv_obj_t*       _cinfo_title;
+  lv_obj_t*       _cinfo_avatar;        // hero avatar circle on the Contact Info page
+  lv_obj_t*       _cinfo_avatar_lbl;    // grapheme / type glyph inside it
   lv_obj_t*       _cinfo_realname;       // "(advert name)" hint, shown only when overridden
   lv_obj_t*       _cinfo_key;
   lv_obj_t*       _cinfo_fav_lbl;
@@ -165,6 +202,10 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _path_err;
 
   // Settings tab widgets (live inside _tab_settings; keyboard overlays _home_screen).
+  lv_obj_t*       _set_profile_avatar;     // owner profile hero (top of Settings)
+  lv_obj_t*       _set_profile_avatar_lbl;
+  lv_obj_t*       _set_profile_name;
+  lv_obj_t*       _set_profile_key;
   lv_obj_t*       _set_name_ta;
   lv_obj_t*       _set_freq_ta;
   lv_obj_t*       _set_bw_dd;
@@ -178,6 +219,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_tz_ta;           // UTC offset (hours) for local-time display
   lv_obj_t*       _set_clock_chk;       // 12-hour clock toggle
   lv_obj_t*       _set_history_chk;     // persist chat history to SD toggle
+  lv_obj_t*       _set_notify_chk;      // master new-message notifications toggle
   lv_obj_t*       _set_kb;
   lv_obj_t*       _set_active_ta;       // settings textarea currently being edited
   lv_obj_t*       _set_key_ta;          // read-only self public key (scrolls horizontally)
@@ -279,6 +321,25 @@ class UITask : public AbstractUITask {
   // Drain the backend→UI event queue (new/sent msgs, delivery, telemetry) and
   // apply each to the message store / LVGL. Runs at the top of loop(), UI core.
   void      drainEvents();
+
+  // ----- Notifications (Phase B) -----
+  bool      notifyEnabled() const { return _node_prefs && _node_prefs->notify_enable != 0; }
+  void      markUnread(const char* key);
+  void      clearUnread(const char* key);
+  bool      isUnread(const char* key) const;
+  // Wake the screen + show the tappable banner + chime for an incoming message.
+  void      onIncomingNotify(const char* conv_key, const char* sender,
+                             const char* text, bool is_channel);
+  void      ensureBanner();   // build the reused banner widgets once (called at startup)
+  void      showBanner(const char* conv_key, const char* sender,
+                       const char* text, bool is_channel);
+  void      hideBanner();
+  // Resolve a conv-key ("ch_"+hex => channel by secret; else hex => contact by
+  // pubkey) and open that chat. Returns false if it no longer resolves.
+  bool      openConversationByKey(const char* conv_key);
+  static void banner_body_cb(lv_event_t* e);
+  static void banner_close_cb(lv_event_t* e);
+  static void banner_timer_cb(lv_timer_t* t);
   // Optimistic async send: append a SENDING bubble with a fresh client token and
   // post CMD_Send; the backend replies EV_SendResult with the real ack. Returns
   // the token. `pubkey6` (contact) or `channel_idx` selects the recipient.
@@ -291,8 +352,13 @@ class UITask : public AbstractUITask {
   static void pushAdvert();  // CMD_Advert (re-broadcast self)
   static void postPubkeyCmd(mproxy::CmdKind kind, const uint8_t* pk);  // fav/path/telem/share
   static void channel_clicked_cb(lv_event_t* e);
-  static void contacts_table_cb(lv_event_t* e);
-  static void contacts_table_draw_cb(lv_event_t* e);
+  // Contacts recycler: build the row pool once; bind a slot to a display index;
+  // re-window the pool on scroll. contact_row_cb opens the tapped contact's chat.
+  void      buildContactRows(lv_obj_t* parent);
+  void      bindContactRow(int slot, int disp);
+  void      relayoutContactRows();
+  static void contact_row_cb(lv_event_t* e);
+  static void contacts_scroll_cb(lv_event_t* e);
   static void contacts_search_ta_cb(lv_event_t* e);
   static void contacts_kb_cb(lv_event_t* e);
   static int  crow_cmp(const void* a, const void* b);
@@ -303,6 +369,19 @@ class UITask : public AbstractUITask {
   static void contacts_filt_pick_cb(lv_event_t* e);
 
   void      openChat(const char* peer_name);
+  void      updateChatHeader();   // name + avatar + route status (live, from the snapshot)
+  // Shared header chrome so every screen matches: a fixed top bar (UI_SURFACE, flex
+  // row) with a 36px square back-target + title. Returns the bar so callers can append
+  // right-side actions (a Save button flexes to the right of the grown title).
+  lv_obj_t* makeBackButton(lv_obj_t* bar, lv_event_cb_t cb);
+  lv_obj_t* makeHeaderBar(lv_obj_t* parent, const char* title, lv_event_cb_t back_cb);
+  // Standard modal: dimmed full-screen backdrop + a centered surface card (flex
+  // column). Returns the card; *backdrop_out gets the backdrop. backdrop_tap_cb
+  // (optional) fires when the backdrop outside the card is tapped -- the card swallows
+  // its own taps. Caller manages show/hide and may re-align the card (e.g. top, to
+  // leave room for a keyboard).
+  lv_obj_t* makeBackdrop(lv_event_cb_t tap_cb);   // dim full-screen overlay (shared by all popups)
+  lv_obj_t* makeModalCard(lv_obj_t** backdrop_out, lv_event_cb_t backdrop_tap_cb);
   void      rebuildChatHistory();
   void      layoutChatBody(bool keyboard_shown);
   // When a bottom-docked keyboard `kb` is shown, scroll `scroll` so the focused
@@ -400,6 +479,7 @@ class UITask : public AbstractUITask {
   // Settings tab
   void      buildSettingsTab(lv_obj_t* parent);
   void      populateSettings();
+  void      updateOwnerProfile();   // fill the Settings owner-profile hero
   void      commitNodeName();
   void      applyRadioSettings();
   static void set_name_ta_event_cb(lv_event_t* e);
@@ -419,6 +499,7 @@ class UITask : public AbstractUITask {
   static void set_tz_ta_event_cb(lv_event_t* e);
   static void set_clock_cb(lv_event_t* e);
   static void set_history_cb(lv_event_t* e);
+  static void set_notify_cb(lv_event_t* e);
   // Phase-1 additions: telemetry policy + advanced toggles + share-me.
   static void set_telem_cb(lv_event_t* e);          // user_data 0/1/2 = base/loc/env
   static void set_autoadd_cb(lv_event_t* e);
@@ -502,21 +583,28 @@ public:
       _header_label(NULL), _clock_label(NULL), _clock_last(0),
       _tabview(NULL),
       _tab_contacts(NULL), _tab_channels(NULL), _tab_settings(NULL),
-      _contacts_table(NULL), _contacts_sb(NULL), _contacts_search_ta(NULL), _contacts_kb(NULL),
+      _contacts_scroll(NULL), _contacts_spacer(NULL), _contacts_empty(NULL),
+      _row_pool_n(0), _first_visible(-1),
+      _contacts_sb(NULL), _contacts_search_ta(NULL), _contacts_kb(NULL),
       _contacts_filter_btn(NULL), _cfilt_popup(NULL), _cfilt_order_grp(NULL),
       _cfilt_filt_grp(NULL), _contacts_order(1), _contacts_filt(0),
       _channels_list(NULL), _status_label(NULL),
       _contacts_dirty(false), _contacts_rebuilt_ms(0),
-      _contacts_pending(false), _channels_pending(false), _crow_count(0),
+      _contacts_pending(false), _channels_pending(false),
+      _unread_count(0), _banner(NULL), _banner_avatar(NULL), _banner_avatar_lbl(NULL),
+      _banner_title(NULL), _banner_body(NULL), _banner_timer(NULL),
+      _pending_chime(UIEventType::none), _crow_count(0),
       _pick_popup(NULL), _pick_table(NULL), _pick_sb(NULL), _pick_search_ta(NULL), _pick_kb(NULL),
       _pick_title(NULL), _pick_action(0), _prow_count(0),
-      _chat_screen(NULL), _chat_title(NULL), _chat_history(NULL), _chat_sb(NULL),
+      _chat_screen(NULL), _chat_title(NULL), _chat_avatar(NULL), _chat_avatar_lbl(NULL),
+      _chat_status(NULL), _chat_history(NULL), _chat_sb(NULL),
       _chat_compose(NULL), _chat_input(NULL), _chat_keyboard(NULL),
       _insert_popup(NULL), _insert_list(NULL),
       _chat_is_channel(false), _chat_channel_idx(-1), _chat_contact_type(0),
       _chat_search_bar(NULL), _chat_search_ta(NULL), _search_active(false),
       _sending_lbl(NULL), _dot_frame(0), _anim_ms(0),
-      _cinfo_screen(NULL), _cinfo_body(NULL), _cinfo_title(NULL), _cinfo_realname(NULL), _cinfo_key(NULL),
+      _cinfo_screen(NULL), _cinfo_body(NULL), _cinfo_title(NULL),
+      _cinfo_avatar(NULL), _cinfo_avatar_lbl(NULL), _cinfo_realname(NULL), _cinfo_key(NULL),
       _cinfo_fav_lbl(NULL), _cinfo_name_ta(NULL), _cinfo_keyfull(NULL),
       _cinfo_lat_ta(NULL), _cinfo_lon_ta(NULL), _cinfo_type_lbl(NULL),
       _cinfo_lastheard(NULL), _cinfo_telem(NULL), _cinfo_hops(NULL), _cinfo_hops_x(NULL),
@@ -524,9 +612,10 @@ public:
       _cinfo_return_screen(NULL),
       _menu_popup(NULL), _menu_list(NULL), _toast(NULL), _path_return_screen(NULL),
       _path_screen(NULL), _path_size_dd(NULL), _path_ta(NULL), _path_kb(NULL), _path_err(NULL),
+      _set_profile_avatar(NULL), _set_profile_avatar_lbl(NULL), _set_profile_name(NULL), _set_profile_key(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
-      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_history_chk(NULL), _set_kb(NULL),
+      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_kb(NULL),
       _set_active_ta(NULL), _set_key_ta(NULL),
       _set_lat_ta(NULL), _set_lon_ta(NULL), _set_sharepos(NULL),
       _set_telem_base_dd(NULL), _set_telem_loc_dd(NULL), _set_telem_env_dd(NULL),
@@ -552,6 +641,7 @@ public:
         _chat_peer[0] = 0;
         _cinfo_override[0] = 0;
         _chat_key[0] = 0;
+        _banner_key[0] = 0;
         _search_filter[0] = 0;
         _clipboard[0] = 0;
         _contacts_filter[0] = 0;
@@ -565,7 +655,11 @@ public:
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
   bool hasDisplay() const { return _started; }
+#ifdef PIN_BUZZER
+  bool isBuzzerQuiet() { return _buzzer.isQuiet(); }
+#else
   bool isBuzzerQuiet() { return true; }
+#endif
   void shutdown(bool restart = false) { (void)restart; }
 
   // AbstractUITask overrides

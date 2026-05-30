@@ -357,7 +357,10 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
       _serial->writeFrame(out_frame, 1 + PUB_KEY_SIZE);
     }
   } else {
-#ifdef DISPLAY_CLASS
+    // MESH_PROXY (dual-core): the UI core owns notifications via drainEvents; the
+    // backend must not touch the UI-core buzzer from core 0 (cross-core). Adverts
+    // aren't messages, so the proxy build intentionally doesn't chime here.
+#if defined(DISPLAY_CLASS) && !defined(MESH_PROXY)
     if (_ui) _ui->notify(UIEventType::newContactMessage);
 #endif
   }
@@ -472,9 +475,13 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   if (should_display && _ui) {
     setHookKey(from.id.pub_key, false);
     _ui->newMsg(path_len, from.name, text, offline_queue_len);
+    // MESH_PROXY (dual-core): newMsg() enqueues a UI event; the UI core fires the
+    // chime from drainEvents (mute/toggle/viewing-aware). Don't ring it from core 0.
+#ifndef MESH_PROXY
     if (!_serial->isConnected()) {
       _ui->notify(UIEventType::contactMessage);
     }
+#endif
   }
 #endif
 }
@@ -569,7 +576,9 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     frame[0] = PUSH_CODE_MSG_WAITING; // send push 'tickle'
     _serial->writeFrame(frame, 1);
   } else {
-#ifdef DISPLAY_CLASS
+    // MESH_PROXY (dual-core): newMsg() below enqueues the event; the UI core rings
+    // the chime from drainEvents. Don't touch the UI-core buzzer from core 0.
+#if defined(DISPLAY_CLASS) && !defined(MESH_PROXY)
     if (_ui) _ui->notify(UIEventType::channelMessage);
 #endif
   }

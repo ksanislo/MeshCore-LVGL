@@ -46,4 +46,5 @@ struct NodePrefs {  // persisted to file
   uint16_t screen_timeout_s;   // backlight idle-off after N s of no touch; 0 = never (also old-firmware default)
   uint8_t  radio_off;          // 1 = LoRa radio disabled (no TX/RX); safe to detach the antenna. Persists.
   char     lock_pin[8];        // settings-lock PIN (4-6 digits, NUL-terminated); "" = no PIN set
+  uint8_t  notify_enable;      // master new-message notifications (wake+banner+buzzer); 0=off,1=on (0xFF unset -> on)
 };

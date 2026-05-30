@@ -88,6 +88,15 @@ static uint32_t computeSig(MyMesh& mesh) {
     sig = fnv(sig, &c.flags, 1);
     sig = fnv(sig, c.id.pub_key, 4);
     sig = fnvStr(sig, c.name);
+    // Out path: so a learned/changed route (Flood<->Direct<->N hops) republishes
+    // and the chat header's route line stays live. out_path_len is ENCODED (hop count
+    // | hash_size<<6), so the real byte length is count*size -- never out_path_len.
+    sig = fnv(sig, &c.out_path_len, 1);
+    if (c.out_path_len != OUT_PATH_UNKNOWN) {
+      int blen = (c.out_path_len & 63) * ((c.out_path_len >> 6) + 1);
+      if (blen > (int)sizeof(c.out_path)) blen = sizeof(c.out_path);
+      if (blen > 0) sig = fnv(sig, c.out_path, blen);
+    }
     char ov[32];
     if (mesh.getNameOverride(c.id.pub_key, ov, sizeof(ov))) sig = fnvStr(sig, ov);
   }
