@@ -4417,7 +4417,9 @@ lv_obj_t* UITask::makeCategoryRow(lv_obj_t* parent, const char* icon, const char
   lv_obj_set_height(col, LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(col, 2, 0);
-  lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+  // Base lv_obj is clickable by default; clear it so taps on the title/description
+  // fall through to the row (the whole row is the link, not just the chevron).
+  lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
   lv_obj_t* tl = lv_label_create(col);
   lv_label_set_text(tl, title);
   lv_obj_set_style_text_color(tl, lv_color_hex(FG_HEX), 0);
@@ -4436,9 +4438,9 @@ lv_obj_t* UITask::makeCategoryRow(lv_obj_t* parent, const char* icon, const char
 }
 
 void UITask::showSettingsCategory(int cat) {
-  if (cat < 0 || cat >= 6 || !_set_pane[cat]) return;
+  if (cat < 0 || cat >= CAT_COUNT || !_set_pane[cat]) return;
   if (_set_launcher) lv_obj_add_flag(_set_launcher, LV_OBJ_FLAG_HIDDEN);
-  for (int i = 0; i < 6; i++) if (_set_pane[i]) lv_obj_add_flag(_set_pane[i], LV_OBJ_FLAG_HIDDEN);
+  for (int i = 0; i < CAT_COUNT; i++) if (_set_pane[i]) lv_obj_add_flag(_set_pane[i], LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(_set_pane[cat], LV_OBJ_FLAG_HIDDEN);
   _set_active_pane = _set_pane_body[cat];
   if (_set_active_pane) lv_obj_scroll_to_y(_set_active_pane, 0, LV_ANIM_OFF);
@@ -4446,7 +4448,7 @@ void UITask::showSettingsCategory(int cat) {
 }
 
 void UITask::settingsBackToLauncher() {
-  for (int i = 0; i < 6; i++) if (_set_pane[i]) lv_obj_add_flag(_set_pane[i], LV_OBJ_FLAG_HIDDEN);
+  for (int i = 0; i < CAT_COUNT; i++) if (_set_pane[i]) lv_obj_add_flag(_set_pane[i], LV_OBJ_FLAG_HIDDEN);
   if (_set_kb) lv_obj_add_flag(_set_kb, LV_OBJ_FLAG_HIDDEN);
   _set_active_pane = NULL;
   if (_set_launcher) lv_obj_clear_flag(_set_launcher, LV_OBJ_FLAG_HIDDEN);
@@ -4455,7 +4457,13 @@ void UITask::settingsBackToLauncher() {
 void UITask::category_row_cb(lv_event_t* e) {
   if (!_instance) return;
   int cat = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target(e));
+  if (cat == CAT_ABOUT) { _instance->openNodeInfo(); return; }
   _instance->showSettingsCategory(cat);
+}
+
+void UITask::profile_hero_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->showSettingsCategory(CAT_PROFILE);  // owner hero -> Profile pane
 }
 
 void UITask::settings_back_cb(lv_event_t* e) {
@@ -4474,7 +4482,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   // Launcher + per-category panes (see helpers above). Null the pane tables first
   // so a partial build can't leave dangling pointers.
   _set_active_pane = NULL;
-  for (int i = 0; i < 6; i++) { _set_pane[i] = NULL; _set_pane_body[i] = NULL; }
+  for (int i = 0; i < CAT_COUNT; i++) { _set_pane[i] = NULL; _set_pane_body[i] = NULL; }
   lv_obj_set_style_pad_all(_tab_settings, 0, 0);
   lv_obj_clear_flag(_tab_settings, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -4504,7 +4512,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_flex_align(prof, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_clear_flag(prof, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(prof, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(prof, open_nodeinfo_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(prof, profile_hero_cb, LV_EVENT_CLICKED, NULL);  // hero -> Profile settings
 
   _set_profile_avatar = lv_obj_create(prof);
   lv_obj_remove_style_all(_set_profile_avatar);
@@ -4523,7 +4531,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_height(pcol, LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(pcol, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(pcol, 2, 0);
-  lv_obj_clear_flag(pcol, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(pcol, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);  // whole hero is the tap target
   _set_profile_name = lv_label_create(pcol);
   lv_obj_set_width(_set_profile_name, LV_PCT(100));
   lv_label_set_long_mode(_set_profile_name, LV_LABEL_LONG_DOT);
@@ -4540,22 +4548,23 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(chev, lv_color_hex(DIM_HEX), 0);
 
   // Category launcher rows -> each drills into the matching pane.
-  makeCategoryRow(_set_launcher, LV_SYMBOL_EDIT,  "Profile",         "Name, position, public key",          0);
-  makeCategoryRow(_set_launcher, LV_SYMBOL_WIFI,  "Radio & Routing", "Frequency, power, presets, mesh",      1);
-  makeCategoryRow(_set_launcher, LV_SYMBOL_GPS,   "Telemetry & GPS", "Telemetry sharing, GPS module",        2);
-  makeCategoryRow(_set_launcher, LV_SYMBOL_BELL,  "Notifications",   "New-message alerts & sound",           3);
-  makeCategoryRow(_set_launcher, LV_SYMBOL_IMAGE, "Display & Time",  "Brightness, rotation, clock, avatars", 4);
-  makeCategoryRow(_set_launcher, LV_SYMBOL_POWER, "Power & Lock",    "LoRa radio, PIN lock, reboot",         5);
+  // (The owner hero above is the Profile entry -> pane 0, so no separate row.)
+  makeCategoryRow(_set_launcher, LV_SYMBOL_WIFI,  "Radio & Routing", "Frequency, power, presets, mesh",      CAT_RADIO);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_GPS,   "Telemetry & GPS", "Telemetry sharing, GPS module",        CAT_TELEMETRY);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_BELL,  "Notifications",   "New-message alerts & sound",           CAT_NOTIFY);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_IMAGE, "Display & Time",  "Brightness, rotation, clock, avatars", CAT_DISPLAY);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_POWER, "Power & Lock",    "LoRa radio, PIN lock, reboot",         CAT_POWER);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_LIST,  "About",           "Device status & telemetry",           CAT_ABOUT);
 
   // Build the (hidden) category panes; the fields below are parented into each.
-  makeSettingsPane(0, "Profile");
-  makeSettingsPane(1, "Radio & Routing");
-  makeSettingsPane(2, "Telemetry & GPS");
-  makeSettingsPane(3, "Notifications");
-  makeSettingsPane(4, "Display & Time");
-  makeSettingsPane(5, "Power & Lock");
+  makeSettingsPane(CAT_PROFILE,   "Profile");
+  makeSettingsPane(CAT_RADIO,     "Radio & Routing");
+  makeSettingsPane(CAT_TELEMETRY, "Telemetry & GPS");
+  makeSettingsPane(CAT_NOTIFY,    "Notifications");
+  makeSettingsPane(CAT_DISPLAY,   "Display & Time");
+  makeSettingsPane(CAT_POWER,     "Power & Lock");
 
-  body = _set_pane_body[0];   // Profile
+  body = _set_pane_body[CAT_PROFILE];   // Profile
 
   // ===== Public Info =====
   addSettingsSection(body, "Public Info");
@@ -4624,7 +4633,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_label_set_text(sml, LV_SYMBOL_DOWNLOAD " Share my contact (QR)");
   lv_obj_center(sml);
 
-  body = _set_pane_body[1];   // Radio & Routing
+  body = _set_pane_body[CAT_RADIO];   // Radio & Routing
   // ===== Radio (edit fields, then a single Apply) =====
   // Header row: "Radio" title on the left, a "Preset" button on the right.
   lv_obj_t* rhdr = lv_obj_create(body);
@@ -4672,8 +4681,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_width(_set_path_dd, LV_PCT(100));
   lv_obj_add_event_cb(_set_path_dd, set_pathmode_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-  body = _set_pane_body[2];   // Telemetry & GPS
-  body = _set_pane_body[2];   // Telemetry & GPS
+  body = _set_pane_body[CAT_TELEMETRY];   // Telemetry & GPS
   // ===== Telemetry policy (who may request our telemetry) =====
   addSettingsSection(body, "Telemetry");
   static const char* TELEM_OPTS = "Deny\nAllow (flagged)\nAllow all";  // -> TELEM_MODE_DENY/ALLOW_FLAGS/ALLOW_ALL
@@ -4687,7 +4695,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_user_data(_set_telem_env_dd, (void*)(intptr_t)2);
   lv_obj_add_event_cb(_set_telem_env_dd, set_telem_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-  body = _set_pane_body[1];   // back to Radio & Routing
+  body = _set_pane_body[CAT_RADIO];   // back to Radio & Routing
   // ===== Advanced (mesh behaviour) =====
   addSettingsSection(body, "Advanced");
   _set_autoadd_chk = lv_checkbox_create(body);
@@ -4711,7 +4719,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   _set_airtime_ta  = makeNumberField(body, "Airtime factor", set_advnum_ta_event_cb);
 
 #if ENV_INCLUDE_GPS
-  body = _set_pane_body[2];   // Telemetry & GPS
+  body = _set_pane_body[CAT_TELEMETRY];   // Telemetry & GPS
   // ===== GPS (optional module on the rear UART plug) =====
   addSettingsSection(body, "GPS");
   _set_gps_chk = lv_checkbox_create(body);
@@ -4721,7 +4729,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   _set_gps_interval_ta = makeNumberField(body, "GPS interval (s)", set_advnum_ta_event_cb);
 #endif
 
-  body = _set_pane_body[3];   // Notifications
+  body = _set_pane_body[CAT_NOTIFY];   // Notifications
   // ===== Notifications =====
   addSettingsSection(body, "Notifications");
   _set_notify_chk = lv_checkbox_create(body);
@@ -4729,7 +4737,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_notify_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_notify_chk, set_notify_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-  body = _set_pane_body[5];   // Power & Lock
+  body = _set_pane_body[CAT_POWER];   // Power & Lock
   // ===== Power & Lock =====
   addSettingsSection(body, "Power & Lock");
   lv_obj_t* frd = makeField(body, "LoRa radio");
@@ -4750,7 +4758,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_label_set_text(lockl, LV_SYMBOL_SETTINGS " Lock screen");
   lv_obj_center(lockl);
 
-  body = _set_pane_body[4];   // Display & Time
+  body = _set_pane_body[CAT_DISPLAY];   // Display & Time
   // ===== Display =====
   addSettingsSection(body, "Display");
   lv_obj_t* fb = makeField(body, "Brightness");
@@ -4803,7 +4811,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_add_event_cb(_set_history_chk, set_history_cb, LV_EVENT_VALUE_CHANGED, NULL);
 #endif
 
-  body = _set_pane_body[5];   // reboot belongs under Power & Lock
+  body = _set_pane_body[CAT_POWER];   // reboot belongs under Power & Lock
   // Reboot button -- handy on battery, and a clean software restart (esp_restart)
   // vs the hardware RESET line.
   lv_obj_t* reboot = lv_btn_create(body);
@@ -4957,7 +4965,9 @@ void UITask::updateOwnerProfile() {
   lv_obj_set_style_bg_color(_set_profile_avatar, lv_color_hex(nameColor(who)), 0);
   char keyhex[2 * PUB_KEY_SIZE + 1] = "";
   if (mproxy::selfPubKey()) mesh::Utils::toHex(keyhex, mproxy::selfPubKey(), PUB_KEY_SIZE);
-  char snip[20]; snprintf(snip, sizeof(snip), "%.12s...", keyhex);
+  char snip[24];  // "<aabbcc...ddeeff>" -- same syntax as contact cards / share
+  if (keyhex[0]) snprintf(snip, sizeof(snip), "<%.6s...%.6s>", keyhex, keyhex + 2 * PUB_KEY_SIZE - 6);
+  else           snip[0] = 0;
   lv_label_set_text(_set_profile_key, snip);
 }
 

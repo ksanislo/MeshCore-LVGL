@@ -228,9 +228,18 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_notify_chk;      // master new-message notifications toggle
   lv_obj_t*       _set_kb;
   lv_obj_t*       _set_active_ta;       // settings textarea currently being edited
-  lv_obj_t*       _set_launcher;        // Settings category launcher (profile hero + rows)
-  lv_obj_t*       _set_pane[6];         // one pane per category, shown one at a time
-  lv_obj_t*       _set_pane_body[6];    // each pane's scrollable body (fields parented here)
+  // Settings categories. The pane index is the single source of truth shared by
+  // makeSettingsPane(), makeCategoryRow(), and the _set_pane[] arrays; the enum
+  // keeps them in sync and CAT_COUNT sizes the arrays + the bounds guard. CAT_ABOUT
+  // is a sentinel launcher row that opens Node Info instead of an in-tab pane.
+  enum SettingsCat {
+    CAT_PROFILE = 0, CAT_RADIO, CAT_TELEMETRY, CAT_NOTIFY,
+    CAT_DISPLAY, CAT_POWER, CAT_COUNT,
+    CAT_ABOUT = 100,
+  };
+  lv_obj_t*       _set_launcher;             // Settings category launcher (profile hero + rows)
+  lv_obj_t*       _set_pane[CAT_COUNT];      // one pane per category, shown one at a time
+  lv_obj_t*       _set_pane_body[CAT_COUNT]; // each pane's scrollable body (fields parented here)
   lv_obj_t*       _set_active_pane;     // active pane body = keyboard-raise scroll target
   lv_obj_t*       _set_key_ta;          // read-only self public key (scrolls horizontally)
   lv_obj_t*       _set_lat_ta;
@@ -579,6 +588,7 @@ private:
   void      openNodeInfo();
   void      refreshNodeInfo();
   static void open_nodeinfo_cb(lv_event_t* e);
+  static void profile_hero_cb(lv_event_t* e);   // owner hero -> Profile settings pane
   static void nodeinfo_back_cb(lv_event_t* e);
   static void nodeinfo_timer_cb(lv_timer_t* t);
 
