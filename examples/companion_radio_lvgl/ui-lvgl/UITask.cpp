@@ -1959,74 +1959,192 @@ static bool parseContactRef(const char* text, uint8_t* pk_out, uint8_t& type_out
   return true;
 }
 
-void UITask::buildContactCard(lv_obj_t* bubble, const ChatMessage* m,
-                              const uint8_t* pubkey, uint8_t type, const char* name) {
-  lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_pad_row(bubble, 3, 0);
+// Brand an avatar circle from a contact's (sanitized) name + type: name-seeded
+// color + first grapheme for chat contacts, or a neutral circle + type glyph for
+// repeaters/rooms/sensors. Same scheme as the contacts list and hero cards.
+// parseContactRef over a [b,e) span (not necessarily null-terminated): copy + parse.
+static bool parseContactRefSpan(const char* b, const char* e, uint8_t* pk, uint8_t& ty,
+                                char* nm, size_t cap) {
+  size_t n = (size_t)(e - b);
+  if (n == 0 || n >= CHAT_MSG_TEXT_MAX + 8) return false;
+  char buf[CHAT_MSG_TEXT_MAX + 8];
+  memcpy(buf, b, n); buf[n] = 0;
+  return parseContactRef(buf, pk, ty, nm, cap);
+}
 
-  if (m->outgoing) {
-    lv_obj_t* hdr = lv_label_create(bubble);
-    lv_label_set_text(hdr, "You shared this contact");
-    lv_obj_set_style_text_color(hdr, lv_color_hex(0xCBD5E1), 0);
-    lv_obj_set_style_text_font(hdr, &lv_font_montserrat_12, 0);
+// Render a [s,len) text run into the bubble via the shared message pipeline; skips
+// whitespace-only runs (so the card doesn't get blank lines around it).
+static void addTextSpan(lv_obj_t* bubble, const char* s, size_t len) {
+  bool nonblank = false;
+  for (size_t i = 0; i < len; i++) if (!isspace((unsigned char)s[i])) { nonblank = true; break; }
+  if (!nonblank) return;
+  char buf[CHAT_MSG_TEXT_MAX + 8];
+  if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+  memcpy(buf, s, len); buf[len] = 0;
+  addMessageText(bubble, buf);
+}
+
+// Does the text contain at least one parseable contact ref anywhere?
+static bool textHasContactRef(const char* text) {
+  const char* p = text;
+  while (p && *p) {
+    const char* lt = strchr(p, '<');
+    if (!lt) return false;
+    const char* gt = strchr(lt, '>');
+    if (!gt) return false;
+    uint8_t pk[PUB_KEY_SIZE], ty; char nm[CHAT_PEER_NAME_MAX];
+    if (parseContactRefSpan(lt, gt + 1, pk, ty, nm, sizeof(nm))) return true;
+    p = lt + 1;
   }
+  return false;
+}
 
-  char sname[36];
+// Heap target stashed on a contact card so a tap knows which contact it is (a
+// message may contain several cards). Freed on the card's LV_EVENT_DELETE.
+struct CardTarget { uint8_t pubkey[PUB_KEY_SIZE]; uint8_t type; char name[CHAT_PEER_NAME_MAX]; };
+
+static void brandAvatar(lv_obj_t* circle, lv_obj_t* lbl, const char* sname, uint8_t type) {
+  if (type == ADV_TYPE_CHAT || type == 0) {
+    char g[8]; firstGrapheme(sname, g, sizeof(g));
+    lv_label_set_text(lbl, g[0] ? g : "?");
+    lv_obj_set_style_bg_color(circle, lv_color_hex(nameColor(sname)), 0);
+  } else {
+    lv_label_set_text(lbl, contactSymbol(type));
+    lv_obj_set_style_bg_color(circle, lv_color_hex(UI_AVATAR_NEUT), 0);
+  }
+}
+
+// A contact reference (<pubkey:type:name>) rendered as its own bordered card box
+// *inside* the chat bubble, alongside any surrounding message text. The whole card
+// is the tap target: a known contact opens Contact Info, an unknown one opens the
+// New Contact screen (prefilled, key locked).
+void UITask::buildContactCard(lv_obj_t* parent, const ChatMessage* m,
+                              const uint8_t* pubkey, uint8_t type, const char* name) {
+  char sname[CHAT_PEER_NAME_MAX + 4];
   sanitizeForFont(name, sname, sizeof(sname));
-  lv_obj_t* nm = lv_label_create(bubble);
+
+  lv_obj_t* card = lv_obj_create(parent);
+  lv_obj_remove_style_all(card);
+  lv_obj_set_width(card, LV_PCT(100));
+  lv_obj_set_height(card, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_color(card, lv_color_hex(UI_BG), 0);   // inset, darker than the bubble
+  lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_color(card, lv_color_hex(UI_BORDER), 0);
+  lv_obj_set_style_border_width(card, 1, 0);
+  lv_obj_set_style_radius(card, 8, 0);
+  lv_obj_set_style_pad_all(card, 8, 0);
+  lv_obj_set_style_pad_row(card, 4, 0);
+  lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+  CardTarget* ct = (CardTarget*)lv_mem_alloc(sizeof(CardTarget));   // freed on card delete
+  if (ct) {
+    memcpy(ct->pubkey, pubkey, PUB_KEY_SIZE);
+    ct->type = type;
+    strncpy(ct->name, name, sizeof(ct->name) - 1); ct->name[sizeof(ct->name) - 1] = 0;
+    lv_obj_set_user_data(card, ct);
+    lv_obj_add_event_cb(card, card_free_cb, LV_EVENT_DELETE, NULL);
+  }
+  lv_obj_add_event_cb(card, contact_card_cb, LV_EVENT_CLICKED, NULL);
+
+  // Branded row: avatar circle on the left, name over "<pub..key>" on the right --
+  // same layout/styling as the contacts list rows and hero cards.
+  lv_obj_t* row = lv_obj_create(card);
+  lv_obj_remove_style_all(row);
+  lv_obj_set_width(row, LV_PCT(100));
+  lv_obj_set_height(row, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(row, 10, 0);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+  lv_obj_t* av = lv_obj_create(row);
+  lv_obj_remove_style_all(av);
+  lv_obj_set_size(av, UI_AVATAR_D, UI_AVATAR_D);
+  lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_t* avl = lv_label_create(av);
+  lv_obj_center(avl);
+  lv_obj_set_style_text_color(avl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(avl, fontHeading(), 0);
+  brandAvatar(av, avl, sname, type);
+
+  lv_obj_t* col = lv_obj_create(row);
+  lv_obj_remove_style_all(col);
+  lv_obj_set_flex_grow(col, 1);
+  lv_obj_set_height(col, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(col, 2, 0);
+  lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_t* nm = lv_label_create(col);
+  lv_obj_set_width(nm, LV_PCT(100));
+  lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
   lv_label_set_text(nm, sname);
-  lv_obj_set_style_text_color(nm, lv_color_hex(0xF3F4F6), 0);
+  lv_obj_set_style_text_color(nm, lv_color_hex(UI_FG_BRIGHT), 0);
   lv_obj_set_style_text_font(nm, fontBody(), 0);
 
   char hex[2 * PUB_KEY_SIZE + 1];
   mesh::Utils::toHex(hex, pubkey, PUB_KEY_SIZE);
   char keytrunc[24];
   snprintf(keytrunc, sizeof(keytrunc), "<%.6s...%.6s>", hex, hex + 2 * PUB_KEY_SIZE - 6);
-  lv_obj_t* kl = lv_label_create(bubble);
+  lv_obj_t* kl = lv_label_create(col);
+  lv_obj_set_width(kl, LV_PCT(100));
+  lv_label_set_long_mode(kl, LV_LABEL_LONG_DOT);
   lv_label_set_text(kl, keytrunc);
-  lv_obj_set_style_text_color(kl, lv_color_hex(0x9CA3AF), 0);
-  lv_obj_set_style_text_font(kl, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(kl, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_font(kl, fontCaption(), 0);
 
-  // Tap a card for a known contact (either direction) -> open Contact Info.
-  if (mproxy::lookupContactByPubKey(pubkey, PUB_KEY_SIZE)) {
-    lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_user_data(bubble, (void*)m);
-    lv_obj_add_event_cb(bubble, [](lv_event_t* ev) {
-      if (!_instance) return;
-      const ChatMessage* mm = (const ChatMessage*)lv_obj_get_user_data(lv_event_get_target(ev));
-      uint8_t pk[PUB_KEY_SIZE], ty; char nm[CHAT_PEER_NAME_MAX];
-      if (mm && parseContactRef(mm->text, pk, ty, nm, sizeof(nm)))
-        _instance->openContactInfo(pk, _instance->_chat_screen);
-    }, LV_EVENT_CLICKED, NULL);
-  }
+  bool known = mproxy::lookupContactByPubKey(pubkey, PUB_KEY_SIZE) != nullptr;
+  lv_obj_t* hint = lv_label_create(card);
+  lv_label_set_text(hint, known ? LV_SYMBOL_OK " In contacts \xC2\xB7 tap to open"
+                                : LV_SYMBOL_PLUS " Tap to add contact");
+  lv_obj_set_style_text_color(hint, lv_color_hex(known ? 0x34D399 : UI_ACCENT), 0);
+  lv_obj_set_style_text_font(hint, fontCaption(), 0);
+}
 
-  if (!m->outgoing) {
-    if (mproxy::lookupContactByPubKey(pubkey, PUB_KEY_SIZE)) {
-      lv_obj_t* in = lv_label_create(bubble);
-      lv_label_set_text(in, LV_SYMBOL_OK " In contacts (tap to open)");
-      lv_obj_set_style_text_color(in, lv_color_hex(0x34D399), 0);
-      lv_obj_set_style_text_font(in, &lv_font_montserrat_12, 0);
+// Render a message body that mixes plain text with inline "rich tokens" -- emit
+// plain text runs (addMessageText) and rich widgets in order, stacked in the
+// bubble. Today the only rich token is a contact ref (<pubkey:type:name>) -> an
+// inline contact card; this is the hook for future inline types (channel links,
+// http image links, etc.): add a detector + a builder in the scan below.
+void UITask::renderRichBody(lv_obj_t* bubble, const ChatMessage* m) {
+  lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(bubble, 4, 0);
+  const char* p = m->text;
+  while (p && *p) {
+    const char* lt = strchr(p, '<');
+    const char* gt = lt ? strchr(lt, '>') : nullptr;
+    uint8_t pk[PUB_KEY_SIZE], ty; char nm[CHAT_PEER_NAME_MAX];
+    if (lt && gt && parseContactRefSpan(lt, gt + 1, pk, ty, nm, sizeof(nm))) {
+      addTextSpan(bubble, p, (size_t)(lt - p));   // text before the token (skips blanks)
+      buildContactCard(bubble, m, pk, ty, nm);    // inline contact card
+      p = gt + 1;
+    } else if (lt) {
+      addTextSpan(bubble, p, (size_t)(lt - p) + 1);  // a stray '<' -> keep as text
+      p = lt + 1;
     } else {
-      lv_obj_t* add = lv_btn_create(bubble);
-      lv_obj_set_user_data(add, (void*)m);  // re-parsed on tap
-      lv_obj_add_event_cb(add, add_contact_cb, LV_EVENT_CLICKED, NULL);
-      lv_obj_t* al = lv_label_create(add);
-      lv_label_set_text(al, LV_SYMBOL_PLUS " Add Contact");
-      lv_obj_center(al);
+      addTextSpan(bubble, p, strlen(p));          // trailing text
+      break;
     }
   }
 }
 
-void UITask::add_contact_cb(lv_event_t* e) {
+// Tap an inline contact card -> open the contact (known) or the New Contact screen
+// prefilled with key locked (unknown), per the card's stashed target.
+void UITask::contact_card_cb(lv_event_t* e) {
   if (!_instance) return;
-  const ChatMessage* m = (const ChatMessage*)lv_obj_get_user_data(lv_event_get_target(e));
-  if (!m) return;
-  uint8_t pk[PUB_KEY_SIZE], type;
-  char name[CHAT_PEER_NAME_MAX];
-  if (!parseContactRef(m->text, pk, type, name, sizeof(name))) return;
-  // Open the unified New Contact screen prefilled (key locked); the user confirms
-  // with Save (and may set a local nickname). Returns to the chat on back/save.
-  _instance->openNewContactPrefilled(pk, type, name, _instance->_chat_screen);
+  const CardTarget* t = (const CardTarget*)lv_obj_get_user_data(lv_event_get_current_target(e));
+  if (!t) return;
+  if (mproxy::lookupContactByPubKey(t->pubkey, PUB_KEY_SIZE))
+    _instance->openContactInfo(t->pubkey, _instance->_chat_screen);
+  else
+    _instance->openNewContactPrefilled(t->pubkey, t->type, t->name, _instance->_chat_screen);
+}
+
+void UITask::card_free_cb(lv_event_t* e) {
+  void* p = lv_obj_get_user_data(lv_event_get_target(e));
+  if (p) lv_mem_free(p);
 }
 
 // Format helpers for chat timestamps. Inputs are already UTC + the local offset.
@@ -2135,10 +2253,8 @@ void UITask::rebuildChatHistory() {
     lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, 0);
     lv_obj_align(bubble, m->outgoing ? LV_ALIGN_TOP_RIGHT : LV_ALIGN_TOP_LEFT, 0, 0);
 
-    uint8_t cpk[PUB_KEY_SIZE], ctype;
-    char cname[CHAT_PEER_NAME_MAX];
-    if (parseContactRef(m->text, cpk, ctype, cname, sizeof(cname))) {
-      buildContactCard(bubble, m, cpk, ctype, cname);
+    if (textHasContactRef(m->text)) {
+      renderRichBody(bubble, m);   // text runs + inline contact card(s)
     } else {
       addMessageText(bubble, m->text);
       if (m->outgoing && m->status == MSG_STATUS_FAILED) {

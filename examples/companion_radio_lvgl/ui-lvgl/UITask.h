@@ -493,9 +493,11 @@ class UITask : public AbstractUITask {
   static void insert_backdrop_cb(lv_event_t* e);
   static void insert_myinfo_cb(lv_event_t* e);
   static void insert_share_cb(lv_event_t* e);
-  static void add_contact_cb(lv_event_t* e);
-  static void buildContactCard(lv_obj_t* bubble, const ChatMessage* m,
-                               const uint8_t* pubkey, uint8_t type, const char* name);
+  static void contact_card_cb(lv_event_t* e);   // tap inline card -> open / add contact
+  static void card_free_cb(lv_event_t* e);       // free the card's heap target on delete
+  void      renderRichBody(lv_obj_t* bubble, const ChatMessage* m);  // text + inline rich tokens
+  void      buildContactCard(lv_obj_t* parent, const ChatMessage* m,
+                             const uint8_t* pubkey, uint8_t type, const char* name);
 
   // Clickable @mentions in message bubbles
   void      attachMentions(lv_obj_t* bubble, const char* text);
