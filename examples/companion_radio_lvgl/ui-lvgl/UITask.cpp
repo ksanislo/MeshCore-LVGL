@@ -104,8 +104,8 @@ void UITask::dismiss_kb_cb(lv_event_t* e) {
   if (!_instance) return;
   UITask* s = _instance;
   if (s->_chat_keyboard && lv_scr_act() == s->_chat_screen) s->layoutChatBody(false);  // also restores chat layout
-  lv_obj_t* kbs[] = { s->_set_kb, s->_cinfo_kb, s->_path_kb, s->_newchan_kb,
-                      s->_login_kb, s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_lock_kb };
+  lv_obj_t* kbs[] = { s->_set_kb, s->_cinfo_kb, s->_path_kb, s->_newchan_kb, s->_login_kb,
+                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_lock_kb, s->_profile_kb };
   for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -2701,7 +2701,7 @@ void UITask::ta_done_cb(lv_event_t* e) {
   lv_event_send(ta, LV_EVENT_DEFOCUSED, NULL);   // run the field's commit-on-defocus
   lv_obj_clear_state(ta, LV_STATE_FOCUSED);
   lv_obj_t* kbs[] = { s->_set_kb, s->_cinfo_kb, s->_path_kb, s->_newchan_kb, s->_login_kb,
-                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_lock_kb };
+                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_lock_kb, s->_profile_kb };
   for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -3277,6 +3277,10 @@ void UITask::populateContactInfo() {
 }
 
 void UITask::openContactInfo(const uint8_t* pubkey, lv_obj_t* return_screen) {
+  // A link to our own contact opens the owner profile, so "view contact" behaves
+  // the same whether it's someone else or us.
+  const uint8_t* self = mproxy::selfPubKey();
+  if (self && pubkey && memcmp(pubkey, self, PUB_KEY_SIZE) == 0) { openProfile(return_screen); return; }
   memcpy(_cinfo_pubkey, pubkey, PUB_KEY_SIZE);
   // Load a UI-owned working copy from the snapshot (edits are optimistic + posted).
   const ContactInfo* src = mproxy::lookupContactByPubKey(pubkey, PUB_KEY_SIZE);
@@ -4556,7 +4560,7 @@ void UITask::category_row_cb(lv_event_t* e) {
 
 void UITask::profile_hero_cb(lv_event_t* e) {
   (void)e;
-  if (_instance) _instance->showSettingsCategory(CAT_PROFILE);  // owner hero -> Profile pane
+  if (_instance) _instance->openProfile(_instance->_home_screen);  // hero -> full-screen Profile
 }
 
 void UITask::settings_back_cb(lv_event_t* e) {
@@ -4569,6 +4573,113 @@ void UITask::settings_tab_changed_cb(lv_event_t* e) {
   if (!_instance || !_instance->_set_launcher || !_instance->_tabview) return;
   if (lv_tabview_get_tab_act(_instance->_tabview) == 2)  // 2 = Settings tab
     _instance->settingsBackToLauncher();
+}
+
+// The owner profile as a full-screen "contact page for yourself": same header bar
+// + hero-card design as Contact Info, but with only the owner-relevant edit
+// options (name, position, share). Built once during buildSettingsTab so its
+// fields are populated by populateSettings().
+void UITask::buildProfileScreen() {
+  if (_profile_screen) return;
+  _profile_screen = lv_obj_create(NULL);
+  styleAsDarkScreen(_profile_screen);
+  lv_obj_set_style_pad_all(_profile_screen, 0, 0);
+
+  makeHeaderBar(_profile_screen, "Profile", profile_back_cb);
+
+  _profile_body = lv_obj_create(_profile_screen);
+  lv_obj_add_event_cb(_profile_body, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap empty -> hide kb
+  lv_obj_set_size(_profile_body, _screen_w, _screen_h - HEADER_H);
+  lv_obj_align(_profile_body, LV_ALIGN_TOP_MID, 0, HEADER_H);
+  lv_obj_set_style_bg_color(_profile_body, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(_profile_body, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(_profile_body, 0, 0);
+  lv_obj_set_style_radius(_profile_body, 0, 0);
+  lv_obj_set_style_pad_all(_profile_body, 12, 0);
+  lv_obj_set_style_pad_row(_profile_body, 8, 0);
+  lv_obj_set_flex_flow(_profile_body, LV_FLEX_FLOW_COLUMN);
+
+  // Big hero card (avatar + name over the tappable "<pub..key>"), like any contact.
+  makeHeroCard(_profile_body, &_prof_avatar, &_prof_avatar_lbl, &_prof_name, &_prof_key, profile_key_cb);
+
+  // ===== Public Info (owner-only edit options) =====
+  addSettingsSection(_profile_body, "Public Info");
+
+  lv_obj_t* fn = makeField(_profile_body, "Name");
+  _set_name_ta = lv_textarea_create(fn);
+  lv_textarea_set_one_line(_set_name_ta, true); lv_obj_add_event_cb(_set_name_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+  lv_obj_set_width(_set_name_ta, LV_PCT(100));
+  lv_obj_add_event_cb(_set_name_ta, set_name_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  // Position: editable lat/lon (degrees). Affects adverts only when sharing is on.
+  lv_obj_t* fpos = makeField(_profile_body, "Position (lat, lon)");
+  lv_obj_t* prow = lv_obj_create(fpos);
+  makePassive(prow);
+  lv_obj_set_width(prow, LV_PCT(100));
+  lv_obj_set_height(prow, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(prow, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(prow, 0, 0);
+  lv_obj_set_style_pad_all(prow, 0, 0);
+  lv_obj_set_style_pad_column(prow, 6, 0);
+  lv_obj_clear_flag(prow, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(prow, LV_FLEX_FLOW_ROW);
+  _set_lat_ta = lv_textarea_create(prow);
+  lv_textarea_set_one_line(_set_lat_ta, true); lv_obj_add_event_cb(_set_lat_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+  lv_textarea_set_accepted_chars(_set_lat_ta, "0123456789.-");
+  lv_obj_set_flex_grow(_set_lat_ta, 1);
+  lv_obj_add_event_cb(_set_lat_ta, set_pos_ta_event_cb, LV_EVENT_ALL, NULL);
+  _set_lon_ta = lv_textarea_create(prow);
+  lv_textarea_set_one_line(_set_lon_ta, true); lv_obj_add_event_cb(_set_lon_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+  lv_textarea_set_accepted_chars(_set_lon_ta, "0123456789.-");
+  lv_obj_set_flex_grow(_set_lon_ta, 1);
+  lv_obj_add_event_cb(_set_lon_ta, set_pos_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  _set_sharepos = lv_checkbox_create(_profile_body);
+  lv_checkbox_set_text(_set_sharepos, "Share position");
+  lv_obj_set_style_text_color(_set_sharepos, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_sharepos, set_sharepos_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  // Export our own contact as a scannable QR (reuses the share-QR screen).
+  lv_obj_t* shareme = lv_btn_create(_profile_body);
+  lv_obj_set_width(shareme, LV_PCT(100));
+  lv_obj_add_event_cb(shareme, set_shareme_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* sml = lv_label_create(shareme);
+  lv_label_set_text(sml, LV_SYMBOL_DOWNLOAD " Share my contact (QR)");
+  lv_obj_center(sml);
+
+  _profile_kb = lv_keyboard_create(_profile_screen);
+  lv_obj_add_event_cb(_profile_kb, profile_kb_event_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_profile_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::openProfile(lv_obj_t* return_screen) {
+  buildProfileScreen();
+  _profile_return_screen = return_screen;
+  updateOwnerProfile();   // refresh hero (name/avatar/key) from current prefs
+  if (_profile_kb) lv_obj_add_flag(_profile_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_scroll_to_y(_profile_body, 0, LV_ANIM_OFF);
+  lv_scr_load(_profile_screen);
+}
+
+void UITask::profile_back_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  if (_instance->_profile_kb) lv_obj_add_flag(_instance->_profile_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_scr_load(_instance->_profile_return_screen ? _instance->_profile_return_screen
+                                                : _instance->_home_screen);
+}
+
+void UITask::profile_kb_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+    if (_instance->_set_active_ta == _instance->_set_name_ta) _instance->commitNodeName();
+    else if (_instance->_set_active_ta == _instance->_set_lat_ta ||
+             _instance->_set_active_ta == _instance->_set_lon_ta) _instance->commitPosition();
+    _instance->_set_active_ta = NULL;
+    lv_obj_add_flag(_instance->_profile_kb, LV_OBJ_FLAG_HIDDEN);
+    _instance->resetKbScroll();
+  }
 }
 
 void UITask::buildSettingsTab(lv_obj_t* parent) {
@@ -4635,10 +4746,8 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_label_set_long_mode(_set_profile_key, LV_LABEL_LONG_DOT);
   lv_obj_set_style_text_color(_set_profile_key, lv_color_hex(DIM_HEX), 0);
   lv_obj_set_style_text_font(_set_profile_key, fontCaption(), 0);
-  // Tapping the key line shows the full key + copy (sits above the hero's
-  // profile-pane tap, so the rest of the card still opens Profile).
-  lv_obj_add_flag(_set_profile_key, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(_set_profile_key, profile_key_cb, LV_EVENT_CLICKED, NULL);
+  // Not interactive here -- the whole launcher card links to the Profile page;
+  // the full key + copy lives on that page's hero.
 
   lv_obj_t* chev = lv_label_create(prof);
   lv_label_set_text(chev, LV_SYMBOL_RIGHT);
@@ -4653,66 +4762,17 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   makeCategoryRow(_set_launcher, LV_SYMBOL_POWER, "Power & Lock",    "LoRa radio, PIN lock, reboot",         CAT_POWER);
   makeCategoryRow(_set_launcher, LV_SYMBOL_LIST,  "About",           "Device status & telemetry",           CAT_ABOUT);
 
-  // Build the (hidden) category panes; the fields below are parented into each.
-  makeSettingsPane(CAT_PROFILE,   "Profile");
+  // Profile is a full-screen detail page (built below), not an in-tab pane; the
+  // launcher hero opens it. The rest are in-tab category panes.
   makeSettingsPane(CAT_RADIO,     "Radio & Routing");
   makeSettingsPane(CAT_TELEMETRY, "Telemetry & GPS");
   makeSettingsPane(CAT_NOTIFY,    "Notifications");
   makeSettingsPane(CAT_DISPLAY,   "Display & Time");
   makeSettingsPane(CAT_POWER,     "Power & Lock");
 
-  body = _set_pane_body[CAT_PROFILE];   // Profile
-
-  // Big hero card up top -- same look as a contact detail page (the compact card
-  // on the Settings launcher links here).
-  makeHeroCard(body, &_prof_avatar, &_prof_avatar_lbl, &_prof_name, &_prof_key, profile_key_cb);
-
-  // ===== Public Info =====
-  addSettingsSection(body, "Public Info");
-
-  lv_obj_t* fn = makeField(body, "Name");
-  _set_name_ta = lv_textarea_create(fn);
-  lv_textarea_set_one_line(_set_name_ta, true); lv_obj_add_event_cb(_set_name_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
-  lv_obj_set_width(_set_name_ta, LV_PCT(100));
-  lv_obj_add_event_cb(_set_name_ta, set_name_ta_event_cb, LV_EVENT_ALL, NULL);
-
-  // (Public key lives in the profile hero now -- tap it for the full key + copy.)
-
-  // Position: editable lat/lon (degrees). Affects adverts only when sharing is on.
-  lv_obj_t* fpos = makeField(body, "Position (lat, lon)");
-  lv_obj_t* prow = lv_obj_create(fpos);
-  makePassive(prow);
-  lv_obj_set_width(prow, LV_PCT(100));
-  lv_obj_set_height(prow, LV_SIZE_CONTENT);
-  lv_obj_set_style_bg_opa(prow, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(prow, 0, 0);
-  lv_obj_set_style_pad_all(prow, 0, 0);
-  lv_obj_set_style_pad_column(prow, 6, 0);
-  lv_obj_clear_flag(prow, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_flex_flow(prow, LV_FLEX_FLOW_ROW);
-  _set_lat_ta = lv_textarea_create(prow);
-  lv_textarea_set_one_line(_set_lat_ta, true); lv_obj_add_event_cb(_set_lat_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
-  lv_textarea_set_accepted_chars(_set_lat_ta, "0123456789.-");
-  lv_obj_set_flex_grow(_set_lat_ta, 1);
-  lv_obj_add_event_cb(_set_lat_ta, set_pos_ta_event_cb, LV_EVENT_ALL, NULL);
-  _set_lon_ta = lv_textarea_create(prow);
-  lv_textarea_set_one_line(_set_lon_ta, true); lv_obj_add_event_cb(_set_lon_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
-  lv_textarea_set_accepted_chars(_set_lon_ta, "0123456789.-");
-  lv_obj_set_flex_grow(_set_lon_ta, 1);
-  lv_obj_add_event_cb(_set_lon_ta, set_pos_ta_event_cb, LV_EVENT_ALL, NULL);
-
-  _set_sharepos = lv_checkbox_create(body);
-  lv_checkbox_set_text(_set_sharepos, "Share position");
-  lv_obj_set_style_text_color(_set_sharepos, lv_color_hex(FG_HEX), 0);
-  lv_obj_add_event_cb(_set_sharepos, set_sharepos_cb, LV_EVENT_VALUE_CHANGED, NULL);
-
-  // Export our own contact as a scannable QR (reuses the share-QR screen).
-  lv_obj_t* shareme = lv_btn_create(body);
-  lv_obj_set_width(shareme, LV_PCT(100));
-  lv_obj_add_event_cb(shareme, set_shareme_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* sml = lv_label_create(shareme);
-  lv_label_set_text(sml, LV_SYMBOL_DOWNLOAD " Share my contact (QR)");
-  lv_obj_center(sml);
+  // Owner profile is its own full-screen contact page (see buildProfileScreen);
+  // built here so its fields are populated by populateSettings() below.
+  buildProfileScreen();
 
   body = _set_pane_body[CAT_RADIO];   // Radio & Routing
   // ===== Radio (edit fields, then a single Apply) =====
@@ -5041,13 +5101,18 @@ void UITask::updateOwnerProfile() {
   lv_obj_set_style_bg_color(_set_profile_avatar, lv_color_hex(nameColor(who)), 0);
   char keyhex[2 * PUB_KEY_SIZE + 1] = "";
   if (mproxy::selfPubKey()) mesh::Utils::toHex(keyhex, mproxy::selfPubKey(), PUB_KEY_SIZE);
-  char snip[32];  // "<aabbcc...ddeeff>" + copy glyph -- tap opens the full key + copy
-  if (keyhex[0]) snprintf(snip, sizeof(snip), "<%.6s...%.6s>  " LV_SYMBOL_COPY, keyhex, keyhex + 2 * PUB_KEY_SIZE - 6);
-  else           snip[0] = 0;
-  lv_label_set_text(_set_profile_key, snip);
+  // Launcher card: plain "<aabbcc...ddeeff>" (the whole card just links to Profile).
+  char plain[24];
+  if (keyhex[0]) snprintf(plain, sizeof(plain), "<%.6s...%.6s>", keyhex, keyhex + 2 * PUB_KEY_SIZE - 6);
+  else           plain[0] = 0;
+  lv_label_set_text(_set_profile_key, plain);
 
-  // Big hero on the Settings > Profile pane shows the same owner identity.
+  // Profile page hero: same owner identity, but its key line is tappable (full key
+  // + copy), so it gets the copy glyph.
   if (_prof_name) {
+    char snip[32];
+    if (keyhex[0]) snprintf(snip, sizeof(snip), "<%.6s...%.6s>  " LV_SYMBOL_COPY, keyhex, keyhex + 2 * PUB_KEY_SIZE - 6);
+    else           snip[0] = 0;
     lv_label_set_text(_prof_name, clean);
     lv_label_set_text(_prof_avatar_lbl, g[0] ? g : "?");
     lv_obj_set_style_bg_color(_prof_avatar, lv_color_hex(nameColor(who)), 0);
@@ -5114,14 +5179,12 @@ void UITask::set_name_ta_event_cb(lv_event_t* e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     _instance->_set_active_ta = ta;
-    lv_keyboard_set_textarea(_instance->_set_kb, ta);
-    lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_move_foreground(_instance->_set_kb);
-    _instance->raiseFieldForKb(_instance->_set_active_pane ? _instance->_set_active_pane
-                                                           : _instance->_tab_settings,
-                               _instance->_set_kb, ta);
+    lv_keyboard_set_textarea(_instance->_profile_kb, ta);
+    lv_keyboard_set_mode(_instance->_profile_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_profile_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_profile_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_profile_kb);
+    _instance->raiseFieldForKb(_instance->_profile_body, _instance->_profile_kb, ta);
   } else if (code == LV_EVENT_DEFOCUSED) {
     _instance->commitNodeName();
   }
@@ -5616,7 +5679,7 @@ void UITask::set_shareme_cb(lv_event_t* e) {
   (void)e;
   if (!_instance || !_instance->_node_prefs) return;
   _instance->openShareQR(mproxy::selfPubKey(), ADV_TYPE_CHAT,
-                         _instance->_node_prefs->node_name, _instance->_home_screen);
+                         _instance->_node_prefs->node_name, _instance->_profile_screen);
 }
 
 void UITask::set_tz_ta_event_cb(lv_event_t* e) {
@@ -5644,14 +5707,12 @@ void UITask::set_pos_ta_event_cb(lv_event_t* e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     _instance->_set_active_ta = ta;
-    lv_keyboard_set_textarea(_instance->_set_kb, ta);
-    lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
-    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_move_foreground(_instance->_set_kb);
-    _instance->raiseFieldForKb(_instance->_set_active_pane ? _instance->_set_active_pane
-                                                           : _instance->_tab_settings,
-                               _instance->_set_kb, ta);
+    lv_keyboard_set_textarea(_instance->_profile_kb, ta);
+    lv_keyboard_set_mode(_instance->_profile_kb, LV_KEYBOARD_MODE_NUMBER);
+    lv_obj_clear_flag(_instance->_profile_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_profile_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_profile_kb);
+    _instance->raiseFieldForKb(_instance->_profile_body, _instance->_profile_kb, ta);
   } else if (code == LV_EVENT_DEFOCUSED) {
     _instance->commitPosition();
   }

@@ -211,10 +211,16 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_profile_avatar_lbl;
   lv_obj_t*       _set_profile_name;
   lv_obj_t*       _set_profile_key;
-  lv_obj_t*       _prof_avatar;            // big owner hero (Settings > Profile pane)
+  lv_obj_t*       _prof_avatar;            // big owner hero (full-screen Profile page)
   lv_obj_t*       _prof_avatar_lbl;
   lv_obj_t*       _prof_name;
   lv_obj_t*       _prof_key;
+  // Owner profile: a full-screen "contact page for yourself" (own screen/keyboard,
+  // like Contact Info), reached from the launcher hero or any link to self.
+  lv_obj_t*       _profile_screen;
+  lv_obj_t*       _profile_body;
+  lv_obj_t*       _profile_kb;
+  lv_obj_t*       _profile_return_screen;
   lv_obj_t*       _set_name_ta;
   lv_obj_t*       _set_freq_ta;
   lv_obj_t*       _set_bw_dd;
@@ -467,6 +473,12 @@ class UITask : public AbstractUITask {
   // Contact Info page
   void      openContactInfo(const uint8_t* pubkey, lv_obj_t* return_screen);
   void      buildContactInfoScreen();
+  // Owner profile = a contact page for yourself. openProfile() is the single entry
+  // point (launcher hero, or any link to our own pubkey).
+  void      buildProfileScreen();
+  void      openProfile(lv_obj_t* return_screen = NULL);
+  static void profile_back_cb(lv_event_t* e);
+  static void profile_kb_event_cb(lv_event_t* e);
   void      populateContactInfo();
   struct ContactInfo* cinfoContact();   // mutable ptr, or NULL
   void      showToast(const char* text);
@@ -661,6 +673,7 @@ public:
       _path_screen(NULL), _path_size_dd(NULL), _path_ta(NULL), _path_kb(NULL), _path_err(NULL),
       _set_profile_avatar(NULL), _set_profile_avatar_lbl(NULL), _set_profile_name(NULL), _set_profile_key(NULL),
       _prof_avatar(NULL), _prof_avatar_lbl(NULL), _prof_name(NULL), _prof_key(NULL),
+      _profile_screen(NULL), _profile_body(NULL), _profile_kb(NULL), _profile_return_screen(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
       _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_avatar_dd(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_kb(NULL),
