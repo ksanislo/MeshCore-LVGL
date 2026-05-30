@@ -2969,36 +2969,52 @@ void UITask::buildContactInfoScreen() {
   lv_obj_set_style_pad_row(_cinfo_body, 8, 0);
   lv_obj_set_flex_flow(_cinfo_body, LV_FLEX_FLOW_COLUMN);
 
-  // Hero: avatar circle + name -- contact branding, same scheme as the list/chat header.
+  // Hero card: avatar circle beside the name stacked over "<pub..key>" -- the same
+  // design as the owner profile hero on the Settings tab. Branding (name-seeded
+  // color / type glyph) matches the contacts list and chat header.
   lv_obj_t* hero = lv_obj_create(_cinfo_body);
   lv_obj_remove_style_all(hero);
   lv_obj_set_width(hero, LV_PCT(100));
   lv_obj_set_height(hero, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_color(hero, lv_color_hex(UI_SURFACE), 0);
+  lv_obj_set_style_bg_opa(hero, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(hero, 8, 0);
+  lv_obj_set_style_pad_all(hero, 10, 0);
+  lv_obj_set_style_pad_column(hero, 12, 0);
   lv_obj_set_flex_flow(hero, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(hero, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_column(hero, 12, 0);
   lv_obj_clear_flag(hero, LV_OBJ_FLAG_SCROLLABLE);
 
   _cinfo_avatar = lv_obj_create(hero);
   lv_obj_remove_style_all(_cinfo_avatar);
-  lv_obj_set_size(_cinfo_avatar, 56, 56);
+  lv_obj_set_size(_cinfo_avatar, 48, 48);
   lv_obj_set_style_radius(_cinfo_avatar, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_bg_opa(_cinfo_avatar, LV_OPA_COVER, 0);
   lv_obj_clear_flag(_cinfo_avatar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
   _cinfo_avatar_lbl = lv_label_create(_cinfo_avatar);
   lv_obj_center(_cinfo_avatar_lbl);
   lv_obj_set_style_text_color(_cinfo_avatar_lbl, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_set_style_text_font(_cinfo_avatar_lbl, fontHero(), 0);
+  lv_obj_set_style_text_font(_cinfo_avatar_lbl, fontTitle(), 0);
 
-  _cinfo_title = lv_label_create(hero);
-  lv_obj_set_flex_grow(_cinfo_title, 1);
+  lv_obj_t* hcol = lv_obj_create(hero);
+  lv_obj_remove_style_all(hcol);
+  lv_obj_set_flex_grow(hcol, 1);
+  lv_obj_set_height(hcol, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(hcol, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(hcol, 2, 0);
+  lv_obj_clear_flag(hcol, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  _cinfo_title = lv_label_create(hcol);
+  lv_obj_set_width(_cinfo_title, LV_PCT(100));
   lv_label_set_long_mode(_cinfo_title, LV_LABEL_LONG_DOT);
   lv_obj_set_style_text_color(_cinfo_title, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(_cinfo_title, fontHero(), 0);
-
-  _cinfo_key = lv_label_create(_cinfo_body);
+  lv_obj_set_style_text_font(_cinfo_title, fontHeading(), 0);
+  _cinfo_key = lv_label_create(hcol);
+  lv_obj_set_width(_cinfo_key, LV_PCT(100));
+  lv_label_set_long_mode(_cinfo_key, LV_LABEL_LONG_DOT);
   lv_obj_set_style_text_color(_cinfo_key, lv_color_hex(DIM_HEX), 0);
-  lv_obj_set_style_text_font(_cinfo_key, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_font(_cinfo_key, fontCaption(), 0);
+  lv_obj_add_flag(_cinfo_key, LV_OBJ_FLAG_CLICKABLE);   // tap -> full key + copy popup
+  lv_obj_add_event_cb(_cinfo_key, cinfo_key_cb, LV_EVENT_CLICKED, NULL);
 
   // action row
   lv_obj_t* actions = lv_obj_create(_cinfo_body);
@@ -3058,28 +3074,7 @@ void UITask::buildContactInfoScreen() {
   lv_obj_set_width(_cinfo_name_ta, LV_PCT(100));
   lv_obj_add_event_cb(_cinfo_name_ta, cinfo_ta_event_cb, LV_EVENT_ALL, NULL);
 
-  // Public key: read-only one-line field (scrolls horizontally) + copy button,
-  // matching the Settings page. No keyboard is bound, so it's effectively read-only.
-  lv_obj_t* fk = makeField(_cinfo_body, "Public Key");
-  lv_obj_t* krow = lv_obj_create(fk);
-  lv_obj_set_width(krow, LV_PCT(100));
-  lv_obj_set_height(krow, LV_SIZE_CONTENT);
-  lv_obj_set_style_bg_opa(krow, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(krow, 0, 0);
-  lv_obj_set_style_pad_all(krow, 0, 0);
-  lv_obj_set_style_pad_column(krow, 6, 0);
-  lv_obj_clear_flag(krow, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_flex_flow(krow, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(krow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  _cinfo_keyfull = lv_textarea_create(krow);
-  lv_textarea_set_one_line(_cinfo_keyfull, true); lv_obj_add_event_cb(_cinfo_keyfull, UITask::ta_done_cb, LV_EVENT_READY, NULL);
-  lv_obj_set_flex_grow(_cinfo_keyfull, 1);
-  lv_obj_set_style_text_font(_cinfo_keyfull, &lv_font_montserrat_12, 0);
-  lv_obj_t* copyk = lv_btn_create(krow);
-  lv_obj_add_event_cb(copyk, cinfo_copykey_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* ckl = lv_label_create(copyk);
-  lv_label_set_text(ckl, LV_SYMBOL_COPY);
-  lv_obj_center(ckl);
+  // (Public key lives in the hero card now -- tap it for the full key + copy.)
 
   lv_obj_t* fp = makeField(_cinfo_body, "Position (lat, lon)");
   lv_obj_t* prow = lv_obj_create(fp);
@@ -3190,11 +3185,9 @@ void UITask::populateContactInfo() {
 
   char hex[2 * PUB_KEY_SIZE + 1];
   mesh::Utils::toHex(hex, c->id.pub_key, PUB_KEY_SIZE);
-  char ktrunc[24];
-  snprintf(ktrunc, sizeof(ktrunc), "<%.6s...%.6s>", hex, hex + 2 * PUB_KEY_SIZE - 6);
-  lv_label_set_text(_cinfo_key, ktrunc);
-  lv_textarea_set_text(_cinfo_keyfull, hex);
-  lv_textarea_set_cursor_pos(_cinfo_keyfull, 0);  // show the start, not the tail
+  char ktrunc[32];
+  snprintf(ktrunc, sizeof(ktrunc), "<%.6s...%.6s>  " LV_SYMBOL_COPY, hex, hex + 2 * PUB_KEY_SIZE - 6);
+  lv_label_set_text(_cinfo_key, ktrunc);   // tap opens the full key + copy popup
 
   bool fav = (c->flags & CONTACT_FLAG_FAVOURITE) != 0;
   lv_label_set_text(_cinfo_fav_lbl, fav ? LV_SYMBOL_OK " Favorited" : "Favorite");
@@ -3378,15 +3371,86 @@ void UITask::cinfo_kb_event_cb(lv_event_t* e) {
   }
 }
 
-void UITask::cinfo_copykey_cb(lv_event_t* e) {
+// Shared "full public key" popup: the truncated key line on the contact hero and
+// the owner profile hero both open this (full hex + a copy-to-clipboard button).
+void UITask::keypop_close_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance && _instance->_keypop_popup) lv_obj_add_flag(_instance->_keypop_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::keypop_copy_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->copyToClipboard(_instance->_keypop_hex);
+  _instance->showToast("Public key copied");
+  if (_instance->_keypop_popup) lv_obj_add_flag(_instance->_keypop_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::showKeyPopup(const char* hex) {
+  if (!hex || !hex[0]) return;
+  strncpy(_keypop_hex, hex, sizeof(_keypop_hex) - 1);
+  _keypop_hex[sizeof(_keypop_hex) - 1] = 0;
+  if (!_keypop_popup) {
+    lv_obj_t* card = makeModalCard(&_keypop_popup, [](lv_event_t* ev) {  // tap backdrop closes
+      (void)ev;
+      if (_instance) lv_obj_add_flag(_instance->_keypop_popup, LV_OBJ_FLAG_HIDDEN);
+    });
+    lv_obj_t* title = lv_label_create(card);
+    lv_label_set_text(title, "Public Key");
+    lv_obj_set_style_text_color(title, lv_color_hex(UI_ACCENT), 0);
+    lv_obj_set_style_text_font(title, fontHeading(), 0);
+
+    _keypop_lbl = lv_label_create(card);
+    lv_label_set_long_mode(_keypop_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(_keypop_lbl, LV_PCT(100));
+    lv_obj_set_style_text_color(_keypop_lbl, lv_color_hex(UI_FG_BRIGHT), 0);
+    lv_obj_set_style_text_font(_keypop_lbl, &lv_font_montserrat_12, 0);  // full hex, compact
+
+    lv_obj_t* btnrow = lv_obj_create(card);
+    lv_obj_remove_style_all(btnrow);
+    lv_obj_set_width(btnrow, LV_PCT(100));
+    lv_obj_set_height(btnrow, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(btnrow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnrow, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(btnrow, 8, 0);
+    lv_obj_clear_flag(btnrow, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Secondary (plain) + primary (UI_PRIMARY) buttons -- same pattern as the
+    // share-position confirm dialog, so all modal actions look alike.
+    lv_obj_t* closeb = lv_btn_create(btnrow);
+    lv_obj_add_event_cb(closeb, keypop_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* xl = lv_label_create(closeb);
+    lv_label_set_text(xl, "Close");
+
+    lv_obj_t* copyb = lv_btn_create(btnrow);
+    lv_obj_set_style_bg_color(copyb, lv_color_hex(UI_PRIMARY), 0);
+    lv_obj_add_event_cb(copyb, keypop_copy_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* cl = lv_label_create(copyb);
+    lv_label_set_text(cl, LV_SYMBOL_COPY " Copy");
+  }
+  lv_label_set_text(_keypop_lbl, _keypop_hex);
+  lv_obj_clear_flag(_keypop_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_keypop_popup);
+}
+
+// Contact hero key line -> full key popup (key from the contact being viewed).
+void UITask::cinfo_key_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   ContactInfo* c = _instance->cinfoContact();
   if (!c) return;
   char hex[2 * PUB_KEY_SIZE + 1];
   mesh::Utils::toHex(hex, c->id.pub_key, PUB_KEY_SIZE);
-  _instance->copyToClipboard(hex);
-  _instance->showToast("Public key copied");
+  _instance->showKeyPopup(hex);
+}
+
+// Owner profile hero key line -> full key popup (our own public key).
+void UITask::profile_key_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance || !mproxy::selfPubKey()) return;
+  char hex[2 * PUB_KEY_SIZE + 1];
+  mesh::Utils::toHex(hex, mproxy::selfPubKey(), PUB_KEY_SIZE);
+  _instance->showKeyPopup(hex);
 }
 
 void UITask::cinfo_name_clicked_cb(lv_event_t* e) {
@@ -4542,6 +4606,10 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_label_set_long_mode(_set_profile_key, LV_LABEL_LONG_DOT);
   lv_obj_set_style_text_color(_set_profile_key, lv_color_hex(DIM_HEX), 0);
   lv_obj_set_style_text_font(_set_profile_key, fontCaption(), 0);
+  // Tapping the key line shows the full key + copy (sits above the hero's
+  // profile-pane tap, so the rest of the card still opens Profile).
+  lv_obj_add_flag(_set_profile_key, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(_set_profile_key, profile_key_cb, LV_EVENT_CLICKED, NULL);
 
   lv_obj_t* chev = lv_label_create(prof);
   lv_label_set_text(chev, LV_SYMBOL_RIGHT);
@@ -4575,28 +4643,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_width(_set_name_ta, LV_PCT(100));
   lv_obj_add_event_cb(_set_name_ta, set_name_ta_event_cb, LV_EVENT_ALL, NULL);
 
-  // Public key: read-only one-line field (scrolls horizontally) + copy button.
-  lv_obj_t* fk = makeField(body, "Public Key");
-  lv_obj_t* krow = lv_obj_create(fk);
-  lv_obj_set_width(krow, LV_PCT(100));
-  lv_obj_set_height(krow, LV_SIZE_CONTENT);
-  lv_obj_set_style_bg_opa(krow, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(krow, 0, 0);
-  lv_obj_set_style_pad_all(krow, 0, 0);
-  lv_obj_set_style_pad_column(krow, 6, 0);
-  lv_obj_clear_flag(krow, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_flex_flow(krow, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(krow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  _set_key_ta = lv_textarea_create(krow);
-  lv_textarea_set_one_line(_set_key_ta, true); lv_obj_add_event_cb(_set_key_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);   // no wrap; swipe to scroll the hex
-  lv_obj_set_flex_grow(_set_key_ta, 1);
-  lv_obj_set_style_text_font(_set_key_ta, &lv_font_montserrat_12, 0);
-  // No keyboard is ever bound to this field, so it's effectively read-only.
-  lv_obj_t* copyk = lv_btn_create(krow);
-  lv_obj_add_event_cb(copyk, set_copykey_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* ck = lv_label_create(copyk);
-  lv_label_set_text(ck, LV_SYMBOL_COPY);
-  lv_obj_center(ck);
+  // (Public key lives in the profile hero now -- tap it for the full key + copy.)
 
   // Position: editable lat/lon (degrees). Affects adverts only when sharing is on.
   lv_obj_t* fpos = makeField(body, "Position (lat, lon)");
@@ -4837,12 +4884,6 @@ void UITask::populateSettings() {
 
   updateOwnerProfile();
 
-  if (_set_key_ta) {
-    char hex[2 * PUB_KEY_SIZE + 1];
-    mesh::Utils::toHex(hex, mproxy::selfPubKey(), PUB_KEY_SIZE);
-    lv_textarea_set_text(_set_key_ta, hex);
-    lv_textarea_set_cursor_pos(_set_key_ta, 0);  // show the start, not the tail
-  }
 
   if (_set_lat_ta && _set_lon_ta && _sensors) {
     char latb[20] = "", lonb[20] = "";
@@ -4965,8 +5006,8 @@ void UITask::updateOwnerProfile() {
   lv_obj_set_style_bg_color(_set_profile_avatar, lv_color_hex(nameColor(who)), 0);
   char keyhex[2 * PUB_KEY_SIZE + 1] = "";
   if (mproxy::selfPubKey()) mesh::Utils::toHex(keyhex, mproxy::selfPubKey(), PUB_KEY_SIZE);
-  char snip[24];  // "<aabbcc...ddeeff>" -- same syntax as contact cards / share
-  if (keyhex[0]) snprintf(snip, sizeof(snip), "<%.6s...%.6s>", keyhex, keyhex + 2 * PUB_KEY_SIZE - 6);
+  char snip[32];  // "<aabbcc...ddeeff>" + copy glyph -- tap opens the full key + copy
+  if (keyhex[0]) snprintf(snip, sizeof(snip), "<%.6s...%.6s>  " LV_SYMBOL_COPY, keyhex, keyhex + 2 * PUB_KEY_SIZE - 6);
   else           snip[0] = 0;
   lv_label_set_text(_set_profile_key, snip);
 }
@@ -5128,15 +5169,6 @@ void UITask::copyToClipboard(const char* text) {
   if (!text) return;
   strncpy(_clipboard, text, sizeof(_clipboard) - 1);
   _clipboard[sizeof(_clipboard) - 1] = 0;
-}
-
-void UITask::set_copykey_cb(lv_event_t* e) {
-  (void)e;
-  if (!_instance) return;
-  char hex[2 * PUB_KEY_SIZE + 1];
-  mesh::Utils::toHex(hex, mproxy::selfPubKey(), PUB_KEY_SIZE);
-  _instance->copyToClipboard(hex);
-  _instance->showToast("Public key copied");
 }
 
 void UITask::insert_paste_cb(lv_event_t* e) {

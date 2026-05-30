@@ -278,6 +278,11 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _info_title_lbl;
   lv_obj_t*       _info_body_lbl;
 
+  // Full-public-key popup (shared by the contact + owner hero key lines).
+  lv_obj_t*       _keypop_popup;
+  lv_obj_t*       _keypop_lbl;
+  char            _keypop_hex[2 * PUB_KEY_SIZE + 1];
+
   // Tiny internal clipboard (no OS/LVGL clipboard on-device). Copy fills it;
   // the chat compose "+" menu can paste it.
   char            _clipboard[160];
@@ -483,7 +488,7 @@ class UITask : public AbstractUITask {
   static void cinfo_ta_event_cb(lv_event_t* e);
   static void cinfo_kb_event_cb(lv_event_t* e);
   static void cinfo_name_clicked_cb(lv_event_t* e);
-  static void cinfo_copykey_cb(lv_event_t* e);
+  static void cinfo_key_cb(lv_event_t* e);     // contact hero key line -> full key popup
   static void share_sendto_cb(lv_event_t* e);
   static void share_zerohop_cb(lv_event_t* e);
   static void cinfo_toast_timer_cb(lv_timer_t* t);
@@ -561,7 +566,11 @@ private:
   static void lock_kb_event_cb(lv_event_t* e);
   static void set_shareme_cb(lv_event_t* e);         // export own contact as QR
   void      showSharePosWarning();
-  static void set_copykey_cb(lv_event_t* e);
+  static void profile_key_cb(lv_event_t* e);   // owner hero key line -> full key popup
+  // Shared full-public-key popup (full hex + copy), opened from either key line.
+  void        showKeyPopup(const char* hex);
+  static void keypop_copy_cb(lv_event_t* e);
+  static void keypop_close_cb(lv_event_t* e);
   static void set_pos_ta_event_cb(lv_event_t* e);
   static void set_sharepos_cb(lv_event_t* e);
   static void sharepos_confirm_cb(lv_event_t* e);
@@ -663,6 +672,7 @@ public:
       _lock_screen(NULL), _lock_pin_ta(NULL), _lock_err(NULL), _lock_kb(NULL), _locked(false),
       _confirm_popup(NULL),
       _info_popup(NULL), _info_title_lbl(NULL), _info_body_lbl(NULL),
+      _keypop_popup(NULL), _keypop_lbl(NULL), _keypop_hex{},
       _qr_screen(NULL), _qr_code(NULL), _qr_name_lbl(NULL), _qr_key_lbl(NULL),
       _qr_return_screen(NULL),
       _newchan_screen(NULL), _newchan_name_ta(NULL), _newchan_key_ta(NULL),
