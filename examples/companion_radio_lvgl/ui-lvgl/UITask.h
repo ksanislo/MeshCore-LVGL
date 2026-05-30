@@ -30,6 +30,7 @@ class UITask : public AbstractUITask {
   // touch wakes it (and is swallowed). The radio/mesh keep running on core 0.
   uint32_t        _last_input_ms;
   bool            _display_off;
+  bool            _swallow_touch;       // swallow the whole wake gesture until the finger lifts
   uint8_t         _backlight_duty;      // duty to restore on wake (configured brightness)
   lv_obj_t*       _splash_screen;
   lv_obj_t*       _home_screen;
@@ -466,7 +467,7 @@ public:
     : AbstractUITask(board, serial),
       _lgfx(NULL), _node_prefs(NULL), _sensors(NULL),
       _started(false), _last_tick_ms(0), _msgcount(0),
-      _last_input_ms(0), _display_off(false), _backlight_duty(153),
+      _last_input_ms(0), _display_off(false), _swallow_touch(false), _backlight_duty(153),
       _splash_screen(NULL), _home_screen(NULL),
       _header_label(NULL), _clock_label(NULL), _clock_last(0),
       _tabview(NULL),

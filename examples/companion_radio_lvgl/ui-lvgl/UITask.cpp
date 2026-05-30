@@ -58,10 +58,16 @@ void UITask::touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   if (_instance->_lgfx->getTouch(&tx, &ty)) {
     _instance->_last_input_ms = millis();   // reset the idle-off timer
     if (_instance->_display_off) {
-      // Wake the backlight and swallow this touch so it doesn't also fire a
-      // button -- the tap that wakes the screen shouldn't act on whatever's under it.
+      // Wake the backlight and swallow the ENTIRE wake gesture (until the finger
+      // lifts) so it doesn't also fire a button -- the tap that wakes the screen
+      // shouldn't act on whatever's under it.
       board_set_backlight(_instance->_backlight_duty);
       _instance->_display_off = false;
+      _instance->_swallow_touch = true;
+      data->state = LV_INDEV_STATE_REL;
+      return;
+    }
+    if (_instance->_swallow_touch) {        // still the same wake press -> keep swallowing
       data->state = LV_INDEV_STATE_REL;
       return;
     }
@@ -69,6 +75,7 @@ void UITask::touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     data->point.x = tx;
     data->point.y = ty;
   } else {
+    _instance->_swallow_touch = false;      // finger lifted -> end the wake-swallow latch
     data->state = LV_INDEV_STATE_REL;
   }
 }
