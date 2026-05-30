@@ -202,7 +202,7 @@ lv_obj_t* UITask::makeBackButton(lv_obj_t* bar, lv_event_cb_t cb) {
   lv_obj_set_style_bg_opa(back, LV_OPA_TRANSP, 0);
   lv_obj_set_style_shadow_width(back, 0, 0);
   lv_obj_set_style_pad_all(back, 0, 0);
-  lv_obj_set_size(back, 36, 36);
+  lv_obj_set_size(back, 24, 36);   // ~1/3 narrower than the avatar; full-height tap target
   lv_obj_add_event_cb(back, cb, LV_EVENT_CLICKED, NULL);
   lv_obj_t* bl = lv_label_create(back);
   lv_label_set_text(bl, LV_SYMBOL_LEFT);
