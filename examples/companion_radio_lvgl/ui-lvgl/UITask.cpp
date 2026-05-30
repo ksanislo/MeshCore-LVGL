@@ -3853,7 +3853,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_add_event_cb(_set_lon_ta, set_pos_ta_event_cb, LV_EVENT_ALL, NULL);
 
   _set_sharepos = lv_checkbox_create(body);
-  lv_checkbox_set_text(_set_sharepos, "Share position in adverts");
+  lv_checkbox_set_text(_set_sharepos, "Share position");
   lv_obj_set_style_text_color(_set_sharepos, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_sharepos, set_sharepos_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
@@ -3895,7 +3895,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
 
   _set_freq_ta = makeNumberField(body, "Frequency (MHz)", set_radio_ta_event_cb);
   _set_bw_dd   = makeDropdownField(body, "Bandwidth (kHz)", BW_OPTS_STR);
-  _set_sf_dd   = makeDropdownField(body, "Spreading Factor", "5\n6\n7\n8\n9\n10\n11\n12");
+  _set_sf_dd   = makeDropdownField(body, "Spreading factor", "5\n6\n7\n8\n9\n10\n11\n12");
   _set_cr_dd   = makeDropdownField(body, "Coding Rate", "5\n6\n7\n8");
   _set_txp_ta  = makeNumberField(body, "TX Power (dBm)", set_radio_ta_event_cb);
 
@@ -3906,7 +3906,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
 
   // ===== Routing =====
   addSettingsSection(body, "Routing");
-  lv_obj_t* fp = makeField(body, "Path Hash Mode");
+  lv_obj_t* fp = makeField(body, "Path hash mode");
   _set_path_dd = lv_dropdown_create(fp);
   lv_dropdown_set_options(_set_path_dd, "1 byte\n2 bytes\n3 bytes");
   lv_obj_set_width(_set_path_dd, LV_PCT(100));
@@ -3915,51 +3915,51 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   // ===== Telemetry policy (who may request our telemetry) =====
   addSettingsSection(body, "Telemetry");
   static const char* TELEM_OPTS = "Deny\nAllow (flagged)\nAllow all";  // -> TELEM_MODE_DENY/ALLOW_FLAGS/ALLOW_ALL
-  _set_telem_base_dd = makeDropdownField(body, "Base (device status)", TELEM_OPTS);
+  _set_telem_base_dd = makeDropdownField(body, "Base", TELEM_OPTS);
   lv_obj_set_user_data(_set_telem_base_dd, (void*)(intptr_t)0);
   lv_obj_add_event_cb(_set_telem_base_dd, set_telem_cb, LV_EVENT_VALUE_CHANGED, NULL);
-  _set_telem_loc_dd = makeDropdownField(body, "Location (GPS)", TELEM_OPTS);
+  _set_telem_loc_dd = makeDropdownField(body, "Location", TELEM_OPTS);
   lv_obj_set_user_data(_set_telem_loc_dd, (void*)(intptr_t)1);
   lv_obj_add_event_cb(_set_telem_loc_dd, set_telem_cb, LV_EVENT_VALUE_CHANGED, NULL);
-  _set_telem_env_dd = makeDropdownField(body, "Environment (sensors)", TELEM_OPTS);
+  _set_telem_env_dd = makeDropdownField(body, "Environment", TELEM_OPTS);
   lv_obj_set_user_data(_set_telem_env_dd, (void*)(intptr_t)2);
   lv_obj_add_event_cb(_set_telem_env_dd, set_telem_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
   // ===== Advanced (mesh behaviour) =====
   addSettingsSection(body, "Advanced");
   _set_autoadd_chk = lv_checkbox_create(body);
-  lv_checkbox_set_text(_set_autoadd_chk, "Auto-add heard contacts");
+  lv_checkbox_set_text(_set_autoadd_chk, "Auto-add contacts");
   lv_obj_set_style_text_color(_set_autoadd_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_autoadd_chk, set_autoadd_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-  lv_obj_t* fah = makeField(body, "Auto-add max hops");
+  lv_obj_t* fah = makeField(body, "Max hops");
   _set_autoadd_hops_dd = lv_dropdown_create(fah);   // index 0..4 maps 1:1 to autoadd_max_hops
   lv_dropdown_set_options(_set_autoadd_hops_dd, "No limit\nDirect only\nUp to 1 hop\nUp to 2 hops\nUp to 3 hops");
   lv_obj_set_width(_set_autoadd_hops_dd, LV_PCT(100));
   lv_obj_add_event_cb(_set_autoadd_hops_dd, set_autoadd_hops_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
   _set_rxboost_chk = lv_checkbox_create(body);
-  lv_checkbox_set_text(_set_rxboost_chk, "RX boosted gain (reboot to apply)");
+  lv_checkbox_set_text(_set_rxboost_chk, "RX boost gain (reboot)");
   lv_obj_set_style_text_color(_set_rxboost_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_rxboost_chk, set_rxboost_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-  _set_multiack_ta = makeNumberField(body, "Extra ACK count (multi-ack)", set_advnum_ta_event_cb);
-  _set_rxdelay_ta  = makeNumberField(body, "RX delay base (s)", set_advnum_ta_event_cb);
+  _set_multiack_ta = makeNumberField(body, "Extra ACKs", set_advnum_ta_event_cb);
+  _set_rxdelay_ta  = makeNumberField(body, "RX delay (s)", set_advnum_ta_event_cb);
   _set_airtime_ta  = makeNumberField(body, "Airtime factor", set_advnum_ta_event_cb);
 
 #if ENV_INCLUDE_GPS
   // ===== GPS (optional module on the rear UART plug) =====
   addSettingsSection(body, "GPS");
   _set_gps_chk = lv_checkbox_create(body);
-  lv_checkbox_set_text(_set_gps_chk, "Enable GPS (UART plug; reboot to apply)");
+  lv_checkbox_set_text(_set_gps_chk, "Enable GPS (reboot)");
   lv_obj_set_style_text_color(_set_gps_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_gps_chk, set_gps_cb, LV_EVENT_VALUE_CHANGED, NULL);
-  _set_gps_interval_ta = makeNumberField(body, "GPS update interval (s)", set_advnum_ta_event_cb);
+  _set_gps_interval_ta = makeNumberField(body, "GPS interval (s)", set_advnum_ta_event_cb);
 #endif
 
   // ===== Power & Lock =====
   addSettingsSection(body, "Power & Lock");
-  lv_obj_t* frd = makeField(body, "LoRa radio (off = safe to detach antenna)");
+  lv_obj_t* frd = makeField(body, "LoRa radio");
   _set_radio_sw = lv_switch_create(frd);
   lv_obj_add_event_cb(_set_radio_sw, set_radio_sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
@@ -3991,13 +3991,13 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_width(_set_bright_slider, LV_PCT(100));
   lv_obj_add_event_cb(_set_bright_slider, set_bright_cb, LV_EVENT_ALL, NULL);
 
-  lv_obj_t* fr = makeField(body, "Screen Rotation (restart to apply)");
+  lv_obj_t* fr = makeField(body, "Rotation (restart)");
   _set_rot_dd = lv_dropdown_create(fr);
   lv_dropdown_set_options(_set_rot_dd, "0\n90\n180\n270");
   lv_obj_set_width(_set_rot_dd, LV_PCT(100));
   lv_obj_add_event_cb(_set_rot_dd, set_rot_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-  lv_obj_t* fto = makeField(body, "Screen Timeout (off when idle; saves battery)");
+  lv_obj_t* fto = makeField(body, "Screen timeout");
   _set_screen_dd = lv_dropdown_create(fto);
   lv_dropdown_set_options(_set_screen_dd, "Never\n15 s\n30 s\n1 min\n2 min\n5 min");
   lv_obj_set_width(_set_screen_dd, LV_PCT(100));
@@ -4005,7 +4005,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
 
   // Local-time offset for the header clock. Entered in hours (decimals OK for
   // half/quarter-hour zones, e.g. 5.5, 5.75, -3.5); stored as minutes.
-  _set_tz_ta = makeNumberField(body, "UTC offset (hours)", set_tz_ta_event_cb);
+  _set_tz_ta = makeNumberField(body, "UTC offset (h)", set_tz_ta_event_cb);
 
   _set_clock_chk = lv_checkbox_create(body);
   lv_checkbox_set_text(_set_clock_chk, "12-hour clock");
