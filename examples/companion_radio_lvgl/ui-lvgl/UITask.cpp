@@ -3427,6 +3427,31 @@ void UITask::newchan_kb_event_cb(lv_event_t* e) {
   }
 }
 
+// Add an inline show/hide eye to a one-line textarea: hidden (password) by default,
+// the small mono eye sits ~2px from the right edge (in reserved padding so text clears).
+lv_obj_t* UITask::attachInlineEye(lv_obj_t* ta) {
+  lv_textarea_set_password_mode(ta, true);
+  lv_obj_set_style_pad_right(ta, 20, 0);
+  lv_obj_t* eye = lv_label_create(ta);
+  lv_label_set_text(eye, LV_SYMBOL_EYE_CLOSE);          // closed = currently hidden
+  lv_obj_set_style_text_font(eye, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(eye, lv_color_hex(DIM_HEX), 0);
+  lv_obj_align(eye, LV_ALIGN_RIGHT_MID, 18, 0);         // nudged into the padding, flush to the edge
+  lv_obj_add_flag(eye, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_user_data(eye, ta);
+  lv_obj_add_event_cb(eye, pw_eye_cb, LV_EVENT_CLICKED, NULL);
+  return eye;
+}
+
+void UITask::pw_eye_cb(lv_event_t* e) {
+  lv_obj_t* eye = lv_event_get_target(e);
+  lv_obj_t* ta = (lv_obj_t*)lv_obj_get_user_data(eye);
+  if (!ta) return;
+  bool nowHidden = !lv_textarea_get_password_mode(ta);
+  lv_textarea_set_password_mode(ta, nowHidden);
+  lv_label_set_text(eye, nowHidden ? LV_SYMBOL_EYE_CLOSE : LV_SYMBOL_EYE_OPEN);
+}
+
 // ===== Repeater / room-server login (popup over the originating screen) ====
 
 void UITask::buildLoginPopup() {
@@ -3477,17 +3502,9 @@ void UITask::buildLoginPopup() {
 
   _login_pw_ta = lv_textarea_create(prow);
   lv_textarea_set_one_line(_login_pw_ta, true);
-  lv_textarea_set_password_mode(_login_pw_ta, false);   // visible by default (personal handheld)
   lv_obj_set_flex_grow(_login_pw_ta, 1);
-  lv_obj_set_style_pad_right(_login_pw_ta, 24, 0);       // room for the inline eye
   lv_obj_add_event_cb(_login_pw_ta, login_ta_event_cb, LV_EVENT_ALL, NULL);
-  _login_eye_lbl = lv_label_create(_login_pw_ta);        // small mono toggle inside the field
-  lv_label_set_text(_login_eye_lbl, LV_SYMBOL_EYE_OPEN);
-  lv_obj_set_style_text_font(_login_eye_lbl, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_color(_login_eye_lbl, lv_color_hex(DIM_HEX), 0);
-  lv_obj_align(_login_eye_lbl, LV_ALIGN_RIGHT_MID, -2, 0);
-  lv_obj_add_flag(_login_eye_lbl, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(_login_eye_lbl, login_eye_cb, LV_EVENT_CLICKED, NULL);
+  attachInlineEye(_login_pw_ta);                         // hidden by default + inline eye toggle
 
   lv_obj_t* go = lv_btn_create(prow);                    // send / done, at the end of the field
   lv_obj_add_event_cb(go, login_go_cb, LV_EVENT_CLICKED, NULL);
@@ -3584,15 +3601,6 @@ void UITask::login_kb_event_cb(lv_event_t* e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
     lv_obj_add_flag(_instance->_login_kb, LV_OBJ_FLAG_HIDDEN);
-}
-
-void UITask::login_eye_cb(lv_event_t* e) {
-  (void)e;
-  if (!_instance || !_instance->_login_pw_ta) return;
-  bool hidden = lv_textarea_get_password_mode(_instance->_login_pw_ta);
-  lv_textarea_set_password_mode(_instance->_login_pw_ta, !hidden);
-  if (_instance->_login_eye_lbl)
-    lv_label_set_text(_instance->_login_eye_lbl, !hidden ? LV_SYMBOL_EYE_CLOSE : LV_SYMBOL_EYE_OPEN);
 }
 
 // ===== Node-info / status screen =========================================
@@ -3949,6 +3957,26 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   _set_gps_interval_ta = makeNumberField(body, "GPS update interval (s)", set_advnum_ta_event_cb);
 #endif
 
+  // ===== Power & Lock =====
+  addSettingsSection(body, "Power & Lock");
+  lv_obj_t* frd = makeField(body, "LoRa radio (off = safe to detach antenna)");
+  _set_radio_sw = lv_switch_create(frd);
+  lv_obj_add_event_cb(_set_radio_sw, set_radio_sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  lv_obj_t* setpinb = lv_btn_create(body);
+  lv_obj_set_width(setpinb, LV_PCT(100));
+  lv_obj_add_event_cb(setpinb, set_pin_btn_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* spl = lv_label_create(setpinb);
+  lv_label_set_text(spl, LV_SYMBOL_KEYBOARD " Set lock PIN");
+  lv_obj_center(spl);
+
+  lv_obj_t* lockb = lv_btn_create(body);
+  lv_obj_set_width(lockb, LV_PCT(100));
+  lv_obj_add_event_cb(lockb, lock_now_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* lockl = lv_label_create(lockb);
+  lv_label_set_text(lockl, LV_SYMBOL_SETTINGS " Lock screen");
+  lv_obj_center(lockl);
+
   // ===== Display =====
   addSettingsSection(body, "Display");
   lv_obj_t* fb = makeField(body, "Brightness");
@@ -4104,6 +4132,11 @@ void UITask::populateSettings() {
     else                          lv_obj_clear_state(_set_gps_chk, LV_STATE_CHECKED);
   }
   if (_set_gps_interval_ta) { snprintf(nb, sizeof(nb), "%u", _node_prefs->gps_interval); lv_textarea_set_text(_set_gps_interval_ta, nb); }
+
+  if (_set_radio_sw) {
+    if (_node_prefs->radio_off) lv_obj_clear_state(_set_radio_sw, LV_STATE_CHECKED);  // checked = radio on
+    else                        lv_obj_add_state(_set_radio_sw, LV_STATE_CHECKED);
+  }
 }
 
 void UITask::commitNodeName() {
@@ -4418,6 +4451,264 @@ void UITask::set_gps_cb(lv_event_t* e) {
   _instance->_node_prefs->gps_enabled = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
   pushPrefs();   // GPS is started from prefs at boot (applyGpsPrefs); apply on reboot
   _instance->showToast("Saved (reboot to apply GPS)");
+}
+
+void UITask::set_radio_sw_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  _instance->_node_prefs->radio_off = on ? 0 : 1;
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::SetRadio;       // backend sleeps/wakes the radio + persists
+  c.prefs = *_instance->_node_prefs;
+  mproxy::postCommand(c);
+  _instance->showToast(on ? "Radio ON" : "Radio OFF - safe to detach antenna");
+}
+
+void UITask::set_pin_btn_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->openPinSet();
+}
+
+void UITask::buildPinSetPopup() {
+  if (_pinset_popup) return;
+  _pinset_popup = lv_obj_create(lv_layer_top());
+  lv_obj_set_size(_pinset_popup, _screen_w, _screen_h);
+  lv_obj_set_pos(_pinset_popup, 0, 0);
+  lv_obj_set_style_bg_color(_pinset_popup, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(_pinset_popup, LV_OPA_60, 0);
+  lv_obj_set_style_border_width(_pinset_popup, 0, 0);
+  lv_obj_set_style_pad_all(_pinset_popup, 0, 0);
+  lv_obj_clear_flag(_pinset_popup, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(_pinset_popup, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(_pinset_popup, pinset_dismiss_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_flag(_pinset_popup, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t* card = lv_obj_create(_pinset_popup);
+  lv_obj_set_width(card, LV_PCT(88));
+  lv_obj_set_height(card, LV_SIZE_CONTENT);
+  lv_obj_align(card, LV_ALIGN_TOP_MID, 0, HEADER_H + 8);
+  lv_obj_set_style_bg_color(card, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(card, 8, 0);
+  lv_obj_set_style_border_width(card, 0, 0);
+  lv_obj_set_style_pad_all(card, 12, 0);
+  lv_obj_set_style_pad_row(card, 8, 0);
+  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+  lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+
+  lv_obj_t* title = lv_label_create(card);
+  lv_label_set_text(title, "Set lock PIN (4-6 digits)");
+  lv_obj_set_style_text_color(title, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+
+  lv_obj_t* f1 = makeField(card, "PIN");
+  _pinset_ta1 = lv_textarea_create(f1);
+  lv_textarea_set_one_line(_pinset_ta1, true);
+  lv_textarea_set_max_length(_pinset_ta1, 6);
+  lv_textarea_set_accepted_chars(_pinset_ta1, "0123456789");
+  lv_obj_set_width(_pinset_ta1, LV_PCT(100));
+  lv_obj_add_event_cb(_pinset_ta1, pinset_ta_event_cb, LV_EVENT_ALL, NULL);
+  attachInlineEye(_pinset_ta1);
+
+  lv_obj_t* f2 = makeField(card, "Confirm PIN");
+  _pinset_ta2 = lv_textarea_create(f2);
+  lv_textarea_set_one_line(_pinset_ta2, true);
+  lv_textarea_set_max_length(_pinset_ta2, 6);
+  lv_textarea_set_accepted_chars(_pinset_ta2, "0123456789");
+  lv_obj_set_width(_pinset_ta2, LV_PCT(100));
+  lv_obj_add_event_cb(_pinset_ta2, pinset_ta_event_cb, LV_EVENT_ALL, NULL);
+  attachInlineEye(_pinset_ta2);
+
+  _pinset_err = lv_label_create(card);
+  lv_label_set_text(_pinset_err, "");
+  lv_obj_set_style_text_color(_pinset_err, lv_color_hex(0xF87171), 0);
+  lv_obj_add_flag(_pinset_err, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t* save = lv_btn_create(card);
+  lv_obj_set_width(save, LV_PCT(100));
+  lv_obj_add_event_cb(save, pinset_save_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* sl = lv_label_create(save);
+  lv_label_set_text(sl, LV_SYMBOL_OK " Save");
+  lv_obj_center(sl);
+
+  _pinset_kb = lv_keyboard_create(_pinset_popup);
+  lv_keyboard_set_mode(_pinset_kb, LV_KEYBOARD_MODE_NUMBER);
+  lv_obj_add_event_cb(_pinset_kb, pinset_kb_event_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_pinset_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::openPinSet() {
+  buildPinSetPopup();
+  lv_textarea_set_text(_pinset_ta1, "");
+  lv_textarea_set_text(_pinset_ta2, "");
+  lv_obj_add_flag(_pinset_err, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_pinset_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(_pinset_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_pinset_popup);
+}
+
+void UITask::pinset_dismiss_cb(lv_event_t* e) {
+  if (!_instance) return;
+  if (lv_event_get_target(e) != _instance->_pinset_popup) return;
+  lv_obj_add_flag(_instance->_pinset_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_instance->_pinset_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::pinset_save_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance || !_instance->_node_prefs) return;
+  const char* a = lv_textarea_get_text(_instance->_pinset_ta1);
+  const char* b = lv_textarea_get_text(_instance->_pinset_ta2);
+  size_t la = a ? strlen(a) : 0;
+  auto err = [&](const char* m){ lv_label_set_text(_instance->_pinset_err, m); lv_obj_clear_flag(_instance->_pinset_err, LV_OBJ_FLAG_HIDDEN); };
+  if (la == 0 && (!b || !b[0])) {                       // both blank -> clear the PIN
+    _instance->_node_prefs->lock_pin[0] = 0;
+    pushPrefs();
+    _instance->showToast("PIN cleared");
+  } else {
+    if (la < 4 || la > 6) { err("PIN must be 4-6 digits"); return; }
+    if (strcmp(a, b ? b : "") != 0) { err("PINs don't match"); return; }
+    strncpy(_instance->_node_prefs->lock_pin, a, sizeof(_instance->_node_prefs->lock_pin) - 1);
+    _instance->_node_prefs->lock_pin[sizeof(_instance->_node_prefs->lock_pin) - 1] = 0;
+    pushPrefs();
+    _instance->showToast("PIN saved");
+  }
+  lv_obj_add_flag(_instance->_pinset_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_instance->_pinset_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::pinset_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  if (lv_event_get_code(e) == LV_EVENT_FOCUSED || lv_event_get_code(e) == LV_EVENT_CLICKED) {
+    lv_keyboard_set_textarea(_instance->_pinset_kb, lv_event_get_target(e));
+    lv_keyboard_set_mode(_instance->_pinset_kb, LV_KEYBOARD_MODE_NUMBER);
+    lv_obj_clear_flag(_instance->_pinset_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_pinset_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_pinset_kb);
+  }
+}
+
+void UITask::pinset_kb_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  if (lv_event_get_code(e) == LV_EVENT_READY || lv_event_get_code(e) == LV_EVENT_CANCEL)
+    lv_obj_add_flag(_instance->_pinset_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::lock_now_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance || !_instance->_node_prefs) return;
+  const char* pin = _instance->_node_prefs->lock_pin;
+  if (!pin[0] || strlen(pin) < 4) { _instance->showToast("Set a PIN first"); return; }
+  _instance->showLock();
+}
+
+void UITask::buildLockScreen() {
+  if (_lock_screen) return;
+  _lock_screen = lv_obj_create(lv_layer_top());   // opaque full-screen overlay; blocks the UI
+  lv_obj_set_size(_lock_screen, _screen_w, _screen_h);
+  lv_obj_set_pos(_lock_screen, 0, 0);
+  lv_obj_set_style_bg_color(_lock_screen, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(_lock_screen, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(_lock_screen, 0, 0);
+  lv_obj_set_style_pad_all(_lock_screen, 0, 0);
+  lv_obj_add_flag(_lock_screen, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(_lock_screen, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(_lock_screen, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t* card = lv_obj_create(_lock_screen);
+  lv_obj_set_width(card, LV_PCT(80));
+  lv_obj_set_height(card, LV_SIZE_CONTENT);
+  lv_obj_align(card, LV_ALIGN_TOP_MID, 0, HEADER_H + 8);
+  lv_obj_set_style_bg_color(card, lv_color_hex(0x1F2937), 0);
+  lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(card, 8, 0);
+  lv_obj_set_style_border_width(card, 0, 0);
+  lv_obj_set_style_pad_all(card, 12, 0);
+  lv_obj_set_style_pad_row(card, 8, 0);
+  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+
+  lv_obj_t* title = lv_label_create(card);
+  lv_label_set_text(title, LV_SYMBOL_SETTINGS "  Locked - enter PIN");
+  lv_obj_set_style_text_color(title, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+
+  lv_obj_t* row = lv_obj_create(card);
+  lv_obj_set_width(row, LV_PCT(100));
+  lv_obj_set_height(row, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(row, 0, 0);
+  lv_obj_set_style_pad_all(row, 0, 0);
+  lv_obj_set_style_pad_column(row, 6, 0);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  _lock_pin_ta = lv_textarea_create(row);
+  lv_textarea_set_one_line(_lock_pin_ta, true);
+  lv_textarea_set_max_length(_lock_pin_ta, 6);
+  lv_textarea_set_accepted_chars(_lock_pin_ta, "0123456789");
+  lv_obj_set_flex_grow(_lock_pin_ta, 1);
+  lv_obj_add_event_cb(_lock_pin_ta, lock_ta_event_cb, LV_EVENT_ALL, NULL);
+  attachInlineEye(_lock_pin_ta);   // hidden by default + eye toggle
+  lv_obj_t* ok = lv_btn_create(row);
+  lv_obj_add_event_cb(ok, lock_unlock_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* okl = lv_label_create(ok);
+  lv_label_set_text(okl, LV_SYMBOL_OK);
+  lv_obj_center(okl);
+
+  _lock_err = lv_label_create(card);
+  lv_label_set_text(_lock_err, "");
+  lv_obj_set_style_text_color(_lock_err, lv_color_hex(0xF87171), 0);
+  lv_obj_add_flag(_lock_err, LV_OBJ_FLAG_HIDDEN);
+
+  _lock_kb = lv_keyboard_create(_lock_screen);
+  lv_keyboard_set_mode(_lock_kb, LV_KEYBOARD_MODE_NUMBER);
+  lv_obj_add_event_cb(_lock_kb, lock_kb_event_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_lock_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::showLock() {
+  buildLockScreen();
+  _locked = true;
+  lv_textarea_set_text(_lock_pin_ta, "");
+  lv_obj_add_flag(_lock_err, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_lock_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(_lock_screen, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_lock_screen);
+}
+
+void UITask::lock_unlock_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance || !_instance->_node_prefs) return;
+  const char* entered = lv_textarea_get_text(_instance->_lock_pin_ta);
+  if (entered && strcmp(entered, _instance->_node_prefs->lock_pin) == 0) {
+    _instance->_locked = false;
+    lv_obj_add_flag(_instance->_lock_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(_instance->_lock_screen, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_label_set_text(_instance->_lock_err, "Wrong PIN");
+    lv_obj_clear_flag(_instance->_lock_err, LV_OBJ_FLAG_HIDDEN);
+    lv_textarea_set_text(_instance->_lock_pin_ta, "");
+  }
+}
+
+void UITask::lock_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  if (lv_event_get_code(e) == LV_EVENT_FOCUSED || lv_event_get_code(e) == LV_EVENT_CLICKED) {
+    lv_keyboard_set_textarea(_instance->_lock_kb, _instance->_lock_pin_ta);
+    lv_keyboard_set_mode(_instance->_lock_kb, LV_KEYBOARD_MODE_NUMBER);
+    lv_obj_clear_flag(_instance->_lock_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_lock_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_lock_kb);
+  }
+}
+
+void UITask::lock_kb_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY) lock_unlock_cb(e);        // "enter" tries to unlock
+  else if (code == LV_EVENT_CANCEL) lv_obj_add_flag(_instance->_lock_kb, LV_OBJ_FLAG_HIDDEN);
 }
 
 void UITask::set_shareme_cb(lv_event_t* e) {

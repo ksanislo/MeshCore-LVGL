@@ -110,6 +110,12 @@ void radio_set_tx_power(int8_t dbm) {
   radio.setOutputPower(dbm);
 }
 
+// Radio kill-switch (safe antenna detach): sleep stops all TX/RX; the caller also
+// gates the_mesh.loop so nothing tries to transmit. Re-enable = standby + re-apply
+// params (the mesh loop then restarts RX).
+void radio_sleep()   { radio.sleep(); }
+void radio_standby() { radio.standby(); }
+
 mesh::LocalIdentity radio_new_identity() {
   RadioNoiseListener rng(radio);
   return mesh::LocalIdentity(&rng);

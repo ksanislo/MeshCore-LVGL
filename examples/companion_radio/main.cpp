@@ -265,6 +265,7 @@ void setup() {
 #endif
 
 #ifdef MESH_PROXY
+  if (the_mesh.getNodePrefs()->radio_off) radio_sleep();  // booted with the radio kill-switch on
   if (!mproxy::init()) Serial.println("MeshProxy: init failed (PSRAM/queue alloc)");
   mproxy::publishIfChanged(the_mesh);   // seed the first snapshot before the UI reads it
   // Create the backend task BEFORE ui_task.begin(): the LVGL draw buffers are
@@ -296,7 +297,8 @@ static void meshTask(void*) {
   while (!s_ui_ready) vTaskDelay(1);
   for (;;) {
     mproxy::drainCommands(the_mesh);    // execute UI-posted commands against the_mesh
-    the_mesh.loop();                    // process mesh; the 5 callbacks enqueue events
+    if (!the_mesh.getNodePrefs()->radio_off)   // radio kill-switch: don't transmit/receive
+      the_mesh.loop();                  // process mesh; the 5 callbacks enqueue events
     mproxy::publishIfChanged(the_mesh); // republish the snapshot if anything changed
     mproxy::updateStats(the_mesh);      // refresh live node-info counters (display-only)
     vTaskDelay(1);                      // yield a tick so idle/watchdog run

@@ -44,4 +44,6 @@ struct NodePrefs {  // persisted to file
   uint8_t clock_12h;           // 0 = 24-hour clock display, 1 = 12-hour (AM/PM)
   uint8_t persist_history;     // 0 = session-only chat history, 1 = save to SD (0xFF = unset -> on)
   uint16_t screen_timeout_s;   // backlight idle-off after N s of no touch; 0 = never (also old-firmware default)
+  uint8_t  radio_off;          // 1 = LoRa radio disabled (no TX/RX); safe to detach the antenna. Persists.
+  char     lock_pin[8];        // settings-lock PIN (4-6 digits, NUL-terminated); "" = no PIN set
 };

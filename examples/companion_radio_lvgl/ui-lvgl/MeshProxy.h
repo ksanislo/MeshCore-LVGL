@@ -59,6 +59,7 @@ enum class CmdKind : uint8_t {
   ServerLogin,  // login to a repeater/room server: pubkey + password (+ save_login)
   SendCommand,  // send a CLI command (TXT_TYPE_CLI_DATA) to a repeater: pubkey + text
   AutoLogin,    // pubkey: log in using a saved credential if one exists (silent)
+  SetRadio,     // apply prefs.radio_off: sleep the radio (off) or re-enable it (on) + persist
 };
 
 struct MeshCmd {

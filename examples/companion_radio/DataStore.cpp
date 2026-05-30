@@ -282,6 +282,8 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     _prefs.clock_12h = 0;                                                                  // 143 (default 24h)
     _prefs.persist_history = 0xFF;                                                         // 144 (0xFF = unset -> on)
     _prefs.screen_timeout_s = 0;                                                           // 145 (0 = never / unset)
+    _prefs.radio_off = 0;                                                                  // 147 (default: radio enabled)
+    _prefs.lock_pin[0] = 0;                                                                // 148 (default: no PIN)
     file.read((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
     file.read((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
     file.read((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
@@ -290,6 +292,8 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.clock_12h, sizeof(_prefs.clock_12h));                     // 143
     file.read((uint8_t *)&_prefs.persist_history, sizeof(_prefs.persist_history));         // 144
     file.read((uint8_t *)&_prefs.screen_timeout_s, sizeof(_prefs.screen_timeout_s));       // 145
+    file.read((uint8_t *)&_prefs.radio_off, sizeof(_prefs.radio_off));                     // 147
+    file.read((uint8_t *)_prefs.lock_pin, sizeof(_prefs.lock_pin));                        // 148
 
     file.close();
   }
@@ -339,6 +343,8 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.clock_12h, sizeof(_prefs.clock_12h));                     // 143
     file.write((uint8_t *)&_prefs.persist_history, sizeof(_prefs.persist_history));         // 144
     file.write((uint8_t *)&_prefs.screen_timeout_s, sizeof(_prefs.screen_timeout_s));       // 145
+    file.write((uint8_t *)&_prefs.radio_off, sizeof(_prefs.radio_off));                     // 147
+    file.write((uint8_t *)_prefs.lock_pin, sizeof(_prefs.lock_pin));                        // 148
 
     file.close();
     commitTmp(_fs, "/new_prefs.tmp", "/new_prefs");

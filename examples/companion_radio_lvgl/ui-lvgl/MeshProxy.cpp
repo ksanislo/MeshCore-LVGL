@@ -9,6 +9,8 @@
 extern MyMesh the_mesh;
 extern void radio_set_params(float freq, float bw, uint8_t sf, uint8_t cr);
 extern void radio_set_tx_power(int8_t dbm);
+extern void radio_sleep();
+extern void radio_standby();
 
 namespace mproxy {
 
@@ -269,6 +271,19 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
       radio_set_params(p->freq, p->bw, p->sf, p->cr);
       radio_set_tx_power(p->tx_power_dbm);
       mesh.savePrefs();
+      break;
+    }
+    case CmdKind::SetRadio: {
+      NodePrefs* p = mesh.getNodePrefs();
+      p->radio_off = cmd.prefs.radio_off;
+      mesh.savePrefs();
+      if (p->radio_off) {
+        radio_sleep();                                  // stop TX/RX (loop is gated in meshTask)
+      } else {
+        radio_standby();                                // wake, then re-apply the modem config
+        radio_set_params(p->freq, p->bw, p->sf, p->cr);
+        radio_set_tx_power(p->tx_power_dbm);
+      }
       break;
     }
   }

@@ -197,6 +197,19 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_airtime_ta;      // airtime budget factor
   lv_obj_t*       _set_gps_chk;         // enable optional UART GPS (reboot to apply)
   lv_obj_t*       _set_gps_interval_ta; // GPS auto-update interval (seconds)
+  lv_obj_t*       _set_radio_sw;        // LoRa radio on/off (off = safe to detach antenna)
+  // Set-PIN dialog (two boxes, must match). Lazily built.
+  lv_obj_t*       _pinset_popup;
+  lv_obj_t*       _pinset_ta1;
+  lv_obj_t*       _pinset_ta2;
+  lv_obj_t*       _pinset_err;
+  lv_obj_t*       _pinset_kb;
+  // Lock overlay (PIN entry). Lazily built; _locked gates the whole UI.
+  lv_obj_t*       _lock_screen;
+  lv_obj_t*       _lock_pin_ta;
+  lv_obj_t*       _lock_err;
+  lv_obj_t*       _lock_kb;
+  bool            _locked;
   lv_obj_t*       _confirm_popup;       // share-position warning modal (top layer)
 
   // Reusable info modal (telemetry response now; repeater status/CLI later).
@@ -232,7 +245,6 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _login_card;          // the login card itself
   lv_obj_t*       _login_title;         // "Login: <name>"
   lv_obj_t*       _login_pw_ta;
-  lv_obj_t*       _login_eye_lbl;       // inline show/hide toggle (mono, inside the field)
   lv_obj_t*       _login_save_chk;      // "Save login"
   lv_obj_t*       _login_auto_chk;      // "Auto-login"
   lv_obj_t*       _login_kb;
@@ -415,6 +427,24 @@ class UITask : public AbstractUITask {
   static void set_advnum_ta_event_cb(lv_event_t* e); // multiack / rxdelay / airtime / gps-interval fields
   void      commitAdvNumbers();
   static void set_gps_cb(lv_event_t* e);             // enable optional UART GPS
+  static void set_radio_sw_cb(lv_event_t* e);        // LoRa radio on/off kill-switch
+  static void pw_eye_cb(lv_event_t* e);              // generic inline show/hide (user_data = textarea)
+  static lv_obj_t* attachInlineEye(lv_obj_t* ta);    // hidden-by-default + inline eye toggle
+  // Set-PIN dialog (enter twice, must match)
+  void      buildPinSetPopup();
+  void      openPinSet();
+  static void set_pin_btn_cb(lv_event_t* e);
+  static void pinset_save_cb(lv_event_t* e);
+  static void pinset_dismiss_cb(lv_event_t* e);
+  static void pinset_ta_event_cb(lv_event_t* e);
+  static void pinset_kb_event_cb(lv_event_t* e);
+  // PIN lock screen
+  void      buildLockScreen();
+  void      showLock();                              // lock now (overlay PIN entry)
+  static void lock_now_cb(lv_event_t* e);
+  static void lock_unlock_cb(lv_event_t* e);
+  static void lock_ta_event_cb(lv_event_t* e);
+  static void lock_kb_event_cb(lv_event_t* e);
   static void set_shareme_cb(lv_event_t* e);         // export own contact as QR
   void      showSharePosWarning();
   static void set_copykey_cb(lv_event_t* e);
@@ -456,7 +486,6 @@ class UITask : public AbstractUITask {
   static void login_go_cb(lv_event_t* e);
   static void login_ta_event_cb(lv_event_t* e);
   static void login_kb_event_cb(lv_event_t* e);
-  static void login_eye_cb(lv_event_t* e);      // toggle password show/hide
   static void newchan_open_cb(lv_event_t* e);   // "+ New channel" list entry
   static void newchan_back_cb(lv_event_t* e);
   static void newchan_save_cb(lv_event_t* e);
@@ -504,6 +533,9 @@ public:
       _set_autoadd_chk(NULL), _set_autoadd_hops_dd(NULL), _set_rxboost_chk(NULL),
       _set_multiack_ta(NULL), _set_rxdelay_ta(NULL), _set_airtime_ta(NULL),
       _set_gps_chk(NULL), _set_gps_interval_ta(NULL),
+      _set_radio_sw(NULL),
+      _pinset_popup(NULL), _pinset_ta1(NULL), _pinset_ta2(NULL), _pinset_err(NULL), _pinset_kb(NULL),
+      _lock_screen(NULL), _lock_pin_ta(NULL), _lock_err(NULL), _lock_kb(NULL), _locked(false),
       _confirm_popup(NULL),
       _info_popup(NULL), _info_title_lbl(NULL), _info_body_lbl(NULL),
       _qr_screen(NULL), _qr_code(NULL), _qr_name_lbl(NULL), _qr_key_lbl(NULL),
@@ -512,7 +544,7 @@ public:
       _newchan_err(NULL), _newchan_kb(NULL),
       _nodeinfo_screen(NULL), _nodeinfo_lbl(NULL), _nodeinfo_timer(NULL),
       _login_popup(NULL), _login_card(NULL), _login_title(NULL), _login_pw_ta(NULL),
-      _login_eye_lbl(NULL), _login_save_chk(NULL), _login_auto_chk(NULL), _login_kb(NULL),
+      _login_save_chk(NULL), _login_auto_chk(NULL), _login_kb(NULL),
       _screen_w(0), _screen_h(0),
       _kb_scroll(NULL), _kb_scroll_pad(0),
       _buf1(NULL), _buf2(NULL), _msgs(&_rammsgs), _sd_off_ts(0),
