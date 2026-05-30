@@ -184,8 +184,18 @@ lv_obj_t* UITask::buildSplashScreen() {
   lv_obj_t* scr = lv_obj_create(NULL);
   styleAsDarkScreen(scr);
 
+  // Resolution-independent wordmark: one high-res alpha master (600x67) scaled to
+  // ~62% of the screen width via zoom, tinted with the recolorable UI_LOGO token.
+  // Pivot = source center so the zoom pins the same point LV_ALIGN_CENTER anchors.
   lv_obj_t* wordmark = lv_img_create(scr);
-  lv_img_set_src(wordmark, &meshcore_logo_img);
+  lv_img_set_src(wordmark, &meshcore_logo_alpha);
+  int target_w = (lv_disp_get_hor_res(NULL) * 62) / 100;
+  uint16_t zoom = (uint16_t)((256 * target_w) / meshcore_logo_alpha.header.w);
+  lv_img_set_zoom(wordmark, zoom);
+  lv_img_set_pivot(wordmark, meshcore_logo_alpha.header.w / 2,
+                   meshcore_logo_alpha.header.h / 2);
+  lv_obj_set_style_img_recolor(wordmark, lv_color_hex(UI_LOGO), 0);
+  lv_obj_set_style_img_recolor_opa(wordmark, LV_OPA_COVER, 0);
   lv_obj_align(wordmark, LV_ALIGN_CENTER, 0, 0);
 
   return scr;
@@ -293,11 +303,17 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_set_style_pad_all(header, 8, 0);
   lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
 
-  _header_label = lv_label_create(header);
-  lv_label_set_text(_header_label, "MeshCore");
-  lv_obj_set_style_text_color(_header_label, lv_color_hex(FG_HEX), 0);
-  lv_obj_set_style_text_font(_header_label, fontTitle(), 0);
-  lv_obj_align(_header_label, LV_ALIGN_LEFT_MID, 4, 0);
+  // MeshCore wordmark, scaled down from the same alpha master as the splash and
+  // tinted with UI_LOGO. Pivot = left-mid so the zoom pins the LV_ALIGN_LEFT_MID
+  // anchor. ~22px tall sits cleanly inside the 48px header's padded content.
+  _header_logo = lv_img_create(header);
+  lv_img_set_src(_header_logo, &meshcore_logo_alpha);
+  uint16_t hzoom = (uint16_t)((256 * 22) / meshcore_logo_alpha.header.h);
+  lv_img_set_zoom(_header_logo, hzoom);
+  lv_img_set_pivot(_header_logo, 0, meshcore_logo_alpha.header.h / 2);
+  lv_obj_set_style_img_recolor(_header_logo, lv_color_hex(UI_LOGO), 0);
+  lv_obj_set_style_img_recolor_opa(_header_logo, LV_OPA_COVER, 0);
+  lv_obj_align(_header_logo, LV_ALIGN_LEFT_MID, 4, 0);
 
   // Live device clock (right side of the header), updated once a second in loop().
   _clock_label = lv_label_create(header);

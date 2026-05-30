@@ -32,6 +32,7 @@ static constexpr uint32_t UI_DANGER      = 0x7F1D1D;  // red-900   destructive a
 static constexpr uint32_t UI_ERROR       = 0xF87171;  // red-400   inline error / failure text
 static constexpr uint32_t UI_MSG_OUT     = 0x2563EB;  // blue-600  outgoing chat bubble
 static constexpr uint32_t UI_MSG_IN      = 0x374151;  // gray-700  incoming chat bubble
+static constexpr uint32_t UI_LOGO       = 0xF3F4F6;  // gray-100  wordmark tint (recolorable)
 
 // Legacy aliases (do not remove -- referenced widely in UITask.cpp).
 static constexpr uint32_t BG_HEX  = UI_BG;
