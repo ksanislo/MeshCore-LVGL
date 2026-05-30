@@ -2775,11 +2775,16 @@ void UITask::ensureBanner() {
     _banner_title = lv_label_create(col);
     lv_obj_set_style_text_color(_banner_title, lv_color_hex(UI_FG_BRIGHT), 0);
     lv_obj_set_style_text_font(_banner_title, fontBody(), 0);
-    _banner_body = lv_label_create(col);
+    // Preview is rendered through the same pipeline as chat bubbles
+    // (addMessageText in showBanner): "@[name]" mentions become a highlighted
+    // "@name", emoji/Unicode resolve identically. This is just a clipping host
+    // capped to ~2 lines of body text so a long message can't grow the banner.
+    _banner_body = lv_obj_create(col);
+    lv_obj_remove_style_all(_banner_body);
     lv_obj_set_width(_banner_body, LV_PCT(100));
-    lv_label_set_long_mode(_banner_body, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_color(_banner_body, lv_color_hex(UI_FG), 0);
-    lv_obj_set_style_text_font(_banner_body, fontBody(), 0);
+    lv_obj_set_height(_banner_body, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(_banner_body, 40, 0);
+    lv_obj_clear_flag(_banner_body, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* x = lv_btn_create(_banner);
     lv_obj_set_style_bg_opa(x, LV_OPA_TRANSP, 0);
@@ -2809,9 +2814,27 @@ void UITask::showBanner(const char* conv_key, const char* sender,
   char clean[CHAT_PEER_NAME_MAX + 4];
   sanitizeForFont(who, clean, sizeof(clean));
   lv_label_set_text(_banner_title, clean);
-  char body[CHAT_MSG_TEXT_MAX + 4];
-  sanitizeForFont(text ? text : "", body, sizeof(body));
-  lv_label_set_text(_banner_body, body);
+  // Same branching as a chat bubble (see the message renderer): a shared-contact
+  // message is a "<pubkey:type:name>" ref, not prose -- show a concise branded
+  // line (type glyph + name) like the contact card, never the raw ref; otherwise
+  // run the text through addMessageText so mentions/emoji look identical to chat.
+  lv_obj_clean(_banner_body);
+  uint8_t cpk[PUB_KEY_SIZE], ctype;
+  char cname[CHAT_PEER_NAME_MAX];
+  if (text && parseContactRef(text, cpk, ctype, cname, sizeof(cname))) {
+    char nm[CHAT_PEER_NAME_MAX];
+    sanitizeForFont(cname, nm, sizeof(nm));
+    char line[CHAT_PEER_NAME_MAX + 24];
+    snprintf(line, sizeof(line), "%s Contact: %s", contactSymbol(ctype), nm);
+    lv_obj_t* lbl = lv_label_create(_banner_body);
+    lv_obj_set_width(lbl, LV_PCT(100));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(UI_FG_BRIGHT), 0);
+    lv_obj_set_style_text_font(lbl, fontBody(), 0);
+    lv_label_set_text(lbl, line);
+  } else {
+    addMessageText(_banner_body, text ? text : "");
+  }
 
   lv_obj_clear_flag(_banner, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(_banner);
