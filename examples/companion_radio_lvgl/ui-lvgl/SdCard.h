@@ -36,5 +36,6 @@ void registerFs();     // register the 'S:' lv_fs driver -- call AFTER lv_init()
 bool ready();          // is the card currently mounted?
 void end();            // unmount (so the card can be removed)
 bool ensureMounted();  // lazily (re)mount if needed, throttled; call before access
+void rescan();         // re-enable mounting after giving up (card (re)inserted)
 
 }  // namespace SdSvc

@@ -3682,6 +3682,9 @@ void UITask::refreshNodeInfo() {
   n += snprintf(buf + n, sizeof(buf) - n, "Uptime: %ud %uh %um %us\n", d, h, m, sec);
   n += snprintf(buf + n, sizeof(buf) - n, "Free RAM: %u KB (min %u)\n", freeRam, minRam);
   n += snprintf(buf + n, sizeof(buf) - n, "Free PSRAM: %u KB\n", freePs);
+#ifdef HAS_SD_CARD
+  n += snprintf(buf + n, sizeof(buf) - n, "SD: %s\n", SdSvc::ready() ? "ok" : "none");
+#endif
   n += snprintf(buf + n, sizeof(buf) - n, "TX flood/direct: %u / %u\n", st.sent_flood, st.sent_direct);
   n += snprintf(buf + n, sizeof(buf) - n, "RX flood/direct: %u / %u\n", st.recv_flood, st.recv_direct);
   n += snprintf(buf + n, sizeof(buf) - n, "PHY sent/recv/err: %u / %u / %u\n", st.pkts_sent, st.pkts_recv, st.recv_errors);

@@ -21,18 +21,27 @@ namespace SdSvc {
 
 static bool     s_mounted = false;
 static uint32_t s_retry_ms = 0;   // last (re)mount attempt
+static int      s_fail_count = 0;
+static bool     s_gave_up = false;  // no card: stop hammering the bus (each failed
+                                    // mount stalls the shared HSPI while it times out)
 
 Lock::Lock()  { hspi_lock(); sd_bus_to_sd(); }
 Lock::~Lock() { sd_bus_to_lora(); hspi_unlock(); }
 
 bool ready() { return s_mounted; }
 
+// Re-enable mount attempts (after giving up): call when a card may have been
+// inserted, or to force a re-check.
+void rescan() { s_gave_up = false; s_fail_count = 0; s_retry_ms = 0; }
+
 bool ensureMounted() {
   if (s_mounted) return true;
+  if (s_gave_up) return false;     // missing/dead card: don't stall the bus every few s
   uint32_t now = millis();
   if (s_retry_ms != 0 && (uint32_t)(now - s_retry_ms) < 3000) return false;  // throttle
   s_retry_ms = now ? now : 1;
   s_mounted = sd_card_begin();   // variant re-pins, mounts, restores the bus
+  if (!s_mounted && ++s_fail_count >= 3) s_gave_up = true;  // give up -> graceful no-SD
   return s_mounted;
 }
 
@@ -300,7 +309,7 @@ void registerFs() {
 
 bool begin() {
   s_mounted = false;
-  s_retry_ms = 0;
+  rescan();                 // fresh start: allow mount attempts again
   return ensureMounted();   // NOTE: registerFs() is separate -- it needs lv_init() first
 }
 
