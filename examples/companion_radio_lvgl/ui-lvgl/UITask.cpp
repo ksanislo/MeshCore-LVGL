@@ -105,7 +105,7 @@ void UITask::dismiss_kb_cb(lv_event_t* e) {
   UITask* s = _instance;
   if (s->_chat_keyboard && lv_scr_act() == s->_chat_screen) s->layoutChatBody(false);  // also restores chat layout
   lv_obj_t* kbs[] = { s->_set_kb, s->_cinfo_kb, s->_path_kb, s->_newchan_kb,
-                      s->_login_kb, s->_contacts_kb, s->_pick_kb };
+                      s->_login_kb, s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_lock_kb };
   for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -2930,6 +2930,17 @@ void UITask::showToast(const char* text) {
 }
 
 // caption label + a column container the caller fills with the value widget
+// Keyboard-dismiss model, applied uniformly across every screen: each screen with
+// a keyboard wires dismiss_kb_cb on its scroll body (tap empty space -> hide kb),
+// and every *passive* layout container (field wrappers, hero cards, value rows) is
+// run through makePassive() so it doesn't eat the tap before it reaches that body.
+// Inputs/buttons stay clickable, so tapping another field still moves focus
+// directly. Any new layout-only container placed over a keyboard-bearing body
+// should also be made passive.
+static void makePassive(lv_obj_t* o) {
+  lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);
+}
+
 static lv_obj_t* makeField(lv_obj_t* parent, const char* caption) {
   lv_obj_t* col = lv_obj_create(parent);
   lv_obj_set_width(col, LV_PCT(100));
@@ -2939,6 +2950,7 @@ static lv_obj_t* makeField(lv_obj_t* parent, const char* caption) {
   lv_obj_set_style_pad_all(col, 0, 0);
   lv_obj_set_style_pad_row(col, 2, 0);
   lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+  makePassive(col);   // taps on a field's caption/gaps fall through to dismiss the kb
   lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
   lv_obj_t* cap = lv_label_create(col);
   lv_label_set_text(cap, caption);
@@ -2984,6 +2996,7 @@ void UITask::buildContactInfoScreen() {
   lv_obj_set_flex_flow(hero, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(hero, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_clear_flag(hero, LV_OBJ_FLAG_SCROLLABLE);
+  makePassive(hero);   // tap the card (except the key line) -> falls through to dismiss kb
 
   _cinfo_avatar = lv_obj_create(hero);
   lv_obj_remove_style_all(_cinfo_avatar);
@@ -3018,6 +3031,7 @@ void UITask::buildContactInfoScreen() {
 
   // action row
   lv_obj_t* actions = lv_obj_create(_cinfo_body);
+  makePassive(actions);
   lv_obj_set_width(actions, LV_PCT(100));
   lv_obj_set_height(actions, LV_SIZE_CONTENT);
   lv_obj_set_style_bg_opa(actions, LV_OPA_TRANSP, 0);
@@ -3053,6 +3067,7 @@ void UITask::buildContactInfoScreen() {
   lv_obj_clear_flag(fn, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(fn, LV_FLEX_FLOW_COLUMN);
   lv_obj_t* ncap = lv_obj_create(fn);
+  makePassive(ncap);
   lv_obj_set_width(ncap, LV_PCT(100));
   lv_obj_set_height(ncap, LV_SIZE_CONTENT);
   lv_obj_set_style_bg_opa(ncap, LV_OPA_TRANSP, 0);
@@ -3078,6 +3093,7 @@ void UITask::buildContactInfoScreen() {
 
   lv_obj_t* fp = makeField(_cinfo_body, "Position (lat, lon)");
   lv_obj_t* prow = lv_obj_create(fp);
+  makePassive(prow);
   lv_obj_set_width(prow, LV_PCT(100));
   lv_obj_set_height(prow, LV_SIZE_CONTENT);
   lv_obj_set_style_bg_opa(prow, LV_OPA_TRANSP, 0);
@@ -4130,6 +4146,7 @@ void UITask::buildLoginPopup() {
 
   // Password row: [field with inline eye] [send].
   lv_obj_t* prow = lv_obj_create(_login_card);
+  makePassive(prow);
   lv_obj_set_width(prow, LV_PCT(100));
   lv_obj_set_height(prow, LV_SIZE_CONTENT);
   lv_obj_set_style_bg_opa(prow, LV_OPA_TRANSP, 0);
@@ -4648,6 +4665,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   // Position: editable lat/lon (degrees). Affects adverts only when sharing is on.
   lv_obj_t* fpos = makeField(body, "Position (lat, lon)");
   lv_obj_t* prow = lv_obj_create(fpos);
+  makePassive(prow);
   lv_obj_set_width(prow, LV_PCT(100));
   lv_obj_set_height(prow, LV_SIZE_CONTENT);
   lv_obj_set_style_bg_opa(prow, LV_OPA_TRANSP, 0);
@@ -4684,6 +4702,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   // ===== Radio (edit fields, then a single Apply) =====
   // Header row: "Radio" title on the left, a "Preset" button on the right.
   lv_obj_t* rhdr = lv_obj_create(body);
+  makePassive(rhdr);
   lv_obj_set_width(rhdr, LV_PCT(100));
   lv_obj_set_height(rhdr, LV_SIZE_CONTENT);
   lv_obj_set_style_bg_opa(rhdr, LV_OPA_TRANSP, 0);
