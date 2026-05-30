@@ -80,6 +80,19 @@ void UITask::touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   }
 }
 
+// Tap on a screen background (outside any text field / keyboard) -> hide the open
+// keyboard. Attached to each screen's scrollable body; a tap on a field/button is
+// handled by that widget and doesn't reach here (events don't bubble by default).
+void UITask::dismiss_kb_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  UITask* s = _instance;
+  if (s->_chat_keyboard && lv_scr_act() == s->_chat_screen) s->layoutChatBody(false);  // also restores chat layout
+  lv_obj_t* kbs[] = { s->_set_kb, s->_cinfo_kb, s->_path_kb, s->_newchan_kb,
+                      s->_login_kb, s->_contacts_kb, s->_pick_kb };
+  for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+}
+
 // meshcore.io page background
 static constexpr uint32_t BG_HEX = 0x111827;
 
@@ -242,6 +255,7 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_set_style_pad_all(_tab_contacts, 0, 0);
   lv_obj_clear_flag(_tab_contacts, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(_tab_contacts, LV_FLEX_FLOW_COLUMN);
+  lv_obj_add_event_cb(_tab_contacts, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap empty -> hide kb
 
   // Search row: text field (grows) + a filter/menu button on the right that
   // opens the order/filter pop-out.
@@ -1955,6 +1969,7 @@ void UITask::openChat(const char* peer_name) {
     // Scrollable history band (the future hardware-scroll VSA). Geometry set
     // by layoutChatBody() so it adjusts when the keyboard shows/hides.
     _chat_history = lv_obj_create(_chat_screen);
+    lv_obj_add_event_cb(_chat_history, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap history -> hide kb
     lv_obj_set_style_bg_color(_chat_history, lv_color_hex(BG_HEX), 0);
     lv_obj_set_style_bg_opa(_chat_history, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(_chat_history, 0, 0);
@@ -2314,6 +2329,7 @@ void UITask::buildContactInfoScreen() {
 
   // scrollable body
   _cinfo_body = lv_obj_create(_cinfo_screen);
+  lv_obj_add_event_cb(_cinfo_body, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap empty -> hide kb
   lv_obj_set_size(_cinfo_body, _screen_w, _screen_h - HEADER_H);
   lv_obj_align(_cinfo_body, LV_ALIGN_TOP_MID, 0, HEADER_H);
   lv_obj_set_style_bg_color(_cinfo_body, lv_color_hex(BG_HEX), 0);
@@ -3053,6 +3069,7 @@ void UITask::buildPathEditorScreen() {
   lv_label_set_text(svl, LV_SYMBOL_OK);
 
   lv_obj_t* body = lv_obj_create(_path_screen);
+  lv_obj_add_event_cb(body, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap empty -> hide kb
   lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
   lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
   lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
@@ -3253,6 +3270,7 @@ void UITask::buildNewChannelScreen() {
   lv_label_set_text(svl, LV_SYMBOL_OK);
 
   lv_obj_t* body = lv_obj_create(_newchan_screen);
+  lv_obj_add_event_cb(body, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap empty -> hide kb
   lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
   lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
   lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
@@ -3438,6 +3456,7 @@ void UITask::buildLoginPopup() {
   lv_obj_clear_flag(_login_card, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(_login_card, LV_FLEX_FLOW_COLUMN);
   lv_obj_add_flag(_login_card, LV_OBJ_FLAG_CLICKABLE);   // consume clicks (don't dismiss)
+  lv_obj_add_event_cb(_login_card, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap card empty -> hide kb
 
   _login_title = lv_label_create(_login_card);
   lv_obj_set_style_text_color(_login_title, lv_color_hex(FG_HEX), 0);
@@ -3750,6 +3769,7 @@ static lv_obj_t* makeNumberField(lv_obj_t* body, const char* cap, lv_event_cb_t 
 
 void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_t* body = _tab_settings;
+  lv_obj_add_event_cb(body, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap empty -> hide kb
   lv_obj_set_style_pad_all(body, 12, 0);
   lv_obj_set_style_pad_row(body, 8, 0);
   lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);  // tab page scrolls by default

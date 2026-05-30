@@ -254,6 +254,7 @@ class UITask : public AbstractUITask {
   static UITask* _instance;
   static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p);
   static void touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data);
+  static void dismiss_kb_cb(lv_event_t* e);   // tap a background -> hide any open keyboard
   static void splash_dismiss_cb(lv_timer_t* t);
 
   lv_obj_t* buildSplashScreen();
