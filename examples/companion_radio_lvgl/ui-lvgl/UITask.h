@@ -392,6 +392,10 @@ class UITask : public AbstractUITask {
   static void channel_clicked_cb(lv_event_t* e);
   // Contacts recycler: build the row pool once; bind a slot to a display index;
   // re-window the pool on scroll. contact_row_cb opens the tapped contact's chat.
+  // Shared row primitives (reused by the Contacts tab and the share/insert picker
+  // so every contact row looks + fills identically -- tweak once, applies everywhere).
+  static void makeContactRowSlot(lv_obj_t* parent, ContactRow& w, lv_event_cb_t tap_cb, void* tap_ctx);
+  void      fillContactRow(ContactRow& w, const ContactInfo& c);
   void      buildContactRows(lv_obj_t* parent);
   void      bindContactRow(int slot, int disp);
   void      relayoutContactRows();

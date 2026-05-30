@@ -366,6 +366,7 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_set_style_pad_all(_tab_contacts, 0, 0);
   lv_obj_clear_flag(_tab_contacts, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(_tab_contacts, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(_tab_contacts, 0, 0);   // no gap between the search band and the list
   lv_obj_add_event_cb(_tab_contacts, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap empty -> hide kb
 
   // Search row: text field (grows) + a filter/menu button on the right that
@@ -377,7 +378,8 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_set_style_bg_opa(cctl, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(cctl, 0, 0);
   lv_obj_set_style_radius(cctl, 0, 0);
-  lv_obj_set_style_pad_all(cctl, 6, 0);
+  lv_obj_set_style_pad_hor(cctl, 6, 0);
+  lv_obj_set_style_pad_ver(cctl, 4, 0);   // slim band
   lv_obj_set_style_pad_column(cctl, 6, 0);
   lv_obj_clear_flag(cctl, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(cctl, LV_FLEX_FLOW_ROW);
@@ -387,6 +389,8 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_textarea_set_one_line(_contacts_search_ta, true); lv_obj_add_event_cb(_contacts_search_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_placeholder_text(_contacts_search_ta, LV_SYMBOL_EYE_OPEN " Search");
   lv_obj_set_flex_grow(_contacts_search_ta, 1);
+  lv_obj_set_style_pad_ver(_contacts_search_ta, 5, 0);   // shorter input (default theme pad is tall)
+  lv_obj_set_style_text_font(_contacts_search_ta, &lv_font_montserrat_14, 0);
   lv_obj_add_event_cb(_contacts_search_ta, contacts_search_ta_cb, LV_EVENT_ALL, NULL);
 
   _contacts_filter_btn = lv_btn_create(cctl);
@@ -620,6 +624,94 @@ static void buildUnreadMark() {
   s_mark_img.data      = s_mark_buf;
 }
 
+// One contact-list row's widget tree (avatar + unread marker + first-grapheme/glyph
+// + name + last-seen). Shared by every contact list so rows are identical; tap_cb
+// (with tap_ctx as its event user_data) lets each list pick its own tap behavior.
+void UITask::makeContactRowSlot(lv_obj_t* parent, ContactRow& w, lv_event_cb_t tap_cb, void* tap_ctx) {
+  lv_obj_t* row = lv_obj_create(parent);
+  lv_obj_remove_style_all(row);
+  lv_obj_set_size(row, LV_PCT(100), UI_CONTACT_ROW_H);
+  lv_obj_set_style_bg_color(row, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_color(row, lv_color_hex(UI_BORDER), 0);
+  lv_obj_set_style_border_width(row, 1, 0);
+  lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
+  lv_obj_set_style_pad_left(row, 8, 0);
+  lv_obj_set_style_pad_right(row, 8, 0);
+  lv_obj_set_style_pad_column(row, 10, 0);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_add_event_cb(row, tap_cb, LV_EVENT_CLICKED, tap_ctx);
+
+  lv_obj_t* av = lv_obj_create(row);
+  lv_obj_remove_style_all(av);
+  lv_obj_set_size(av, UI_AVATAR_D, UI_AVATAR_D);
+  lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+  // Unread marker: shared red chevron, child of the avatar created BEFORE the letter
+  // so the draw order is circle -> dart -> letter (letter stays on top + crisp).
+  lv_obj_t* dot = lv_img_create(av);
+  lv_img_set_src(dot, &s_mark_img);
+  lv_obj_add_flag(dot, LV_OBJ_FLAG_FLOATING);
+  lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_align(dot, LV_ALIGN_LEFT_MID, 0, 0);
+
+  lv_obj_t* avl = lv_label_create(av);
+  lv_obj_center(avl);
+  lv_obj_set_style_text_color(avl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_font(avl, fontHeading(), 0);
+
+  lv_obj_t* nm = lv_label_create(row);
+  lv_obj_set_flex_grow(nm, 1);
+  lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
+  lv_obj_set_style_text_font(nm, fontBody(), 0);
+  lv_obj_set_style_text_color(nm, lv_color_hex(FG_HEX), 0);
+
+  lv_obj_t* sn = lv_label_create(row);
+  lv_obj_set_style_text_color(sn, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_font(sn, fontBody(), 0);
+
+  w.root = row; w.avatar = av; w.avatar_lbl = avl; w.name = nm; w.seen = sn; w.dot = dot;
+}
+
+// Fill a row's widgets from a contact: branding (name-seeded color + grapheme, or
+// type glyph), last-seen, unread chevron, favourite color. Shared content-fill.
+void UITask::fillContactRow(ContactRow& w, const ContactInfo& c) {
+  char dn[CHAT_PEER_NAME_MAX];
+  displayName(c.id.pub_key, c.name, dn, sizeof(dn));
+  char clean[CHAT_PEER_NAME_MAX + 4];
+  sanitizeForFont(dn[0] ? dn : "(unnamed)", clean, sizeof(clean));
+  lv_label_set_text(w.name, clean);
+
+  bool is_chat = (c.type == ADV_TYPE_CHAT || c.type == 0);
+  if (is_chat) {
+    char g[8]; firstGrapheme(clean, g, sizeof(g));
+    lv_label_set_text(w.avatar_lbl, g[0] ? g : "?");
+    lv_obj_set_style_bg_color(w.avatar, lv_color_hex(nameColor(dn)), 0);
+  } else {
+    lv_label_set_text(w.avatar_lbl, contactSymbol(c.type));
+    lv_obj_set_style_bg_color(w.avatar, lv_color_hex(UI_AVATAR_NEUT), 0);
+  }
+
+  char ago[16];   // lastmod = OUR clock (last_advert_timestamp is the remote's, untrusted)
+  formatLastSeen(ago, sizeof(ago), c.lastmod, mproxy::rtcSeconds());
+  lv_label_set_text(w.seen, ago);
+
+  char ckey[CHAT_PEER_NAME_MAX];
+  convKey(c.id.pub_key, false, ckey, sizeof(ckey));
+  bool unread = isUnread(ckey);
+  bool fav = (c.flags & CONTACT_FLAG_FAVOURITE);
+  if (unread) lv_obj_clear_flag(w.dot, LV_OBJ_FLAG_HIDDEN);
+  else        lv_obj_add_flag(w.dot, LV_OBJ_FLAG_HIDDEN);
+  // The red chevron carries the unread signal, so the name keeps its normal color
+  // (amber for favourites, default otherwise).
+  lv_obj_set_style_text_color(w.name, lv_color_hex(fav ? FAV_HEX : FG_HEX), 0);
+}
+
 // Create the scroll container, content spacer, empty-placeholder, and the recycled
 // pool of row widgets (avatar + name + last-seen + unread marker).
 void UITask::buildContactRows(lv_obj_t* parent) {
@@ -655,57 +747,7 @@ void UITask::buildContactRows(lv_obj_t* parent) {
 
   for (int s = 0; s < _row_pool_n; s++) {
     _row_bound_idx[s] = -1;
-    lv_obj_t* row = lv_obj_create(_contacts_scroll);
-    lv_obj_remove_style_all(row);
-    lv_obj_set_size(row, LV_PCT(100), UI_CONTACT_ROW_H);
-    lv_obj_set_style_bg_color(row, lv_color_hex(BG_HEX), 0);
-    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(row, lv_color_hex(UI_BORDER), 0);
-    lv_obj_set_style_border_width(row, 1, 0);
-    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
-    lv_obj_set_style_pad_left(row, 8, 0);
-    lv_obj_set_style_pad_right(row, 8, 0);
-    lv_obj_set_style_pad_column(row, 10, 0);
-    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_add_event_cb(row, contact_row_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t* av = lv_obj_create(row);
-    lv_obj_remove_style_all(av);
-    lv_obj_set_size(av, UI_AVATAR_D, UI_AVATAR_D);
-    lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
-    lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-
-    // Unread marker: the shared red chevron, a child of the avatar created BEFORE the
-    // letter, so the draw order is circle -> dart -> letter (the letter stays on top
-    // and crisp). Pushed to the avatar's left edge so the rear arms overhang the
-    // circle's curve, tip aimed in at the letter.
-    lv_obj_t* dot = lv_img_create(av);
-    lv_img_set_src(dot, &s_mark_img);
-    lv_obj_add_flag(dot, LV_OBJ_FLAG_FLOATING);
-    lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_align(dot, LV_ALIGN_LEFT_MID, 0, 0);   // canvas maps 1:1 onto the avatar's left half
-
-    lv_obj_t* avl = lv_label_create(av);
-    lv_obj_center(avl);
-    lv_obj_set_style_text_color(avl, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_text_font(avl, fontHeading(), 0);
-
-    lv_obj_t* nm = lv_label_create(row);
-    lv_obj_set_flex_grow(nm, 1);
-    lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_font(nm, fontBody(), 0);
-    lv_obj_set_style_text_color(nm, lv_color_hex(FG_HEX), 0);
-
-    lv_obj_t* sn = lv_label_create(row);
-    lv_obj_set_style_text_color(sn, lv_color_hex(DIM_HEX), 0);
-    lv_obj_set_style_text_font(sn, fontBody(), 0);
-
-    _rowpool[s].root = row; _rowpool[s].avatar = av; _rowpool[s].avatar_lbl = avl;
-    _rowpool[s].name = nm; _rowpool[s].seen = sn; _rowpool[s].dot = dot;
+    makeContactRowSlot(_contacts_scroll, _rowpool[s], contact_row_cb, NULL);
   }
 
   _contacts_sb = attachScrollHandle(_contacts_scroll);
@@ -717,38 +759,7 @@ void UITask::bindContactRow(int slot, int disp) {
   ContactRow& w = _rowpool[slot];
   ContactInfo c;
   if (!mproxy::getContactByIdx(_crows[disp].idx, c)) return;
-  char dn[CHAT_PEER_NAME_MAX];
-  displayName(c.id.pub_key, c.name, dn, sizeof(dn));
-  char clean[CHAT_PEER_NAME_MAX + 4];
-  sanitizeForFont(dn[0] ? dn : "(unnamed)", clean, sizeof(clean));
-  lv_label_set_text(w.name, clean);
-
-  // Chat contacts get a name-seeded color circle + first grapheme; repeater/room/
-  // sensor keep their type glyph on a neutral circle.
-  bool is_chat = (c.type == ADV_TYPE_CHAT || c.type == 0);
-  if (is_chat) {
-    char g[8]; firstGrapheme(clean, g, sizeof(g));
-    lv_label_set_text(w.avatar_lbl, g[0] ? g : "?");
-    lv_obj_set_style_bg_color(w.avatar, lv_color_hex(nameColor(dn)), 0);
-  } else {
-    lv_label_set_text(w.avatar_lbl, contactSymbol(c.type));
-    lv_obj_set_style_bg_color(w.avatar, lv_color_hex(UI_AVATAR_NEUT), 0);
-  }
-
-  char ago[16];   // lastmod = OUR clock (last_advert_timestamp is the remote's, untrusted)
-  formatLastSeen(ago, sizeof(ago), c.lastmod, mproxy::rtcSeconds());
-  lv_label_set_text(w.seen, ago);
-
-  char ckey[CHAT_PEER_NAME_MAX];
-  convKey(c.id.pub_key, false, ckey, sizeof(ckey));
-  bool unread = isUnread(ckey);
-  bool fav = (c.flags & CONTACT_FLAG_FAVOURITE);
-  if (unread) lv_obj_clear_flag(w.dot, LV_OBJ_FLAG_HIDDEN);
-  else        lv_obj_add_flag(w.dot, LV_OBJ_FLAG_HIDDEN);
-  // The red chevron carries the unread signal now, so the name keeps its normal
-  // color (amber for favourites, default otherwise).
-  lv_obj_set_style_text_color(w.name, lv_color_hex(fav ? FAV_HEX : FG_HEX), 0);
-
+  fillContactRow(w, c);
   lv_obj_set_user_data(w.root, (void*)(intptr_t)disp);
 }
 

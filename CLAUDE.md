@@ -69,6 +69,14 @@ default it (0 / 0xFF = unset) before the read. See `display_brightness`,
 `screen_timeout_s`, etc.
 
 ## UITask conventions
+- **Reuse shared UI components — don't fork per screen.** A design goal: every
+  list/card/field/modal should come from one shared primitive so the UX stays
+  consistent and tweaks propagate everywhere. Reuse (and parameterize behavior on)
+  the virtualized contact-list recycler (Contacts tab *and* the share/insert
+  picker), `makeHeroCard` (contact info + owner profile), `makeModalCard`,
+  `makeHeaderBar`/`makeBackButton`, `makeField`/`makeNumberField`/
+  `makeDropdownField`, `makePassive`, the type-ramp fonts, and `ui_theme.h` tokens.
+  Differentiate modes via config + the page header, not by cloning widget code.
 - Variant-agnostic: it derives resolution/rotation from the LGFX device and only
   knows the weak `board_set_backlight()` hook — keep variant specifics out of it.
 - Lists (`rebuildContactsList`/`rebuildChannelsList`) are heavy; rebuild only when
