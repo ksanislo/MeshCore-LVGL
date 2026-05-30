@@ -360,7 +360,7 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_set_flex_align(cctl, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
   _contacts_search_ta = lv_textarea_create(cctl);
-  lv_textarea_set_one_line(_contacts_search_ta, true);
+  lv_textarea_set_one_line(_contacts_search_ta, true); lv_obj_add_event_cb(_contacts_search_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_placeholder_text(_contacts_search_ta, LV_SYMBOL_EYE_OPEN " Search");
   lv_obj_set_flex_grow(_contacts_search_ta, 1);
   lv_obj_add_event_cb(_contacts_search_ta, contacts_search_ta_cb, LV_EVENT_ALL, NULL);
@@ -1201,7 +1201,7 @@ void UITask::buildContactPickerScreen() {
   lv_obj_set_style_pad_all(srow, 6, 0);
   lv_obj_clear_flag(srow, LV_OBJ_FLAG_SCROLLABLE);
   _pick_search_ta = lv_textarea_create(srow);
-  lv_textarea_set_one_line(_pick_search_ta, true);
+  lv_textarea_set_one_line(_pick_search_ta, true); lv_obj_add_event_cb(_pick_search_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_placeholder_text(_pick_search_ta, LV_SYMBOL_EYE_OPEN " Search");
   lv_obj_set_width(_pick_search_ta, LV_PCT(100));
   lv_obj_add_event_cb(_pick_search_ta, pick_search_ta_cb, LV_EVENT_ALL, NULL);
@@ -2269,7 +2269,7 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_add_flag(_chat_search_bar, LV_OBJ_FLAG_HIDDEN);
 
     _chat_search_ta = lv_textarea_create(_chat_search_bar);
-    lv_textarea_set_one_line(_chat_search_ta, true);
+    lv_textarea_set_one_line(_chat_search_ta, true); lv_obj_add_event_cb(_chat_search_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
     lv_textarea_set_placeholder_text(_chat_search_ta, "Search messages");
     lv_obj_set_flex_grow(_chat_search_ta, 1);
     lv_obj_add_event_cb(_chat_search_ta, chat_search_ta_event_cb, LV_EVENT_ALL, NULL);
@@ -2317,7 +2317,7 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_center(plus_lbl);
 
     _chat_input = lv_textarea_create(_chat_compose);
-    lv_textarea_set_one_line(_chat_input, true);
+    lv_textarea_set_one_line(_chat_input, true); lv_obj_add_event_cb(_chat_input, UITask::ta_done_cb, LV_EVENT_READY, NULL);
     lv_textarea_set_placeholder_text(_chat_input, "Message");
     lv_obj_set_flex_grow(_chat_input, 1);
     lv_obj_add_event_cb(_chat_input, chat_input_event_cb, LV_EVENT_ALL, NULL);
@@ -2487,6 +2487,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   lv_timer_set_repeat_count(t, 1);
 
   ensureBanner();   // pre-build so the first notification frame stays light
+  _muted_count = mproxy::copyMutedKeys(_muted_keys, MUTE_MAX);   // seed mutes from the backend
 
 #ifdef PIN_BUZZER
   // Notification chimes. quiet() honors the persisted buzzer_quiet; the genericBuzzer
@@ -2635,6 +2636,58 @@ void UITask::clearUnread(const char* key) {
       return;
     }
   }
+}
+
+bool UITask::isMuted(const char* key) const {
+  if (!key) return false;
+  for (int i = 0; i < _muted_count; i++)
+    if (strncmp(_muted_keys[i], key, CHAT_PEER_NAME_MAX) == 0) return true;
+  return false;
+}
+
+void UITask::setMuted(const char* key, bool on) {
+  if (!key || !key[0]) return;
+  bool have = isMuted(key);
+  if (on && !have && _muted_count < MUTE_MAX) {
+    strncpy(_muted_keys[_muted_count], key, CHAT_PEER_NAME_MAX - 1);
+    _muted_keys[_muted_count][CHAT_PEER_NAME_MAX - 1] = 0;
+    _muted_count++;
+  } else if (!on && have) {
+    for (int i = 0; i < _muted_count; i++)
+      if (strncmp(_muted_keys[i], key, CHAT_PEER_NAME_MAX) == 0) {
+        if (i != _muted_count - 1) memcpy(_muted_keys[i], _muted_keys[_muted_count - 1], CHAT_PEER_NAME_MAX);
+        _muted_count--;
+        break;
+      }
+  } else {
+    return;   // no change
+  }
+  // Persist via the backend (it owns flash).
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::SetMute;
+  strncpy(c.name, key, sizeof(c.name) - 1);
+  c.muted = on;
+  mproxy::postCommand(c);
+}
+
+void UITask::ta_done_cb(lv_event_t* e) {
+  if (!_instance) return;
+  UITask* s = _instance;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_send(ta, LV_EVENT_DEFOCUSED, NULL);   // run the field's commit-on-defocus
+  lv_obj_clear_state(ta, LV_STATE_FOCUSED);
+  lv_obj_t* kbs[] = { s->_set_kb, s->_cinfo_kb, s->_path_kb, s->_newchan_kb, s->_login_kb,
+                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_lock_kb };
+  for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::kebab_mute_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance || !_instance->_chat_key[0]) return;
+  _instance->closeMenuPopup();
+  bool m = _instance->isMuted(_instance->_chat_key);
+  _instance->setMuted(_instance->_chat_key, !m);
+  _instance->showToast(m ? "Notifications on" : "Muted");
 }
 
 // Incoming message for a conversation the user isn't looking at: wake the screen,
@@ -2954,7 +3007,7 @@ void UITask::buildContactInfoScreen() {
   lv_obj_set_style_text_color(_cinfo_realname, lv_color_hex(DIM_HEX), 0);
   lv_obj_set_style_text_font(_cinfo_realname, fontCaption(), 0);
   _cinfo_name_ta = lv_textarea_create(fn);
-  lv_textarea_set_one_line(_cinfo_name_ta, true);
+  lv_textarea_set_one_line(_cinfo_name_ta, true); lv_obj_add_event_cb(_cinfo_name_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_width(_cinfo_name_ta, LV_PCT(100));
   lv_obj_add_event_cb(_cinfo_name_ta, cinfo_ta_event_cb, LV_EVENT_ALL, NULL);
 
@@ -2972,7 +3025,7 @@ void UITask::buildContactInfoScreen() {
   lv_obj_set_flex_flow(krow, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(krow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   _cinfo_keyfull = lv_textarea_create(krow);
-  lv_textarea_set_one_line(_cinfo_keyfull, true);
+  lv_textarea_set_one_line(_cinfo_keyfull, true); lv_obj_add_event_cb(_cinfo_keyfull, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_flex_grow(_cinfo_keyfull, 1);
   lv_obj_set_style_text_font(_cinfo_keyfull, &lv_font_montserrat_12, 0);
   lv_obj_t* copyk = lv_btn_create(krow);
@@ -2992,11 +3045,11 @@ void UITask::buildContactInfoScreen() {
   lv_obj_clear_flag(prow, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(prow, LV_FLEX_FLOW_ROW);
   _cinfo_lat_ta = lv_textarea_create(prow);
-  lv_textarea_set_one_line(_cinfo_lat_ta, true);
+  lv_textarea_set_one_line(_cinfo_lat_ta, true); lv_obj_add_event_cb(_cinfo_lat_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_flex_grow(_cinfo_lat_ta, 1);
   lv_obj_add_event_cb(_cinfo_lat_ta, cinfo_ta_event_cb, LV_EVENT_ALL, NULL);
   _cinfo_lon_ta = lv_textarea_create(prow);
-  lv_textarea_set_one_line(_cinfo_lon_ta, true);
+  lv_textarea_set_one_line(_cinfo_lon_ta, true); lv_obj_add_event_cb(_cinfo_lon_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_flex_grow(_cinfo_lon_ta, 1);
   lv_obj_add_event_cb(_cinfo_lon_ta, cinfo_ta_event_cb, LV_EVENT_ALL, NULL);
 
@@ -3473,6 +3526,11 @@ void UITask::chat_kebab_cb(lv_event_t* e) {
     lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_LIST, "Details"), kebab_details_cb, LV_EVENT_CLICKED, NULL);
   }
   lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_EYE_OPEN, "Search"), kebab_search_cb, LV_EVENT_CLICKED, NULL);
+  {
+    bool m = s->isMuted(s->_chat_key);
+    lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_BELL, m ? "Unmute notifications" : "Mute notifications"),
+                        kebab_mute_cb, LV_EVENT_CLICKED, NULL);
+  }
   if (!s->_chat_is_channel &&
       (s->_chat_contact_type == ADV_TYPE_REPEATER || s->_chat_contact_type == ADV_TYPE_ROOM)) {
     lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_SETTINGS, "Login"), kebab_login_cb, LV_EVENT_CLICKED, NULL);
@@ -3601,7 +3659,7 @@ void UITask::buildPathEditorScreen() {
 
   lv_obj_t* fp = makeField(body, "Path (comma hex, e.g. aa,bb,cc)");
   _path_ta = lv_textarea_create(fp);
-  lv_textarea_set_one_line(_path_ta, true);
+  lv_textarea_set_one_line(_path_ta, true); lv_obj_add_event_cb(_path_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_width(_path_ta, LV_PCT(100));
   lv_obj_add_event_cb(_path_ta, path_ta_event_cb, LV_EVENT_ALL, NULL);
 
@@ -3775,13 +3833,13 @@ void UITask::buildNewChannelScreen() {
 
   lv_obj_t* fn = makeField(body, "Name");
   _newchan_name_ta = lv_textarea_create(fn);
-  lv_textarea_set_one_line(_newchan_name_ta, true);
+  lv_textarea_set_one_line(_newchan_name_ta, true); lv_obj_add_event_cb(_newchan_name_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_width(_newchan_name_ta, LV_PCT(100));
   lv_obj_add_event_cb(_newchan_name_ta, newchan_ta_event_cb, LV_EVENT_ALL, NULL);
 
   lv_obj_t* fk = makeField(body, "Key (hex) or paste meshcore:// link");
   _newchan_key_ta = lv_textarea_create(fk);
-  lv_textarea_set_one_line(_newchan_key_ta, true);
+  lv_textarea_set_one_line(_newchan_key_ta, true); lv_obj_add_event_cb(_newchan_key_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_width(_newchan_key_ta, LV_PCT(100));
   lv_obj_add_event_cb(_newchan_key_ta, newchan_ta_event_cb, LV_EVENT_ALL, NULL);
 
@@ -3972,7 +4030,7 @@ void UITask::buildLoginPopup() {
   lv_obj_set_flex_align(prow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
   _login_pw_ta = lv_textarea_create(prow);
-  lv_textarea_set_one_line(_login_pw_ta, true);
+  lv_textarea_set_one_line(_login_pw_ta, true); lv_obj_add_event_cb(_login_pw_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_flex_grow(_login_pw_ta, 1);
   lv_obj_add_event_cb(_login_pw_ta, login_ta_event_cb, LV_EVENT_ALL, NULL);
   attachInlineEye(_login_pw_ta);                         // hidden by default + inline eye toggle
@@ -4229,7 +4287,7 @@ static lv_obj_t* makeDropdownField(lv_obj_t* body, const char* cap, const char* 
 static lv_obj_t* makeNumberField(lv_obj_t* body, const char* cap, lv_event_cb_t cb) {
   lv_obj_t* f = makeField(body, cap);
   lv_obj_t* ta = lv_textarea_create(f);
-  lv_textarea_set_one_line(ta, true);
+  lv_textarea_set_one_line(ta, true); lv_obj_add_event_cb(ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_accepted_chars(ta, "0123456789.-");
   lv_obj_set_width(ta, LV_PCT(100));
   lv_obj_add_event_cb(ta, cb, LV_EVENT_ALL, NULL);
@@ -4298,7 +4356,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
 
   lv_obj_t* fn = makeField(body, "Name");
   _set_name_ta = lv_textarea_create(fn);
-  lv_textarea_set_one_line(_set_name_ta, true);
+  lv_textarea_set_one_line(_set_name_ta, true); lv_obj_add_event_cb(_set_name_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_width(_set_name_ta, LV_PCT(100));
   lv_obj_add_event_cb(_set_name_ta, set_name_ta_event_cb, LV_EVENT_ALL, NULL);
 
@@ -4315,7 +4373,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_flex_flow(krow, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(krow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   _set_key_ta = lv_textarea_create(krow);
-  lv_textarea_set_one_line(_set_key_ta, true);   // no wrap; swipe to scroll the hex
+  lv_textarea_set_one_line(_set_key_ta, true); lv_obj_add_event_cb(_set_key_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);   // no wrap; swipe to scroll the hex
   lv_obj_set_flex_grow(_set_key_ta, 1);
   lv_obj_set_style_text_font(_set_key_ta, &lv_font_montserrat_12, 0);
   // No keyboard is ever bound to this field, so it's effectively read-only.
@@ -4337,12 +4395,12 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_clear_flag(prow, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(prow, LV_FLEX_FLOW_ROW);
   _set_lat_ta = lv_textarea_create(prow);
-  lv_textarea_set_one_line(_set_lat_ta, true);
+  lv_textarea_set_one_line(_set_lat_ta, true); lv_obj_add_event_cb(_set_lat_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_accepted_chars(_set_lat_ta, "0123456789.-");
   lv_obj_set_flex_grow(_set_lat_ta, 1);
   lv_obj_add_event_cb(_set_lat_ta, set_pos_ta_event_cb, LV_EVENT_ALL, NULL);
   _set_lon_ta = lv_textarea_create(prow);
-  lv_textarea_set_one_line(_set_lon_ta, true);
+  lv_textarea_set_one_line(_set_lon_ta, true); lv_obj_add_event_cb(_set_lon_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_accepted_chars(_set_lon_ta, "0123456789.-");
   lv_obj_set_flex_grow(_set_lon_ta, 1);
   lv_obj_add_event_cb(_set_lon_ta, set_pos_ta_event_cb, LV_EVENT_ALL, NULL);
@@ -5020,7 +5078,7 @@ void UITask::buildPinSetPopup() {
 
   lv_obj_t* f1 = makeField(card, "PIN");
   _pinset_ta1 = lv_textarea_create(f1);
-  lv_textarea_set_one_line(_pinset_ta1, true);
+  lv_textarea_set_one_line(_pinset_ta1, true); lv_obj_add_event_cb(_pinset_ta1, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_max_length(_pinset_ta1, 6);
   lv_textarea_set_accepted_chars(_pinset_ta1, "0123456789");
   lv_obj_set_width(_pinset_ta1, LV_PCT(100));
@@ -5029,7 +5087,7 @@ void UITask::buildPinSetPopup() {
 
   lv_obj_t* f2 = makeField(card, "Confirm PIN");
   _pinset_ta2 = lv_textarea_create(f2);
-  lv_textarea_set_one_line(_pinset_ta2, true);
+  lv_textarea_set_one_line(_pinset_ta2, true); lv_obj_add_event_cb(_pinset_ta2, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_max_length(_pinset_ta2, 6);
   lv_textarea_set_accepted_chars(_pinset_ta2, "0123456789");
   lv_obj_set_width(_pinset_ta2, LV_PCT(100));
@@ -5161,7 +5219,7 @@ void UITask::buildLockScreen() {
   lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   _lock_pin_ta = lv_textarea_create(row);
-  lv_textarea_set_one_line(_lock_pin_ta, true);
+  lv_textarea_set_one_line(_lock_pin_ta, true); lv_obj_add_event_cb(_lock_pin_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_max_length(_lock_pin_ta, 6);
   lv_textarea_set_accepted_chars(_lock_pin_ta, "0123456789");
   lv_obj_set_flex_grow(_lock_pin_ta, 1);
@@ -5594,7 +5652,7 @@ void UITask::drainEvents() {
                        strncmp(ev.conv_key, _chat_key, CHAT_PEER_NAME_MAX) == 0;
         if (viewing) rebuildChatHistory();
         if (!ev.outgoing) {
-          bool muted = false;   // Phase D: isMuted(ev.conv_key)
+          bool muted = isMuted(ev.conv_key);
           if (!viewing) markUnread(ev.conv_key);   // unread mark only for chats you're not in
           if (notifyEnabled() && !muted) {
             // Phone-style: chime on every non-muted message (viewed or not). The

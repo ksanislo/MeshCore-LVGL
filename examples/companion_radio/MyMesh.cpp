@@ -992,6 +992,7 @@ void MyMesh::begin(bool has_display) {
 #ifdef ENABLE_LOGIN_STORE
   loadLoginCreds();
 #endif
+  loadMutes();
 
   radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_set_tx_power(_prefs.tx_power_dbm);
@@ -2240,6 +2241,30 @@ void MyMesh::loadLoginCreds() {
   _num_logins = (int)(n / sizeof(LoginCred));
 }
 #endif
+
+void MyMesh::loadMutes() {
+  size_t n = _store->loadMutes((uint8_t*)_mutes, sizeof(_mutes));
+  _num_mutes = (int)(n / sizeof(_mutes[0]));
+  if (_num_mutes > MAX_MUTES) _num_mutes = MAX_MUTES;
+}
+bool MyMesh::isMuted(const char* key) const {
+  for (int i = 0; i < _num_mutes; i++) if (strcmp(_mutes[i], key) == 0) return true;
+  return false;
+}
+void MyMesh::setMute(const char* key, bool on) {
+  int idx = -1;
+  for (int i = 0; i < _num_mutes; i++) if (strcmp(_mutes[i], key) == 0) { idx = i; break; }
+  if (on) {
+    if (idx >= 0 || _num_mutes >= MAX_MUTES) return;   // already muted / table full
+    StrHelper::strncpy(_mutes[_num_mutes], key, sizeof(_mutes[0]));
+    _num_mutes++;
+  } else {
+    if (idx < 0) return;                               // not muted
+    if (idx != _num_mutes - 1) memcpy(_mutes[idx], _mutes[_num_mutes - 1], sizeof(_mutes[0]));
+    _num_mutes--;
+  }
+  _store->saveMutes((const uint8_t*)_mutes, (size_t)_num_mutes * sizeof(_mutes[0]));
+}
 
 void MyMesh::getNodeStats(NodeStats& s) {
   s.uptime_secs  = _ms->getMillis() / 1000;

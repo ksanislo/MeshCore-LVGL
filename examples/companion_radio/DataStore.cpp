@@ -518,6 +518,25 @@ size_t DataStore::loadLogins(uint8_t* data, size_t maxlen) {
   return n > 0 ? (size_t)n : 0;
 }
 
+// Muted-conversation keys blob (crash-safe temp+rename, like the logins blob).
+void DataStore::saveMutes(const uint8_t* data, size_t len) {
+  File file = openWrite(_fs, "/mutes.tmp");
+  if (file) {
+    bool ok = (file.write(data, len) == len);
+    file.close();
+    if (ok) commitTmp(_fs, "/mutes.tmp", "/mutes");
+    else    _fs->remove("/mutes.tmp");
+  }
+}
+size_t DataStore::loadMutes(uint8_t* data, size_t maxlen) {
+  recoverTmp(_fs, "/mutes.tmp", "/mutes");
+  File file = openRead(_fs, "/mutes");
+  if (!file) return 0;
+  int n = file.read(data, maxlen);
+  file.close();
+  return n > 0 ? (size_t)n : 0;
+}
+
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
 
 #define MAX_ADVERT_PKT_LEN   (2 + 32 + PUB_KEY_SIZE + 4 + SIGNATURE_SIZE + MAX_ADVERT_DATA_SIZE)

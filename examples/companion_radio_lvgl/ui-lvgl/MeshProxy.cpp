@@ -295,10 +295,15 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
       }
       break;
     }
+    case CmdKind::SetMute:
+      mesh.setMute(cmd.name, cmd.muted);   // persists to /mutes
+      break;
   }
 }
 
+static MyMesh* s_backend = nullptr;   // captured for read-only backend accessors (mutes)
 void drainCommands(MyMesh& mesh) {
+  s_backend = &mesh;
   if (!s_cmd_q) return;
   MeshCmd cmd;
   while (xQueueReceive(s_cmd_q, &cmd, 0) == pdTRUE) execCommand(mesh, cmd);
@@ -341,6 +346,14 @@ void endUiRead() {
 uint32_t snapshotVersion() { const MeshSnapshot* s = readBuf(); return s ? s->version : 0; }
 bool     hasConnection()   { const MeshSnapshot* s = readBuf(); return s ? s->has_connection : true; }
 const uint8_t* selfPubKey() { const MeshSnapshot* s = readBuf(); return s ? s->self_pub_key : nullptr; }
+// Seed the UI's in-RAM muted set at begin (backend captured in drainCommands, primed first).
+int copyMutedKeys(char out[][CHAT_PEER_NAME_MAX], int max) {
+  if (!s_backend || max <= 0) return 0;
+  int n = s_backend->numMutes();
+  if (n > max) n = max;
+  for (int i = 0; i < n; i++) { strncpy(out[i], s_backend->muteKey(i), CHAT_PEER_NAME_MAX - 1); out[i][CHAT_PEER_NAME_MAX-1]=0; }
+  return n;
+}
 int  getNumContacts()       { const MeshSnapshot* s = readBuf(); return s ? s->contact_count : 0; }
 
 bool getContactByIdx(int idx, ContactInfo& out) {

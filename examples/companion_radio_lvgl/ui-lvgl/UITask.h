@@ -79,6 +79,11 @@ class UITask : public AbstractUITask {
   static const int UNREAD_MAX = 64;
   char            _unread_keys[UNREAD_MAX][CHAT_PEER_NAME_MAX];
   uint8_t         _unread_count;
+  // Per-conversation mute: in-RAM set (seeded from the backend at begin, persisted via
+  // CmdKind::SetMute). Muted = no wake/banner/buzzer, but the unread mark still shows.
+  static const int MUTE_MAX = 64;
+  char            _muted_keys[MUTE_MAX][CHAT_PEER_NAME_MAX];
+  int             _muted_count;
   lv_obj_t*       _banner;              // top-layer notification card (reused)
   lv_obj_t*       _banner_avatar;       // colored circle / type-glyph holder
   lv_obj_t*       _banner_avatar_lbl;   // grapheme / glyph inside the circle
@@ -327,6 +332,9 @@ class UITask : public AbstractUITask {
   void      markUnread(const char* key);
   void      clearUnread(const char* key);
   bool      isUnread(const char* key) const;
+  bool      isMuted(const char* key) const;
+  void      setMuted(const char* key, bool on);   // updates local set + persists via backend
+  static void kebab_mute_cb(lv_event_t* e);
   // Wake the screen + show the tappable banner + chime for an incoming message.
   void      onIncomingNotify(const char* conv_key, const char* sender,
                              const char* text, bool is_channel);
@@ -485,6 +493,9 @@ class UITask : public AbstractUITask {
   static void set_name_ta_event_cb(lv_event_t* e);
   static void set_radio_ta_event_cb(lv_event_t* e);
   static void set_kb_event_cb(lv_event_t* e);
+public:
+  static void ta_done_cb(lv_event_t* e);   // one-line field: Enter commits + drops keyboard
+private:
   static void set_radio_apply_cb(lv_event_t* e);
   static void set_pathmode_cb(lv_event_t* e);
   static void set_bright_cb(lv_event_t* e);
@@ -591,7 +602,7 @@ public:
       _channels_list(NULL), _status_label(NULL),
       _contacts_dirty(false), _contacts_rebuilt_ms(0),
       _contacts_pending(false), _channels_pending(false),
-      _unread_count(0), _banner(NULL), _banner_avatar(NULL), _banner_avatar_lbl(NULL),
+      _unread_count(0), _muted_count(0), _banner(NULL), _banner_avatar(NULL), _banner_avatar_lbl(NULL),
       _banner_title(NULL), _banner_body(NULL), _banner_timer(NULL),
       _pending_chime(UIEventType::none), _crow_count(0),
       _pick_popup(NULL), _pick_table(NULL), _pick_sb(NULL), _pick_search_ta(NULL), _pick_kb(NULL),

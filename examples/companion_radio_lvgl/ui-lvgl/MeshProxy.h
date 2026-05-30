@@ -60,6 +60,7 @@ enum class CmdKind : uint8_t {
   SendCommand,  // send a CLI command (TXT_TYPE_CLI_DATA) to a repeater: pubkey + text
   AutoLogin,    // pubkey: log in using a saved credential if one exists (silent)
   SetRadio,     // apply prefs.radio_off: sleep the radio (off) or re-enable it (on) + persist
+  SetMute,      // mute/unmute a conversation: name = conv-key, muted = on/off; persists
 };
 
 struct MeshCmd {
@@ -78,6 +79,7 @@ struct MeshCmd {
   char     password[16];
   bool     save_login;     // ServerLogin: persist the credential
   bool     auto_login;     // ServerLogin: mark the saved credential for auto-login
+  bool     muted;          // SetMute: true=mute, false=unmute (conv-key in `name`)
   // SetPath
   uint8_t  path[MAX_PATH_SIZE];
   uint8_t  path_len;
@@ -136,6 +138,7 @@ bool getChannel(int idx, ChannelDetails& out);
 void getStats(NodeStats& out);     // latest node/radio counters (display-only, lock-protected copy)
 bool getNameOverride(const uint8_t* pubkey, char* out, size_t cap);
 const NodePrefs* prefsSnap();      // current published prefs (UI seeds its working copy from this)
+int  copyMutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);  // seed the UI's muted set at begin()
 uint32_t rtcSeconds();             // live device clock (ESP32 internal RTC; safe cross-core)
 
 // Valid ONLY inside a mesh callback (backend thread): the conversation key of the
