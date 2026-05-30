@@ -47,17 +47,10 @@ class UITask : public AbstractUITask {
   // ~pool_n widgets cover the viewport regardless of contact count -> scales + holds
   // scroll perf. Rows are non-floating: they scroll natively with the container and
   // are only rebound (text/avatar) when one recycles past the visible window.
-  lv_obj_t*       _contacts_scroll;     // scrollable container inside _tab_contacts
-  lv_obj_t*       _contacts_spacer;     // transparent child sized to _crow_count rows
-  lv_obj_t*       _contacts_empty;      // centered "no contacts" placeholder
   static const int CONTACT_POOL_MAX = 14;
   struct ContactRow { lv_obj_t* root; lv_obj_t* avatar; lv_obj_t* avatar_lbl;
                       lv_obj_t* name; lv_obj_t* seen; lv_obj_t* dot; };
-  ContactRow      _rowpool[CONTACT_POOL_MAX];
-  int             _row_pool_n;          // realized pool size (<= CONTACT_POOL_MAX)
-  int             _row_bound_idx[CONTACT_POOL_MAX];  // display index in each slot (-1 = none)
-  int             _first_visible;       // top display index realized (scroll churn guard)
-  lv_obj_t*       _contacts_sb;         // draggable scrollbar thumb for the contacts list
+  // (recycler instance state moved into ContactListView below)
   lv_obj_t*       _contacts_search_ta;  // name search field
   lv_obj_t*       _contacts_kb;         // keyboard for the search field (overlays home screen)
   lv_obj_t*       _contacts_filter_btn; // opens the order/filter pop-out
@@ -101,21 +94,37 @@ class UITask : public AbstractUITask {
   // Holds indices only -- no per-contact widgets -- so it scales to a full book.
   static const int CONTACTS_MAX_ROWS = 400;
   struct ContactDispRow { uint16_t idx; uint32_t heard; uint8_t fav; };
-  ContactDispRow  _crows[CONTACTS_MAX_ROWS];
-  int             _crow_count;
+
+  // Reusable virtualized contact-list component: owns its scroll container, recycled
+  // row pool, and filtered/sorted display set, plus a per-instance tap behavior.
+  // Instantiated for the Contacts tab and the share/insert picker so every contact
+  // list looks + scrolls identically. Functions: clistBuild/clistRefresh/clistBind/
+  // clistRelayout (operate on a ContactListView&); clist_row_cb/clist_scroll_cb carry
+  // the instance via event user_data.
+  struct ContactListView {
+    lv_obj_t* scroll;                       // scrollable container
+    lv_obj_t* spacer;                       // transparent child sized to count rows
+    lv_obj_t* empty;                        // centered placeholder
+    lv_obj_t* sb;                           // draggable scrollbar thumb
+    ContactRow pool[CONTACT_POOL_MAX];      // recycled row widgets
+    int        pool_n;                      // realized pool size
+    int        bound_idx[CONTACT_POOL_MAX]; // display index per slot (-1 = none)
+    int        first_visible;               // top realized index (scroll churn guard)
+    ContactDispRow rows[CONTACTS_MAX_ROWS]; // filtered/sorted display set (indices only)
+    int        count;
+    void (*on_tap)(const ContactInfo&);     // per instance: open chat, or pick-for-send
+  };
+  ContactListView _clist;                   // the Contacts tab list
 
   // Full-screen contact picker (top layer), virtualized like the Contacts tab.
   // Used to choose a recipient (share) or a contact to insert into a message.
   lv_obj_t*       _pick_popup;
-  lv_obj_t*       _pick_table;
-  lv_obj_t*       _pick_sb;             // draggable scrollbar thumb for the picker list
   lv_obj_t*       _pick_search_ta;
   lv_obj_t*       _pick_kb;
   lv_obj_t*       _pick_title;
   char            _pick_filter[40];
   int             _pick_action;        // 1 = share viewed contact to pick; 2 = insert pick's ref
-  ContactDispRow  _prows[CONTACTS_MAX_ROWS];
-  int             _prow_count;
+  ContactListView _pick_list;          // the picker's list (same component as the Contacts tab)
 
   // Chat (conversation) screen. Three-band: fixed top bar / scrollable history
   // / fixed compose band (compose added with the keyboard step).
@@ -396,10 +405,16 @@ class UITask : public AbstractUITask {
   // so every contact row looks + fills identically -- tweak once, applies everywhere).
   static void makeContactRowSlot(lv_obj_t* parent, ContactRow& w, lv_event_cb_t tap_cb, void* tap_ctx);
   void      fillContactRow(ContactRow& w, const ContactInfo& c);
+  // Reusable contact-list component (operate on a ContactListView&).
+  void      clistBuild(ContactListView& lv, lv_obj_t* parent);
+  void      clistRefresh(ContactListView& lv, const char* empty_text);  // after owner fills rows/count
+  void      clistBind(ContactListView& lv, int slot, int disp);
+  void      clistRelayout(ContactListView& lv);
+  static void clist_row_cb(lv_event_t* e);     // event user_data = the ContactListView*
+  static void clist_scroll_cb(lv_event_t* e);
+  static void clistOpenContact(const ContactInfo& c);  // Contacts tab tap: open the chat
+  static void clistPickSelect(const ContactInfo& c);   // picker tap: run the share/insert action
   void      buildContactRows(lv_obj_t* parent);
-  void      bindContactRow(int slot, int disp);
-  void      relayoutContactRows();
-  static void contact_row_cb(lv_event_t* e);
   static void contacts_scroll_cb(lv_event_t* e);
   static void contacts_search_ta_cb(lv_event_t* e);
   static void contacts_kb_cb(lv_event_t* e);
@@ -446,8 +461,6 @@ class UITask : public AbstractUITask {
   void      rebuildPicker();
   void      closeContactPicker();
   static int  prow_cmp(const void* a, const void* b);
-  static void pick_table_cb(lv_event_t* e);
-  static void pick_table_draw_cb(lv_event_t* e);
   static void pick_search_ta_cb(lv_event_t* e);
   static void pick_kb_cb(lv_event_t* e);
   static void pick_close_cb(lv_event_t* e);
@@ -648,9 +661,8 @@ public:
       _header(NULL), _header_logo(NULL), _clock_label(NULL), _clock_last(0),
       _tabview(NULL),
       _tab_contacts(NULL), _tab_channels(NULL), _tab_settings(NULL),
-      _contacts_scroll(NULL), _contacts_spacer(NULL), _contacts_empty(NULL),
-      _row_pool_n(0), _first_visible(-1),
-      _contacts_sb(NULL), _contacts_search_ta(NULL), _contacts_kb(NULL),
+      _clist{},
+      _contacts_search_ta(NULL), _contacts_kb(NULL),
       _contacts_filter_btn(NULL), _cfilt_popup(NULL), _cfilt_order_grp(NULL),
       _cfilt_filt_grp(NULL), _contacts_order(1), _contacts_filt(0),
       _channels_list(NULL), _status_label(NULL),
@@ -658,9 +670,9 @@ public:
       _contacts_pending(false), _channels_pending(false),
       _unread_count(0), _muted_count(0), _banner(NULL), _banner_avatar(NULL), _banner_avatar_lbl(NULL),
       _banner_title(NULL), _banner_body(NULL), _banner_timer(NULL),
-      _pending_chime(UIEventType::none), _crow_count(0),
-      _pick_popup(NULL), _pick_table(NULL), _pick_sb(NULL), _pick_search_ta(NULL), _pick_kb(NULL),
-      _pick_title(NULL), _pick_action(0), _prow_count(0),
+      _pending_chime(UIEventType::none),
+      _pick_popup(NULL), _pick_search_ta(NULL), _pick_kb(NULL),
+      _pick_title(NULL), _pick_action(0), _pick_list{},
       _chat_screen(NULL), _chat_title(NULL), _chat_avatar(NULL), _chat_avatar_lbl(NULL),
       _chat_status(NULL), _chat_history(NULL), _chat_sb(NULL),
       _chat_compose(NULL), _chat_input(NULL), _chat_keyboard(NULL),

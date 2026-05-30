@@ -362,7 +362,7 @@ lv_obj_t* UITask::buildHomeScreen() {
     lv_obj_set_style_bg_opa(page, LV_OPA_COVER, 0);
   }
 
-  // ----- Contacts tab: fixed search/filter band + a virtualized lv_table -----
+  // ----- Contacts tab: fixed search/filter band + the virtualized ContactListView -----
   lv_obj_set_style_pad_all(_tab_contacts, 0, 0);
   lv_obj_clear_flag(_tab_contacts, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(_tab_contacts, LV_FLEX_FLOW_COLUMN);
@@ -530,53 +530,30 @@ int UITask::crow_cmp(const void* pa, const void* pb) {
 }
 
 void UITask::rebuildContactsList() {
-  if (!_contacts_scroll) return;
+  if (!_clist.scroll) return;
   _contacts_dirty = false;
   _contacts_rebuilt_ms = millis();
 
   // Build the filtered display set (indices only -- no per-contact widgets).
-  _crow_count = 0;
+  _clist.count = 0;
   int total = mproxy::getNumContacts();
-  for (int i = 0; i < total && _crow_count < CONTACTS_MAX_ROWS; i++) {
+  for (int i = 0; i < total && _clist.count < CONTACTS_MAX_ROWS; i++) {
     ContactInfo c;
     if (!mproxy::getContactByIdx(i, c)) continue;
     if (!contactPasses(c)) continue;
-    _crows[_crow_count].idx = (uint16_t)i;
+    _clist.rows[_clist.count].idx = (uint16_t)i;
     // Sort key: latest message time for "Latest Messages", else last-heard by OUR
     // clock (lastmod) -- not last_advert_timestamp, which is their (untrusted) clock.
-    _crows[_crow_count].heard = (_contacts_order == 2)
+    _clist.rows[_clist.count].heard = (_contacts_order == 2)
         ? _msgs->latestTimestampFor(c.name) : c.lastmod;
-    _crows[_crow_count].fav = (c.flags & CONTACT_FLAG_FAVOURITE) ? 1 : 0;
-    _crow_count++;
+    _clist.rows[_clist.count].fav = (c.flags & CONTACT_FLAG_FAVOURITE) ? 1 : 0;
+    _clist.count++;
   }
   s_contacts_order = _contacts_order;
-  qsort(_crows, _crow_count, sizeof(ContactDispRow), crow_cmp);
+  qsort(_clist.rows, _clist.count, sizeof(ContactDispRow), crow_cmp);
 
-  if (_crow_count == 0) {
-    lv_obj_set_height(_contacts_spacer, 0);
-    for (int s = 0; s < _row_pool_n; s++) {
-      lv_obj_add_flag(_rowpool[s].root, LV_OBJ_FLAG_HIDDEN);
-      _row_bound_idx[s] = -1;
-    }
-    if (_contacts_empty) {
-      lv_label_set_text(_contacts_empty, mproxy::getNumContacts() > 0
-          ? "No contacts match." : "No contacts yet.\nWaiting for adverts...");
-      lv_obj_clear_flag(_contacts_empty, LV_OBJ_FLAG_HIDDEN);
-    }
-    sb_update(_contacts_scroll, _contacts_sb);   // nothing to scroll -> hide thumb
-    return;
-  }
-  if (_contacts_empty) lv_obj_add_flag(_contacts_empty, LV_OBJ_FLAG_HIDDEN);
-
-  // Size the virtual content to the full list, reset to the top, and force a full
-  // re-window (contact data / unread state may have changed under the visible rows).
-  lv_obj_set_height(_contacts_spacer, _crow_count * UI_CONTACT_ROW_H);
-  lv_obj_scroll_to_y(_contacts_scroll, 0, LV_ANIM_OFF);
-  for (int s = 0; s < _row_pool_n; s++) _row_bound_idx[s] = -1;
-  _first_visible = -1;
-  relayoutContactRows();
-  lv_obj_update_layout(_contacts_scroll);   // refresh scroll range -> drag thumb
-  sb_update(_contacts_scroll, _contacts_sb);
+  clistRefresh(_clist, mproxy::getNumContacts() > 0
+      ? "No contacts match." : "No contacts yet.\nWaiting for adverts...");
 }
 
 // Unread marker: a bold red right-pointing chevron ">" (a concave dart) drawn once
@@ -714,99 +691,164 @@ void UITask::fillContactRow(ContactRow& w, const ContactInfo& c) {
 
 // Create the scroll container, content spacer, empty-placeholder, and the recycled
 // pool of row widgets (avatar + name + last-seen + unread marker).
-void UITask::buildContactRows(lv_obj_t* parent) {
+void UITask::clistBuild(ContactListView& lv, lv_obj_t* parent) {
   buildUnreadMark();
-  _contacts_scroll = lv_obj_create(parent);
-  lv_obj_set_width(_contacts_scroll, LV_PCT(100));
-  lv_obj_set_flex_grow(_contacts_scroll, 1);            // fill remaining height
-  lv_obj_set_style_bg_color(_contacts_scroll, lv_color_hex(BG_HEX), 0);
-  lv_obj_set_style_bg_opa(_contacts_scroll, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(_contacts_scroll, 0, 0);
-  lv_obj_set_style_radius(_contacts_scroll, 0, 0);
-  lv_obj_set_style_pad_all(_contacts_scroll, 0, 0);
-  lv_obj_set_scroll_dir(_contacts_scroll, LV_DIR_VER);
+  lv.scroll = lv_obj_create(parent);
+  lv_obj_set_width(lv.scroll, LV_PCT(100));
+  lv_obj_set_flex_grow(lv.scroll, 1);            // fill remaining height
+  lv_obj_set_style_bg_color(lv.scroll, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(lv.scroll, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(lv.scroll, 0, 0);
+  lv_obj_set_style_radius(lv.scroll, 0, 0);
+  lv_obj_set_style_pad_all(lv.scroll, 0, 0);
+  lv_obj_set_scroll_dir(lv.scroll, LV_DIR_VER);
   // Deliberately NO layout: rows are positioned manually in content space so they
   // can be recycled (a layout would override our lv_obj_set_y).
 
-  _contacts_spacer = lv_obj_create(_contacts_scroll);
-  lv_obj_remove_style_all(_contacts_spacer);
-  lv_obj_set_pos(_contacts_spacer, 0, 0);
-  lv_obj_set_size(_contacts_spacer, 1, 0);
-  lv_obj_clear_flag(_contacts_spacer, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  lv.spacer = lv_obj_create(lv.scroll);
+  lv_obj_remove_style_all(lv.spacer);
+  lv_obj_set_pos(lv.spacer, 0, 0);
+  lv_obj_set_size(lv.spacer, 1, 0);
+  lv_obj_clear_flag(lv.spacer, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
-  _contacts_empty = lv_label_create(_contacts_scroll);
-  lv_obj_set_style_text_color(_contacts_empty, lv_color_hex(DIM_HEX), 0);
-  lv_obj_set_style_text_align(_contacts_empty, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_add_flag(_contacts_empty, LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN);
-  lv_obj_align(_contacts_empty, LV_ALIGN_TOP_MID, 0, 16);
+  lv.empty = lv_label_create(lv.scroll);
+  lv_obj_set_style_text_color(lv.empty, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_align(lv.empty, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_add_flag(lv.empty, LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN);
+  lv_obj_align(lv.empty, LV_ALIGN_TOP_MID, 0, 16);
 
   int pool = _screen_h / UI_CONTACT_ROW_H + 3;   // cover the viewport + overscan
   if (pool > CONTACT_POOL_MAX) pool = CONTACT_POOL_MAX;
   if (pool < 1) pool = 1;
-  _row_pool_n = pool;
+  lv.pool_n = pool;
+  lv.first_visible = -1;
+  lv.count = 0;
 
-  for (int s = 0; s < _row_pool_n; s++) {
-    _row_bound_idx[s] = -1;
-    makeContactRowSlot(_contacts_scroll, _rowpool[s], contact_row_cb, NULL);
+  for (int s = 0; s < lv.pool_n; s++) {
+    lv.bound_idx[s] = -1;
+    makeContactRowSlot(lv.scroll, lv.pool[s], clist_row_cb, &lv);  // &lv -> static cbs
   }
 
-  _contacts_sb = attachScrollHandle(_contacts_scroll);
-  lv_obj_add_event_cb(_contacts_scroll, contacts_scroll_cb, LV_EVENT_SCROLL, NULL);
+  lv.sb = attachScrollHandle(lv.scroll);
+  lv_obj_add_event_cb(lv.scroll, clist_scroll_cb, LV_EVENT_SCROLL, &lv);
 }
 
-// Bind pool slot `slot` to display index `disp` (a _crows entry).
-void UITask::bindContactRow(int slot, int disp) {
-  ContactRow& w = _rowpool[slot];
+// Bind pool slot `slot` to display index `disp` (a lv.rows entry).
+void UITask::clistBind(ContactListView& lv, int slot, int disp) {
+  ContactRow& w = lv.pool[slot];
   ContactInfo c;
-  if (!mproxy::getContactByIdx(_crows[disp].idx, c)) return;
+  if (!mproxy::getContactByIdx(lv.rows[disp].idx, c)) return;
   fillContactRow(w, c);
   lv_obj_set_user_data(w.root, (void*)(intptr_t)disp);
 }
 
 // Re-window the pool to the current scroll position. A display index maps to slot
 // (disp % pool_n), so scrolling by one row rebinds exactly one slot.
-void UITask::relayoutContactRows() {
-  if (!_contacts_scroll || _row_pool_n == 0 || _crow_count == 0) return;
-  int sy = lv_obj_get_scroll_y(_contacts_scroll);
+void UITask::clistRelayout(ContactListView& lv) {
+  if (!lv.scroll || lv.pool_n == 0 || lv.count == 0) return;
+  int sy = lv_obj_get_scroll_y(lv.scroll);
   if (sy < 0) sy = 0;
   int top = sy / UI_CONTACT_ROW_H;
-  if (top == _first_visible) return;   // window unchanged -> no churn
-  _first_visible = top;
-  for (int i = 0; i < _row_pool_n; i++) {
+  if (top == lv.first_visible) return;   // window unchanged -> no churn
+  lv.first_visible = top;
+  for (int i = 0; i < lv.pool_n; i++) {
     int disp = top + i;
-    int slot = disp % _row_pool_n;
-    ContactRow& w = _rowpool[slot];
-    if (disp >= _crow_count) {
-      if (_row_bound_idx[slot] != -1) {
+    int slot = disp % lv.pool_n;
+    ContactRow& w = lv.pool[slot];
+    if (disp >= lv.count) {
+      if (lv.bound_idx[slot] != -1) {
         lv_obj_add_flag(w.root, LV_OBJ_FLAG_HIDDEN);
-        _row_bound_idx[slot] = -1;
+        lv.bound_idx[slot] = -1;
       }
       continue;
     }
-    if (_row_bound_idx[slot] != disp) {
-      bindContactRow(slot, disp);
+    if (lv.bound_idx[slot] != disp) {
+      clistBind(lv, slot, disp);
       lv_obj_set_y(w.root, disp * UI_CONTACT_ROW_H);
       lv_obj_clear_flag(w.root, LV_OBJ_FLAG_HIDDEN);
-      _row_bound_idx[slot] = disp;
+      lv.bound_idx[slot] = disp;
     }
   }
 }
 
-void UITask::contacts_scroll_cb(lv_event_t* e) {
-  (void)e;
-  if (_instance) _instance->relayoutContactRows();
+// Apply a freshly-filled lv.rows/lv.count: size the virtual content, reset to the
+// top, force a full re-window, refresh the scrollbar. Shows empty_text when empty.
+void UITask::clistRefresh(ContactListView& lv, const char* empty_text) {
+  if (!lv.scroll) return;
+  if (lv.count == 0) {
+    lv_obj_set_height(lv.spacer, 0);
+    for (int s = 0; s < lv.pool_n; s++) {
+      lv_obj_add_flag(lv.pool[s].root, LV_OBJ_FLAG_HIDDEN);
+      lv.bound_idx[s] = -1;
+    }
+    if (lv.empty) { lv_label_set_text(lv.empty, empty_text); lv_obj_clear_flag(lv.empty, LV_OBJ_FLAG_HIDDEN); }
+    sb_update(lv.scroll, lv.sb);   // nothing to scroll -> hide thumb
+    return;
+  }
+  if (lv.empty) lv_obj_add_flag(lv.empty, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_height(lv.spacer, lv.count * UI_CONTACT_ROW_H);
+  lv_obj_scroll_to_y(lv.scroll, 0, LV_ANIM_OFF);
+  for (int s = 0; s < lv.pool_n; s++) lv.bound_idx[s] = -1;
+  lv.first_visible = -1;
+  clistRelayout(lv);
+  lv_obj_update_layout(lv.scroll);   // refresh scroll range -> drag thumb
+  sb_update(lv.scroll, lv.sb);
 }
 
-void UITask::contact_row_cb(lv_event_t* e) {
+void UITask::clist_scroll_cb(lv_event_t* e) {
+  ContactListView* lv = (ContactListView*)lv_event_get_user_data(e);
+  if (_instance && lv) _instance->clistRelayout(*lv);
+}
+
+void UITask::clist_row_cb(lv_event_t* e) {
   if (!_instance) return;
-  lv_obj_t* row = lv_event_get_target(e);
-  int disp = (int)(intptr_t)lv_obj_get_user_data(row);
-  if (disp < 0 || disp >= _instance->_crow_count) return;
+  ContactListView* lv = (ContactListView*)lv_event_get_user_data(e);
+  if (!lv) return;
+  int disp = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target(e));
+  if (disp < 0 || disp >= lv->count) return;
   ContactInfo c;
-  if (!mproxy::getContactByIdx(_instance->_crows[disp].idx, c)) return;
+  if (!mproxy::getContactByIdx(lv->rows[disp].idx, c)) return;
+  if (lv->on_tap) lv->on_tap(c);   // per-instance behavior (open chat / pick-for-send)
+}
+
+// Contacts tab tap behavior: open the tapped contact's chat.
+void UITask::clistOpenContact(const ContactInfo& c) {
+  if (!_instance) return;
   _instance->_chat_is_channel = false;
   memcpy(_instance->_chat_pubkey, c.id.pub_key, 6);
   _instance->openChat(c.name);
+}
+
+// Picker tap behavior: run the pending action against the chosen contact -- share
+// the viewed contact's card to this recipient (action 1) or insert this contact's
+// ref into the compose field (action 2).
+void UITask::clistPickSelect(const ContactInfo& pick) {
+  if (!_instance) return;
+  int action = _instance->_pick_action;
+  _instance->closeContactPicker();
+  if (action == 1) {  // share the viewed contact (cinfo) to the picked recipient
+    ContactInfo* viewed = _instance->cinfoContact();
+    if (viewed) {
+      char hex[2 * PUB_KEY_SIZE + 1];
+      mesh::Utils::toHex(hex, viewed->id.pub_key, PUB_KEY_SIZE);
+      char ref[2 * PUB_KEY_SIZE + 48];
+      snprintf(ref, sizeof(ref), "<%s:%u:%s>", hex, (unsigned)viewed->type, viewed->name);
+      const char* me = (_instance->_node_prefs && _instance->_node_prefs->node_name[0])
+                           ? _instance->_node_prefs->node_name : "Me";
+      char key[CHAT_PEER_NAME_MAX];
+      convKey(pick.id.pub_key, false, key, sizeof(key));
+      _instance->postSend(false, pick.id.pub_key, -1, key, me, ref);
+      _instance->showToast("Contact shared");
+    }
+  } else if (action == 2) {  // insert the picked contact's ref into compose
+    _instance->insertContactRef(pick.id.pub_key, pick.type, pick.name);
+  }
+}
+
+// The Contacts tab is one ContactListView instance whose tap opens the chat.
+void UITask::buildContactRows(lv_obj_t* parent) {
+  clistBuild(_clist, parent);
+  _clist.on_tap = clistOpenContact;
 }
 
 void UITask::contacts_search_ta_cb(lv_event_t* e) {
@@ -1182,8 +1224,10 @@ void UITask::showInsertMenu() {
 }
 
 // ===== Virtualized contact picker (share recipient / insert reference) =======
-// A full-screen top-layer panel with a search field + lv_table -- same scalable
-// model as the Contacts tab, so it shows the whole address book without a cap.
+// A full-screen top-layer panel: header (title tells the mode) + search field +
+// the same ContactListView component as the Contacts tab, so it shows the whole
+// address book without a cap and looks/scrolls identically -- only the tap action
+// differs (select-for-send instead of opening the contact).
 
 int UITask::prow_cmp(const void* pa, const void* pb) {
   const ContactDispRow* a = (const ContactDispRow*)pa;
@@ -1241,28 +1285,10 @@ void UITask::buildContactPickerScreen() {
   lv_obj_set_width(_pick_search_ta, LV_PCT(100));
   lv_obj_add_event_cb(_pick_search_ta, pick_search_ta_cb, LV_EVENT_ALL, NULL);
 
-  _pick_table = lv_table_create(_pick_popup);
-  lv_obj_set_width(_pick_table, LV_PCT(100));
-  lv_obj_set_flex_grow(_pick_table, 1);
-  lv_obj_set_style_bg_color(_pick_table, lv_color_hex(BG_HEX), 0);
-  lv_obj_set_style_bg_opa(_pick_table, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(_pick_table, 0, 0);
-  lv_obj_set_style_radius(_pick_table, 0, 0);
-  lv_obj_set_style_bg_color(_pick_table, lv_color_hex(BG_HEX), LV_PART_ITEMS);
-  lv_obj_set_style_bg_opa(_pick_table, LV_OPA_COVER, LV_PART_ITEMS);
-  lv_obj_set_style_text_color(_pick_table, lv_color_hex(FG_HEX), LV_PART_ITEMS);
-  lv_obj_set_style_text_font(_pick_table, fontBody(), LV_PART_ITEMS);
-  lv_obj_set_style_pad_top(_pick_table, 10, LV_PART_ITEMS);
-  lv_obj_set_style_pad_bottom(_pick_table, 10, LV_PART_ITEMS);
-  lv_obj_set_style_pad_left(_pick_table, 8, LV_PART_ITEMS);
-  lv_obj_set_style_border_color(_pick_table, lv_color_hex(0x374151), LV_PART_ITEMS);
-  lv_obj_set_style_border_width(_pick_table, 1, LV_PART_ITEMS);
-  lv_obj_set_style_border_side(_pick_table, LV_BORDER_SIDE_BOTTOM, LV_PART_ITEMS);
-  lv_table_set_col_cnt(_pick_table, 1);
-  lv_table_set_col_width(_pick_table, 0, _screen_w - 8);
-  lv_obj_add_event_cb(_pick_table, pick_table_cb, LV_EVENT_VALUE_CHANGED, NULL);
-  _pick_sb = attachScrollHandle(_pick_table);
-  lv_obj_add_event_cb(_pick_table, pick_table_draw_cb, LV_EVENT_DRAW_PART_BEGIN, NULL);
+  // Same virtualized contact-list component as the Contacts tab; tap selects the
+  // contact for the pending send/insert action instead of opening it.
+  clistBuild(_pick_list, _pick_popup);
+  _pick_list.on_tap = clistPickSelect;
 
   _pick_kb = lv_keyboard_create(_pick_popup);
   lv_obj_add_flag(_pick_kb, LV_OBJ_FLAG_FLOATING);   // overlay, don't take a flex slot
@@ -1272,39 +1298,20 @@ void UITask::buildContactPickerScreen() {
 }
 
 void UITask::rebuildPicker() {
-  if (!_pick_table) return;
-  _prow_count = 0;
+  if (!_pick_list.scroll) return;
+  _pick_list.count = 0;
   int total = mproxy::getNumContacts();
-  for (int i = 0; i < total && _prow_count < CONTACTS_MAX_ROWS; i++) {
+  for (int i = 0; i < total && _pick_list.count < CONTACTS_MAX_ROWS; i++) {
     ContactInfo c;
     if (!mproxy::getContactByIdx(i, c)) continue;
     if (_pick_filter[0] && !containsCI(c.name, _pick_filter)) continue;
-    _prows[_prow_count].idx = (uint16_t)i;
-    _prows[_prow_count].heard = c.lastmod;   // our clock (see rebuildContactsList)
-    _prows[_prow_count].fav = (c.flags & CONTACT_FLAG_FAVOURITE) ? 1 : 0;
-    _prow_count++;
+    _pick_list.rows[_pick_list.count].idx = (uint16_t)i;
+    _pick_list.rows[_pick_list.count].heard = c.lastmod;   // our clock (see rebuildContactsList)
+    _pick_list.rows[_pick_list.count].fav = (c.flags & CONTACT_FLAG_FAVOURITE) ? 1 : 0;
+    _pick_list.count++;
   }
-  qsort(_prows, _prow_count, sizeof(ContactDispRow), prow_cmp);
-  if (_prow_count == 0) {
-    lv_table_set_row_cnt(_pick_table, 1);
-    lv_table_set_cell_value(_pick_table, 0, 0, "No contacts.");
-    return;
-  }
-  lv_table_set_row_cnt(_pick_table, _prow_count);
-  for (int r = 0; r < _prow_count; r++) {
-    ContactInfo c;
-    if (!mproxy::getContactByIdx(_prows[r].idx, c)) continue;
-    char dn[CHAT_PEER_NAME_MAX];
-    displayName(c.id.pub_key, c.name, dn, sizeof(dn));
-    char clean[CHAT_PEER_NAME_MAX + 4];
-    sanitizeForFont(dn[0] ? dn : "(unnamed)", clean, sizeof(clean));
-    char cell[CHAT_PEER_NAME_MAX + 12];
-    snprintf(cell, sizeof(cell), "%s %s", contactSymbol(c.type), clean);
-    lv_table_set_cell_value(_pick_table, r, 0, cell);
-  }
-  lv_obj_scroll_to_y(_pick_table, 0, LV_ANIM_OFF);
-  lv_obj_update_layout(_pick_table);
-  sb_update(_pick_table, _pick_sb);
+  qsort(_pick_list.rows, _pick_list.count, sizeof(ContactDispRow), prow_cmp);
+  clistRefresh(_pick_list, "No contacts.");
 }
 
 void UITask::openContactPicker(int action) {
@@ -1352,43 +1359,6 @@ void UITask::pick_kb_cb(lv_event_t* e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
     lv_obj_add_flag(_instance->_pick_kb, LV_OBJ_FLAG_HIDDEN);
-}
-
-void UITask::pick_table_draw_cb(lv_event_t* e) {
-  if (!_instance) return;
-  lv_obj_draw_part_dsc_t* dsc = lv_event_get_draw_part_dsc(e);
-  if (dsc->part != LV_PART_ITEMS || dsc->label_dsc == NULL) return;
-  uint32_t row = dsc->id;  // single column: cell id == row
-  dsc->label_dsc->color = ((int)row < _instance->_prow_count && _instance->_prows[row].fav)
-      ? lv_color_hex(FAV_HEX) : lv_color_hex(FG_HEX);
-}
-
-void UITask::pick_table_cb(lv_event_t* e) {
-  if (!_instance) return;
-  uint16_t row = 0, col = 0;
-  lv_table_get_selected_cell(lv_event_get_target(e), &row, &col);
-  if (row == LV_TABLE_CELL_NONE || (int)row >= _instance->_prow_count) return;
-  ContactInfo pick;
-  if (!mproxy::getContactByIdx(_instance->_prows[row].idx, pick)) return;
-  int action = _instance->_pick_action;
-  _instance->closeContactPicker();
-  if (action == 1) {  // share the viewed contact (cinfo) to the picked recipient
-    ContactInfo* viewed = _instance->cinfoContact();
-    if (viewed) {
-      char hex[2 * PUB_KEY_SIZE + 1];
-      mesh::Utils::toHex(hex, viewed->id.pub_key, PUB_KEY_SIZE);
-      char ref[2 * PUB_KEY_SIZE + 48];
-      snprintf(ref, sizeof(ref), "<%s:%u:%s>", hex, (unsigned)viewed->type, viewed->name);
-      const char* me = (_instance->_node_prefs && _instance->_node_prefs->node_name[0])
-                           ? _instance->_node_prefs->node_name : "Me";
-      char key[CHAT_PEER_NAME_MAX];
-      convKey(pick.id.pub_key, false, key, sizeof(key));
-      _instance->postSend(false, pick.id.pub_key, -1, key, me, ref);
-      _instance->showToast("Contact shared");
-    }
-  } else if (action == 2) {  // insert the picked contact's ref into compose
-    _instance->insertContactRef(pick.id.pub_key, pick.type, pick.name);
-  }
 }
 
 void UITask::closeInsertPopup() {
