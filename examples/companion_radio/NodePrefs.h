@@ -47,4 +47,5 @@ struct NodePrefs {  // persisted to file
   uint8_t  radio_off;          // 1 = LoRa radio disabled (no TX/RX); safe to detach the antenna. Persists.
   char     lock_pin[8];        // settings-lock PIN (4-6 digits, NUL-terminated); "" = no PIN set
   uint8_t  notify_enable;      // master new-message notifications (wake+banner+buzzer); 0=off,1=on (0xFF unset -> on)
+  uint8_t  avatar_palette;     // contact avatar color scheme: 0 = curated (default), 1 = iOS-app parity
 };

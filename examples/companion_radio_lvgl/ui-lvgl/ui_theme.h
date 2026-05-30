@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
+#include <math.h>   // iOS-parity avatar color: fmodf/fabsf/lroundf
 
 // ---------------------------------------------------------------------------
 // UI kit: the single source of truth for colors, layout metrics, and a few
@@ -71,10 +72,51 @@ static constexpr uint32_t AVATAR_PALETTE[] = {
 static constexpr size_t AVATAR_PALETTE_N =
     sizeof(AVATAR_PALETTE) / sizeof(AVATAR_PALETTE[0]);
 
-// Deterministic name -> avatar color. FNV-1a (same seed/prime as the snapshot
-// signature hash in MeshProxy.cpp) so a given name always maps to one color.
-static inline uint32_t nameColor(const char* name) {
+// FNV-1a over the name's raw UTF-8 bytes (same seed/prime as the snapshot
+// signature hash in MeshProxy.cpp, and as the iOS app) -> stable per name.
+static inline uint32_t nameHash(const char* name) {
   uint32_t h = 2166136261u;
   if (name) for (const char* p = name; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u;
-  return AVATAR_PALETTE[h % AVATAR_PALETTE_N];
+  return h;
+}
+
+// Curated scheme: hash into a hand-picked palette that excludes pure red so an
+// avatar never collides with the red unread chevron.
+static inline uint32_t nameColorCurated(const char* name) {
+  return AVATAR_PALETTE[nameHash(name) % AVATAR_PALETTE_N];
+}
+
+// iOS-app parity: continuous hue wheel, HSV(hue = hash % 360, S = 0.75, V = 0.80).
+// Pixel-verified against the closed-source iOS MeshCore app (see IOS_AVATAR_COLOR.md)
+// so a contact gets the SAME color on the phone and here. Reintroduces red avatars.
+static inline uint32_t nameColorIos(const char* name) {
+  float H = (nameHash(name) % 360) / 60.0f;
+  float C = 0.80f * 0.75f;                          // chroma = 0.60
+  float X = C * (1.0f - fabsf(fmodf(H, 2.0f) - 1.0f));
+  float m = 0.80f - C;                              // = 0.20
+  float r = 0, g = 0, b = 0;
+  switch ((int)H) {
+    case 0: r = C; g = X;        break;
+    case 1: r = X; g = C;        break;
+    case 2: g = C; b = X;        break;
+    case 3: g = X; b = C;        break;
+    case 4: r = X; b = C;        break;
+    default: r = C; b = X;       break;
+  }
+  uint8_t R = (uint8_t)lroundf((r + m) * 255);
+  uint8_t G = (uint8_t)lroundf((g + m) * 255);
+  uint8_t B = (uint8_t)lroundf((b + m) * 255);
+  return ((uint32_t)R << 16) | ((uint32_t)G << 8) | B;
+}
+
+// Live avatar-color scheme, mirrored from NodePrefs.avatar_palette (0 = curated,
+// 1 = iOS). Defined in UITask.cpp; UITask refreshes it from prefs and rebinds the
+// contact rows when the Settings toggle changes. Read-only everywhere else.
+extern uint8_t g_avatar_palette_mode;
+
+// Deterministic name -> avatar color, dispatched on the active scheme. Same
+// signature/return as before, so the lv_color_hex(nameColor(...)) call sites are
+// untouched. Not in the scroll hot path (called only at row/header bind).
+static inline uint32_t nameColor(const char* name) {
+  return g_avatar_palette_mode ? nameColorIos(name) : nameColorCurated(name);
 }

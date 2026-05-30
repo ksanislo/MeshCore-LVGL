@@ -40,6 +40,11 @@ static const lv_font_t* fontCaption();
 
 UITask* UITask::_instance = NULL;
 
+// Active avatar-color scheme (0 = curated, 1 = iOS parity); declared in ui_theme.h
+// so nameColor() can dispatch. Seeded from NodePrefs in begin(), updated live by
+// the Settings "Avatar colors" dropdown.
+uint8_t g_avatar_palette_mode = 0;
+
 void UITask::disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
   if (!_instance || !_instance->_lgfx) {
     lv_disp_flush_ready(drv);
@@ -189,7 +194,7 @@ lv_obj_t* UITask::buildSplashScreen() {
   // Pivot = source center so the zoom pins the same point LV_ALIGN_CENTER anchors.
   lv_obj_t* wordmark = lv_img_create(scr);
   lv_img_set_src(wordmark, &meshcore_logo_alpha);
-  int target_w = (lv_disp_get_hor_res(NULL) * 62) / 100;
+  int target_w = (lv_disp_get_hor_res(NULL) * 80) / 100;
   uint16_t zoom = (uint16_t)((256 * target_w) / meshcore_logo_alpha.header.w);
   lv_img_set_zoom(wordmark, zoom);
   lv_img_set_pivot(wordmark, meshcore_logo_alpha.header.w / 2,
@@ -305,10 +310,10 @@ lv_obj_t* UITask::buildHomeScreen() {
 
   // MeshCore wordmark, scaled down from the same alpha master as the splash and
   // tinted with UI_LOGO. Pivot = left-mid so the zoom pins the LV_ALIGN_LEFT_MID
-  // anchor. ~22px tall sits cleanly inside the 48px header's padded content.
+  // anchor. ~16px tall: a compact wordmark, deliberately smaller than the splash.
   _header_logo = lv_img_create(header);
   lv_img_set_src(_header_logo, &meshcore_logo_alpha);
-  uint16_t hzoom = (uint16_t)((256 * 22) / meshcore_logo_alpha.header.h);
+  uint16_t hzoom = (uint16_t)((256 * 16) / meshcore_logo_alpha.header.h);
   lv_img_set_zoom(_header_logo, hzoom);
   lv_img_set_pivot(_header_logo, 0, meshcore_logo_alpha.header.h / 2);
   lv_obj_set_style_img_recolor(_header_logo, lv_color_hex(UI_LOGO), 0);
@@ -2504,6 +2509,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 
   ensureBanner();   // pre-build so the first notification frame stays light
   _muted_count = mproxy::copyMutedKeys(_muted_keys, MUTE_MAX);   // seed mutes from the backend
+  if (_node_prefs) g_avatar_palette_mode = _node_prefs->avatar_palette ? 1 : 0;  // seed avatar scheme
 
 #ifdef PIN_BUZZER
   // Notification chimes. quiet() honors the persisted buzzer_quiet; the genericBuzzer
@@ -4588,6 +4594,14 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_clock_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_clock_chk, set_clock_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  // Contact avatar color scheme: our curated palette, or iOS-app parity (same
+  // color as the phone app for a given name). See nameColor() in ui_theme.h.
+  lv_obj_t* fav = makeField(body, "Avatar colors");
+  _set_avatar_dd = lv_dropdown_create(fav);
+  lv_dropdown_set_options(_set_avatar_dd, "Default\niOS app");
+  lv_obj_set_width(_set_avatar_dd, LV_PCT(100));
+  lv_obj_add_event_cb(_set_avatar_dd, set_avatar_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
 #ifdef HAS_SD_CARD
   _set_history_chk = lv_checkbox_create(body);
   lv_checkbox_set_text(_set_history_chk, "Save chat history");
@@ -4680,6 +4694,7 @@ void UITask::populateSettings() {
     if (_node_prefs->clock_12h) lv_obj_add_state(_set_clock_chk, LV_STATE_CHECKED);
     else                        lv_obj_clear_state(_set_clock_chk, LV_STATE_CHECKED);
   }
+  if (_set_avatar_dd) lv_dropdown_set_selected(_set_avatar_dd, _node_prefs->avatar_palette ? 1 : 0);
   if (_set_history_chk) {
     if (_node_prefs->persist_history != 0) lv_obj_add_state(_set_history_chk, LV_STATE_CHECKED);  // 0xFF/1 = on
     else                                   lv_obj_clear_state(_set_history_chk, LV_STATE_CHECKED);
@@ -4943,6 +4958,16 @@ void UITask::set_clock_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   _instance->_node_prefs->clock_12h = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
   pushPrefs();
+}
+
+void UITask::set_avatar_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  uint8_t mode = lv_dropdown_get_selected(lv_event_get_target(e)) ? 1 : 0;
+  _instance->_node_prefs->avatar_palette = mode;
+  g_avatar_palette_mode = mode;            // nameColor() reads this immediately
+  pushPrefs();
+  _instance->_contacts_dirty = true;       // recolor the contact rows on next build
+  _instance->updateOwnerProfile();         // live-refresh the avatar visible on Settings
 }
 
 void UITask::set_notify_cb(lv_event_t* e) {
@@ -5577,10 +5602,13 @@ void UITask::loop() {
       time_t t = (time_t)secs + (_node_prefs ? _node_prefs->tz_offset_minutes * 60 : 0);
       struct tm tmv;
       gmtime_r(&t, &tmv);  // gmtime of (UTC + offset) = local wall time
-      char buf[28];
-      strftime(buf, sizeof(buf),
-               (_node_prefs && _node_prefs->clock_12h) ? "%m-%d %I:%M:%S %p" : "%m-%d %H:%M:%S",
-               &tmv);
+      char buf[16];
+      if (_node_prefs && _node_prefs->clock_12h) {
+        strftime(buf, sizeof(buf), "%I:%M %p", &tmv);  // e.g. "09:05 AM"
+        if (buf[0] == '0') memmove(buf, buf + 1, strlen(buf));  // -> "9:05 AM"
+      } else {
+        strftime(buf, sizeof(buf), "%H:%M", &tmv);     // e.g. "21:05"
+      }
       lv_label_set_text(_clock_label, buf);
     }
   }

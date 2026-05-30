@@ -223,6 +223,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_screen_dd;       // screen idle-off timeout dropdown
   lv_obj_t*       _set_tz_ta;           // UTC offset (hours) for local-time display
   lv_obj_t*       _set_clock_chk;       // 12-hour clock toggle
+  lv_obj_t*       _set_avatar_dd;       // contact avatar color scheme (Default / iOS app)
   lv_obj_t*       _set_history_chk;     // persist chat history to SD toggle
   lv_obj_t*       _set_notify_chk;      // master new-message notifications toggle
   lv_obj_t*       _set_kb;
@@ -509,6 +510,7 @@ private:
   void      commitTz();
   static void set_tz_ta_event_cb(lv_event_t* e);
   static void set_clock_cb(lv_event_t* e);
+  static void set_avatar_cb(lv_event_t* e);
   static void set_history_cb(lv_event_t* e);
   static void set_notify_cb(lv_event_t* e);
   // Phase-1 additions: telemetry policy + advanced toggles + share-me.
@@ -626,7 +628,7 @@ public:
       _set_profile_avatar(NULL), _set_profile_avatar_lbl(NULL), _set_profile_name(NULL), _set_profile_key(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
-      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_kb(NULL),
+      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_avatar_dd(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_kb(NULL),
       _set_active_ta(NULL), _set_key_ta(NULL),
       _set_lat_ta(NULL), _set_lon_ta(NULL), _set_sharepos(NULL),
       _set_telem_base_dd(NULL), _set_telem_loc_dd(NULL), _set_telem_env_dd(NULL),
