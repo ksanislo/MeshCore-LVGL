@@ -228,6 +228,10 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_notify_chk;      // master new-message notifications toggle
   lv_obj_t*       _set_kb;
   lv_obj_t*       _set_active_ta;       // settings textarea currently being edited
+  lv_obj_t*       _set_launcher;        // Settings category launcher (profile hero + rows)
+  lv_obj_t*       _set_pane[6];         // one pane per category, shown one at a time
+  lv_obj_t*       _set_pane_body[6];    // each pane's scrollable body (fields parented here)
+  lv_obj_t*       _set_active_pane;     // active pane body = keyboard-raise scroll target
   lv_obj_t*       _set_key_ta;          // read-only self public key (scrolls horizontally)
   lv_obj_t*       _set_lat_ta;
   lv_obj_t*       _set_lon_ta;
@@ -512,6 +516,13 @@ private:
   static void set_clock_cb(lv_event_t* e);
   static void set_avatar_cb(lv_event_t* e);
   static void set_history_cb(lv_event_t* e);
+  static void category_row_cb(lv_event_t* e);
+  static void settings_back_cb(lv_event_t* e);
+  static void settings_tab_changed_cb(lv_event_t* e);
+  lv_obj_t* makeSettingsPane(int idx, const char* title);
+  lv_obj_t* makeCategoryRow(lv_obj_t* parent, const char* icon, const char* title, const char* desc, int cat);
+  void showSettingsCategory(int cat);
+  void settingsBackToLauncher();
   static void set_notify_cb(lv_event_t* e);
   // Phase-1 additions: telemetry policy + advanced toggles + share-me.
   static void set_telem_cb(lv_event_t* e);          // user_data 0/1/2 = base/loc/env
@@ -629,7 +640,9 @@ public:
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
       _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_avatar_dd(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_kb(NULL),
-      _set_active_ta(NULL), _set_key_ta(NULL),
+      _set_active_ta(NULL),
+      _set_launcher(NULL), _set_pane{}, _set_pane_body{}, _set_active_pane(NULL),
+      _set_key_ta(NULL),
       _set_lat_ta(NULL), _set_lon_ta(NULL), _set_sharepos(NULL),
       _set_telem_base_dd(NULL), _set_telem_loc_dd(NULL), _set_telem_env_dd(NULL),
       _set_autoadd_chk(NULL), _set_autoadd_hops_dd(NULL), _set_rxboost_chk(NULL),

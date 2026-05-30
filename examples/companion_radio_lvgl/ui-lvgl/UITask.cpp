@@ -335,6 +335,8 @@ lv_obj_t* UITask::buildHomeScreen() {
   // Instant tab switches: the content scroll otherwise animates, repainting
   // the whole viewport many times per switch.
   lv_obj_set_style_anim_time(lv_tabview_get_content(_tabview), 0, 0);
+  // Entering the Settings tab always returns to its category launcher.
+  lv_obj_add_event_cb(_tabview, settings_tab_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
   // tab bar styling
   lv_obj_t* tab_btns = lv_tabview_get_tab_btns(_tabview);
@@ -4316,12 +4318,153 @@ static lv_obj_t* makeNumberField(lv_obj_t* body, const char* cap, lv_event_cb_t 
   return ta;
 }
 
+// ---- Settings: category launcher + per-category panes ---------------------
+// The Settings tab is a launcher (owner-profile hero + category rows) plus one
+// pane per category, all children of _tab_settings, shown one at a time. Each
+// pane is its own three-band view (back/title bar + scrollable body). A single
+// shared keyboard overlays whichever pane is active. Fields are still created
+// once and loaded/saved by populateSettings() + the existing per-widget cbs.
+
+lv_obj_t* UITask::makeSettingsPane(int idx, const char* title) {
+  lv_obj_t* pane = lv_obj_create(_tab_settings);
+  lv_obj_remove_style_all(pane);
+  lv_obj_set_size(pane, LV_PCT(100), LV_PCT(100));
+  lv_obj_align(pane, LV_ALIGN_TOP_LEFT, 0, 0);
+  lv_obj_set_flex_flow(pane, LV_FLEX_FLOW_COLUMN);
+  lv_obj_clear_flag(pane, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(pane, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t* hdr = lv_obj_create(pane);
+  lv_obj_remove_style_all(hdr);
+  lv_obj_set_width(hdr, LV_PCT(100));
+  lv_obj_set_height(hdr, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_color(hdr, lv_color_hex(UI_SURFACE), 0);
+  lv_obj_set_style_bg_opa(hdr, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_all(hdr, 6, 0);
+  lv_obj_set_style_pad_column(hdr, 6, 0);
+  lv_obj_set_flex_flow(hdr, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(hdr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
+  makeBackButton(hdr, settings_back_cb);
+  lv_obj_t* t = lv_label_create(hdr);
+  lv_label_set_text(t, title);
+  lv_obj_set_style_text_color(t, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(t, fontTitle(), 0);
+
+  lv_obj_t* paneBody = lv_obj_create(pane);
+  lv_obj_remove_style_all(paneBody);
+  lv_obj_set_width(paneBody, LV_PCT(100));
+  lv_obj_set_flex_grow(paneBody, 1);
+  lv_obj_set_style_pad_all(paneBody, 12, 0);
+  lv_obj_set_style_pad_row(paneBody, 8, 0);
+  lv_obj_set_flex_flow(paneBody, LV_FLEX_FLOW_COLUMN);
+  lv_obj_add_event_cb(paneBody, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);
+
+  _set_pane[idx] = pane;
+  _set_pane_body[idx] = paneBody;
+  return paneBody;
+}
+
+lv_obj_t* UITask::makeCategoryRow(lv_obj_t* parent, const char* icon, const char* title,
+                                 const char* desc, int cat) {
+  lv_obj_t* row = lv_obj_create(parent);
+  lv_obj_remove_style_all(row);
+  lv_obj_set_width(row, LV_PCT(100));
+  lv_obj_set_height(row, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_color(row, lv_color_hex(UI_SURFACE), 0);
+  lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(row, 8, 0);
+  lv_obj_set_style_pad_all(row, 10, 0);
+  lv_obj_set_style_pad_column(row, 12, 0);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_user_data(row, (void*)(intptr_t)cat);
+  lv_obj_add_event_cb(row, category_row_cb, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t* ic = lv_label_create(row);
+  lv_label_set_text(ic, icon);
+  lv_obj_set_style_text_color(ic, lv_color_hex(UI_ACCENT), 0);
+  lv_obj_set_style_text_font(ic, fontTitle(), 0);
+
+  lv_obj_t* col = lv_obj_create(row);
+  lv_obj_remove_style_all(col);
+  lv_obj_set_flex_grow(col, 1);
+  lv_obj_set_height(col, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(col, 2, 0);
+  lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t* tl = lv_label_create(col);
+  lv_label_set_text(tl, title);
+  lv_obj_set_style_text_color(tl, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(tl, fontHeading(), 0);
+  lv_obj_t* dl = lv_label_create(col);
+  lv_label_set_text(dl, desc);
+  lv_obj_set_width(dl, LV_PCT(100));
+  lv_label_set_long_mode(dl, LV_LABEL_LONG_DOT);
+  lv_obj_set_style_text_color(dl, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_font(dl, fontCaption(), 0);
+
+  lv_obj_t* chev = lv_label_create(row);
+  lv_label_set_text(chev, LV_SYMBOL_RIGHT);
+  lv_obj_set_style_text_color(chev, lv_color_hex(DIM_HEX), 0);
+  return row;
+}
+
+void UITask::showSettingsCategory(int cat) {
+  if (cat < 0 || cat >= 6 || !_set_pane[cat]) return;
+  if (_set_launcher) lv_obj_add_flag(_set_launcher, LV_OBJ_FLAG_HIDDEN);
+  for (int i = 0; i < 6; i++) if (_set_pane[i]) lv_obj_add_flag(_set_pane[i], LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(_set_pane[cat], LV_OBJ_FLAG_HIDDEN);
+  _set_active_pane = _set_pane_body[cat];
+  if (_set_active_pane) lv_obj_scroll_to_y(_set_active_pane, 0, LV_ANIM_OFF);
+  if (_set_kb) lv_obj_add_flag(_set_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::settingsBackToLauncher() {
+  for (int i = 0; i < 6; i++) if (_set_pane[i]) lv_obj_add_flag(_set_pane[i], LV_OBJ_FLAG_HIDDEN);
+  if (_set_kb) lv_obj_add_flag(_set_kb, LV_OBJ_FLAG_HIDDEN);
+  _set_active_pane = NULL;
+  if (_set_launcher) lv_obj_clear_flag(_set_launcher, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::category_row_cb(lv_event_t* e) {
+  if (!_instance) return;
+  int cat = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target(e));
+  _instance->showSettingsCategory(cat);
+}
+
+void UITask::settings_back_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->settingsBackToLauncher();
+}
+
+void UITask::settings_tab_changed_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance || !_instance->_set_launcher || !_instance->_tabview) return;
+  if (lv_tabview_get_tab_act(_instance->_tabview) == 2)  // 2 = Settings tab
+    _instance->settingsBackToLauncher();
+}
+
 void UITask::buildSettingsTab(lv_obj_t* parent) {
-  lv_obj_t* body = _tab_settings;
-  lv_obj_add_event_cb(body, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap empty -> hide kb
-  lv_obj_set_style_pad_all(body, 12, 0);
-  lv_obj_set_style_pad_row(body, 8, 0);
-  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);  // tab page scrolls by default
+  // Launcher + per-category panes (see helpers above). Null the pane tables first
+  // so a partial build can't leave dangling pointers.
+  _set_active_pane = NULL;
+  for (int i = 0; i < 6; i++) { _set_pane[i] = NULL; _set_pane_body[i] = NULL; }
+  lv_obj_set_style_pad_all(_tab_settings, 0, 0);
+  lv_obj_clear_flag(_tab_settings, LV_OBJ_FLAG_SCROLLABLE);
+
+  _set_launcher = lv_obj_create(_tab_settings);
+  lv_obj_remove_style_all(_set_launcher);
+  lv_obj_set_size(_set_launcher, LV_PCT(100), LV_PCT(100));
+  lv_obj_align(_set_launcher, LV_ALIGN_TOP_LEFT, 0, 0);
+  lv_obj_set_style_pad_all(_set_launcher, 12, 0);
+  lv_obj_set_style_pad_row(_set_launcher, 8, 0);
+  lv_obj_set_flex_flow(_set_launcher, LV_FLEX_FLOW_COLUMN);
+  lv_obj_add_event_cb(_set_launcher, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap empty -> hide kb
+
+  lv_obj_t* body = _set_launcher;   // owner-profile hero is added into the launcher
 
   // Owner profile hero: avatar + node name + key, same look as Contact Info. Tapping
   // it opens Node Info (your details/health). Populated live in populateSettings().
@@ -4372,6 +4515,24 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_t* chev = lv_label_create(prof);
   lv_label_set_text(chev, LV_SYMBOL_RIGHT);
   lv_obj_set_style_text_color(chev, lv_color_hex(DIM_HEX), 0);
+
+  // Category launcher rows -> each drills into the matching pane.
+  makeCategoryRow(_set_launcher, LV_SYMBOL_EDIT,  "Profile",         "Name, position, public key",          0);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_WIFI,  "Radio & Routing", "Frequency, power, presets, mesh",      1);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_GPS,   "Telemetry & GPS", "Telemetry sharing, GPS module",        2);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_BELL,  "Notifications",   "New-message alerts & sound",           3);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_IMAGE, "Display & Time",  "Brightness, rotation, clock, avatars", 4);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_POWER, "Power & Lock",    "LoRa radio, PIN lock, reboot",         5);
+
+  // Build the (hidden) category panes; the fields below are parented into each.
+  makeSettingsPane(0, "Profile");
+  makeSettingsPane(1, "Radio & Routing");
+  makeSettingsPane(2, "Telemetry & GPS");
+  makeSettingsPane(3, "Notifications");
+  makeSettingsPane(4, "Display & Time");
+  makeSettingsPane(5, "Power & Lock");
+
+  body = _set_pane_body[0];   // Profile
 
   // ===== Public Info =====
   addSettingsSection(body, "Public Info");
@@ -4440,6 +4601,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_label_set_text(sml, LV_SYMBOL_DOWNLOAD " Share my contact (QR)");
   lv_obj_center(sml);
 
+  body = _set_pane_body[1];   // Radio & Routing
   // ===== Radio (edit fields, then a single Apply) =====
   // Header row: "Radio" title on the left, a "Preset" button on the right.
   lv_obj_t* rhdr = lv_obj_create(body);
@@ -4487,6 +4649,8 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_width(_set_path_dd, LV_PCT(100));
   lv_obj_add_event_cb(_set_path_dd, set_pathmode_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  body = _set_pane_body[2];   // Telemetry & GPS
+  body = _set_pane_body[2];   // Telemetry & GPS
   // ===== Telemetry policy (who may request our telemetry) =====
   addSettingsSection(body, "Telemetry");
   static const char* TELEM_OPTS = "Deny\nAllow (flagged)\nAllow all";  // -> TELEM_MODE_DENY/ALLOW_FLAGS/ALLOW_ALL
@@ -4500,6 +4664,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_user_data(_set_telem_env_dd, (void*)(intptr_t)2);
   lv_obj_add_event_cb(_set_telem_env_dd, set_telem_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  body = _set_pane_body[1];   // back to Radio & Routing
   // ===== Advanced (mesh behaviour) =====
   addSettingsSection(body, "Advanced");
   _set_autoadd_chk = lv_checkbox_create(body);
@@ -4523,6 +4688,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   _set_airtime_ta  = makeNumberField(body, "Airtime factor", set_advnum_ta_event_cb);
 
 #if ENV_INCLUDE_GPS
+  body = _set_pane_body[2];   // Telemetry & GPS
   // ===== GPS (optional module on the rear UART plug) =====
   addSettingsSection(body, "GPS");
   _set_gps_chk = lv_checkbox_create(body);
@@ -4532,6 +4698,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   _set_gps_interval_ta = makeNumberField(body, "GPS interval (s)", set_advnum_ta_event_cb);
 #endif
 
+  body = _set_pane_body[3];   // Notifications
   // ===== Notifications =====
   addSettingsSection(body, "Notifications");
   _set_notify_chk = lv_checkbox_create(body);
@@ -4539,6 +4706,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_notify_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_notify_chk, set_notify_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  body = _set_pane_body[5];   // Power & Lock
   // ===== Power & Lock =====
   addSettingsSection(body, "Power & Lock");
   lv_obj_t* frd = makeField(body, "LoRa radio");
@@ -4559,6 +4727,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_label_set_text(lockl, LV_SYMBOL_SETTINGS " Lock screen");
   lv_obj_center(lockl);
 
+  body = _set_pane_body[4];   // Display & Time
   // ===== Display =====
   addSettingsSection(body, "Display");
   lv_obj_t* fb = makeField(body, "Brightness");
@@ -4585,6 +4754,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_width(_set_screen_dd, LV_PCT(100));
   lv_obj_add_event_cb(_set_screen_dd, set_screen_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  addSettingsSection(body, "Time");
   // Local-time offset for the header clock. Entered in hours (decimals OK for
   // half/quarter-hour zones, e.g. 5.5, 5.75, -3.5); stored as minutes.
   _set_tz_ta = makeNumberField(body, "UTC offset (h)", set_tz_ta_event_cb);
@@ -4594,6 +4764,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_clock_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_clock_chk, set_clock_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  addSettingsSection(body, "Appearance");
   // Contact avatar color scheme: our curated palette, or iOS-app parity (same
   // color as the phone app for a given name). See nameColor() in ui_theme.h.
   lv_obj_t* fav = makeField(body, "Avatar colors");
@@ -4609,6 +4780,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_add_event_cb(_set_history_chk, set_history_cb, LV_EVENT_VALUE_CHANGED, NULL);
 #endif
 
+  body = _set_pane_body[5];   // reboot belongs under Power & Lock
   // Reboot button -- handy on battery, and a clean software restart (esp_restart)
   // vs the hardware RESET line.
   lv_obj_t* reboot = lv_btn_create(body);
@@ -4830,7 +5002,9 @@ void UITask::set_name_ta_event_cb(lv_event_t* e) {
     lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
-    _instance->raiseFieldForKb(_instance->_tab_settings, _instance->_set_kb, ta);
+    _instance->raiseFieldForKb(_instance->_set_active_pane ? _instance->_set_active_pane
+                                                           : _instance->_tab_settings,
+                               _instance->_set_kb, ta);
   } else if (code == LV_EVENT_DEFOCUSED) {
     _instance->commitNodeName();
   }
@@ -4847,7 +5021,9 @@ void UITask::set_radio_ta_event_cb(lv_event_t* e) {
     lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
-    _instance->raiseFieldForKb(_instance->_tab_settings, _instance->_set_kb, ta);
+    _instance->raiseFieldForKb(_instance->_set_active_pane ? _instance->_set_active_pane
+                                                           : _instance->_tab_settings,
+                               _instance->_set_kb, ta);
   }
 }
 
@@ -5052,7 +5228,9 @@ void UITask::set_advnum_ta_event_cb(lv_event_t* e) {
     lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
-    _instance->raiseFieldForKb(_instance->_tab_settings, _instance->_set_kb, ta);
+    _instance->raiseFieldForKb(_instance->_set_active_pane ? _instance->_set_active_pane
+                                                           : _instance->_tab_settings,
+                               _instance->_set_kb, ta);
   } else if (code == LV_EVENT_DEFOCUSED) {
     _instance->commitAdvNumbers();
   }
@@ -5344,7 +5522,9 @@ void UITask::set_tz_ta_event_cb(lv_event_t* e) {
     lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
-    _instance->raiseFieldForKb(_instance->_tab_settings, _instance->_set_kb, ta);
+    _instance->raiseFieldForKb(_instance->_set_active_pane ? _instance->_set_active_pane
+                                                           : _instance->_tab_settings,
+                               _instance->_set_kb, ta);
   } else if (code == LV_EVENT_DEFOCUSED) {
     _instance->commitTz();
   }
@@ -5361,7 +5541,9 @@ void UITask::set_pos_ta_event_cb(lv_event_t* e) {
     lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
-    _instance->raiseFieldForKb(_instance->_tab_settings, _instance->_set_kb, ta);
+    _instance->raiseFieldForKb(_instance->_set_active_pane ? _instance->_set_active_pane
+                                                           : _instance->_tab_settings,
+                               _instance->_set_kb, ta);
   } else if (code == LV_EVENT_DEFOCUSED) {
     _instance->commitPosition();
   }
