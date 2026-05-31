@@ -2145,30 +2145,33 @@ static bool textHasContactRef(const char* text) {
 // message may contain several cards). Freed on the card's LV_EVENT_DELETE.
 struct CardTarget { uint8_t pubkey[PUB_KEY_SIZE]; uint8_t type; char name[CHAT_PEER_NAME_MAX]; };
 
-// Channels are branded as a name-colored HEXAGON (vs the contact circle). The
-// avatar obj is flagged USER_1 + made bg-transparent; this draw hook fills a
-// flat-top hexagon in the obj's bg_color. Attach once at the avatar's creation
-// (heroes, chat header, banner, channel rows); harmless on circle (contact) avatars.
-// Flat-top hexagon filling the box [x1,x2] x [y1,y2] EXACTLY -- defined by the box
-// corners (like the circle background), so it fills + centers identically to the
-// contact circle with no separate center math to drift.
-// A TRUE regular flat-top hexagon sized to the box WIDTH (so it's as wide as the
-// contact circle). A regular hexagon is sqrt(3)/2 (~0.866) as tall as it is wide,
-// so it's centered vertically in the box -- forcing it to fill the square would
-// stretch it (the squashed look). Top edge = side = R; diagonal side = R too.
-static void drawHexBox(lv_draw_ctx_t* ctx, lv_coord_t x1, lv_coord_t y1,
-                       lv_coord_t x2, lv_coord_t y2, lv_color_t color) {
-  lv_coord_t cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
-  float R = (x2 - x1) / 2.0f;                       // circumradius = half the box width
-  lv_coord_t ex = (lv_coord_t)lroundf(R / 2.0f);    // half the top/bottom edge (R*cos60)
-  lv_coord_t ey = (lv_coord_t)lroundf(R * 0.8660254f);  // half the height    (R*sin60)
+// Channel avatar = a name-colored CIRCLE (the object's normal bg) with a hexagon
+// "hole" punched in it. The hole shows the background (an empty channel) or, in a
+// user-in-channel alert, the user's name-hash color + their letter. The circle is
+// drawn by LVGL (bg_color + radius); this hook draws the inner hexagon on top in
+// the obj's BORDER color (used purely as the hole-color slot). Gated by USER_1.
+//
+// Regular flat-top hexagon filling the inclusive box `a` (coords are LVGL-inclusive:
+// x1/x2, y1/y2 are the first/last pixels). Sized to the box width; a regular hexagon
+// is sqrt(3)/2 (~0.866) as tall as wide, so it's centred vertically. Every vertex is
+// placed relative to its OWN edge (left/right points on x1/x2; top/bottom edges inset
+// `ex` from each side), so it's symmetric at any size with no rounded centre to drift.
+static void drawHexBox(lv_draw_ctx_t* ctx, const lv_area_t* a, lv_color_t color) {
+  lv_coord_t lx = a->x1, rx = a->x2;                         // left/right points sit on the box edges
+  lv_coord_t span = rx - lx;                                 // vertex-to-vertex width
+  lv_coord_t ex = (lv_coord_t)lroundf(span * 0.25f);         // top/bottom edge horizontal inset (R*cos60)
+  lv_coord_t hh = (lv_coord_t)lroundf(span * 0.8660254f);    // regular hexagon height (= span*sin60)
+  // Place the top/bottom edges by EQUAL margins from each edge (not via a rounded
+  // centre) so the shape is symmetric vertically on even-height boxes too.
+  lv_coord_t m = ((a->y2 - a->y1) - hh) / 2; if (m < 0) m = 0;
+  lv_coord_t ty = a->y1 + m, by = a->y2 - m, cy = (ty + by) / 2;
   lv_point_t pts[6] = {
-    { x2,                    cy },                   // right point
-    { (lv_coord_t)(cx + ex), (lv_coord_t)(cy - ey) },
-    { (lv_coord_t)(cx - ex), (lv_coord_t)(cy - ey) },
-    { x1,                    cy },                   // left point
-    { (lv_coord_t)(cx - ex), (lv_coord_t)(cy + ey) },
-    { (lv_coord_t)(cx + ex), (lv_coord_t)(cy + ey) },
+    { rx,                    cy },                           // right point
+    { (lv_coord_t)(rx - ex), ty },                           // top-right
+    { (lv_coord_t)(lx + ex), ty },                           // top-left
+    { lx,                    cy },                           // left point
+    { (lv_coord_t)(lx + ex), by },                           // bottom-left
+    { (lv_coord_t)(rx - ex), by },                           // bottom-right
   };
   lv_draw_rect_dsc_t d; lv_draw_rect_dsc_init(&d);
   d.bg_color = color; d.bg_opa = LV_OPA_COVER;
@@ -2177,11 +2180,18 @@ static void drawHexBox(lv_draw_ctx_t* ctx, lv_coord_t x1, lv_coord_t y1,
 
 static void hexAvatarDrawCb(lv_event_t* e) {
   lv_obj_t* o = lv_event_get_target(e);
-  if (!lv_obj_has_flag(o, LV_OBJ_FLAG_USER_1)) return;   // only in hexagon (channel) mode
-  lv_area_t a; lv_obj_get_coords(o, &a);                 // exact object box (== where the circle bg fills)
+  if (!lv_obj_has_flag(o, LV_OBJ_FLAG_USER_1)) return;   // only on channel avatars
+  lv_area_t a; lv_obj_get_coords(o, &a);                 // the (channel-color) circle's box
+  lv_coord_t inset = (lv_coord_t)lroundf(lv_area_get_width(&a) * 0.12f);   // channel-color ring
+  lv_area_t hole = { (lv_coord_t)(a.x1 + inset), (lv_coord_t)(a.y1 + inset),
+                     (lv_coord_t)(a.x2 - inset), (lv_coord_t)(a.y2 - inset) };
   lv_draw_ctx_t* ctx = lv_event_get_draw_ctx(e);
-  drawHexBox(ctx, a.x1, a.y1, a.x2, a.y2, lv_color_hex(UI_BG));                                  // 1px outline
-  drawHexBox(ctx, a.x1 + 1, a.y1 + 1, a.x2 - 1, a.y2 - 1, lv_obj_get_style_bg_color(o, LV_PART_MAIN)); // fill
+  lv_color_t bg   = lv_obj_get_style_bg_color(lv_obj_get_parent(o), LV_PART_MAIN);  // the background
+  lv_color_t fill = lv_obj_get_style_border_color(o, LV_PART_MAIN);                 // empty(bg) or user color
+  drawHexBox(ctx, &hole, bg);                            // 1px background outline -> always separates the hole
+  lv_area_t in = { (lv_coord_t)(hole.x1 + 1), (lv_coord_t)(hole.y1 + 1),
+                   (lv_coord_t)(hole.x2 - 1), (lv_coord_t)(hole.y2 - 1) };
+  drawHexBox(ctx, &in, fill);
 }
 
 // Brand a CONTACT avatar: a name-colored circle (chat) or neutral type-glyph
@@ -2200,17 +2210,38 @@ static void brandAvatar(lv_obj_t* circle, lv_obj_t* lbl, const char* sname, uint
   }
 }
 
-// Brand a CHANNEL avatar: a name-colored hexagon with the name's first grapheme
-// (a leading '#' is skipped). Requires hexAvatarDrawCb attached to the avatar.
-static void brandChannelAvatar(lv_obj_t* hex, lv_obj_t* lbl, const char* cname) {
+// The name-colored circle shared by both channel-avatar variants (leading '#' is
+// skipped for the color seed). Requires hexAvatarDrawCb attached to the avatar.
+static void brandChannelCircle(lv_obj_t* hex, const char* cname) {
   const char* nm = cname ? cname : "";
-  while (*nm == '#' || *nm == ' ') nm++;                      // skip the leading '#'
-  char g[8]; firstGrapheme(nm[0] ? nm : cname, g, sizeof(g));
-  lv_label_set_text(lbl, g[0] ? g : "#");
-  lv_obj_set_style_bg_color(hex, lv_color_hex(nameColor(nm[0] ? nm : cname)), 0);
-  lv_obj_set_style_bg_opa(hex, LV_OPA_TRANSP, 0);             // hide the rect; the hexagon is drawn
-  lv_obj_set_style_radius(hex, 0, 0);
-  lv_obj_add_flag(hex, LV_OBJ_FLAG_USER_1);                   // -> hexAvatarDrawCb draws the hexagon
+  while (*nm == '#' || *nm == ' ') nm++;
+  lv_obj_set_style_bg_color(hex, lv_color_hex(nameColor(nm[0] ? nm : cname)), 0);  // channel circle
+  lv_obj_set_style_bg_opa(hex, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(hex, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_border_width(hex, 0, 0);                   // border_color is just the hole-color slot
+  lv_obj_add_flag(hex, LV_OBJ_FLAG_USER_1);                   // -> hexAvatarDrawCb punches the hole
+}
+
+// Plain CHANNEL avatar (branding itself): the channel circle with a background-
+// colored hexagon hole and the CHANNEL's own first letter (leading '#' skipped).
+static void brandChannelAvatar(lv_obj_t* hex, lv_obj_t* lbl, const char* cname) {
+  brandChannelCircle(hex, cname);
+  lv_color_t bg = lv_obj_get_style_bg_color(lv_obj_get_parent(hex), LV_PART_MAIN);  // "show the background"
+  lv_obj_set_style_border_color(hex, bg, 0);
+  if (lbl) {
+    const char* nm = cname ? cname : "";
+    while (*nm == '#' || *nm == ' ') nm++;
+    char g[8]; firstGrapheme(nm[0] ? nm : cname, g, sizeof(g));
+    lv_label_set_text(lbl, g[0] ? g : "#");
+  }
+}
+
+// USER-in-channel avatar (alerts): the channel circle with the hole filled in the
+// USER's name-hash color + the user's letter -- shows that user is in the channel.
+static void brandChannelUserAvatar(lv_obj_t* hex, lv_obj_t* lbl, const char* cname, const char* uname) {
+  brandChannelCircle(hex, cname);
+  lv_obj_set_style_border_color(hex, lv_color_hex(nameColor(uname ? uname : "")), 0);
+  if (lbl) { char g[8]; firstGrapheme(uname ? uname : "", g, sizeof(g)); lv_label_set_text(lbl, g[0] ? g : "?"); }
 }
 
 // A contact reference (<pubkey:type:name>) rendered as its own bordered card box
@@ -3163,20 +3194,7 @@ void UITask::ensureBanner() {
     lv_obj_set_style_border_width(_banner_avatar, 0, 0);
     lv_obj_set_style_pad_all(_banner_avatar, 0, 0);
     lv_obj_clear_flag(_banner_avatar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(_banner_avatar, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel hexagon
-    // Inner circle (channel messages only): the sender's circle layered on the
-    // channel hexagon. Created before the label so the letter stays on top.
-    _banner_inner = lv_obj_create(_banner_avatar);
-    lv_obj_remove_style_all(_banner_inner);
-    lv_obj_set_size(_banner_inner, 26, 26);
-    lv_obj_set_style_radius(_banner_inner, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_opa(_banner_inner, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(_banner_inner, 1, 0);
-    lv_obj_set_style_border_color(_banner_inner, lv_color_hex(UI_BG), 0);   // ring separates it from the hexagon
-    lv_obj_center(_banner_inner);
-    lv_obj_clear_flag(_banner_inner, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(_banner_inner, LV_OBJ_FLAG_HIDDEN);   // shown only for channel messages
-
+    lv_obj_add_event_cb(_banner_avatar, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel hole
     _banner_avatar_lbl = lv_label_create(_banner_avatar);
     lv_obj_center(_banner_avatar_lbl);
     lv_obj_set_style_text_color(_banner_avatar_lbl, lv_color_hex(0xFFFFFF), 0);
@@ -3224,39 +3242,24 @@ void UITask::showBanner(const char* conv_key, const char* sender,
   _banner_key[sizeof(_banner_key) - 1] = 0;
 
   const char* who = (sender && sender[0]) ? sender : "(unknown)";
-  char glyph[8];
-  firstGrapheme(who, glyph, sizeof(glyph));
-  lv_label_set_text(_banner_avatar_lbl, glyph[0] ? glyph : "?");   // always the sender's letter
 
   if (is_channel) {
-    // Channel hexagon (channel color) with the sender's circle layered on top, so
-    // the sender's identity shows but it's clearly a channel message. Channel color
-    // comes from the channel's name, looked up by the conv_key's secret prefix.
-    uint32_t chcol = UI_AVATAR_NEUT;
+    // Channel circle (channel color) with the sender filling the hole (their color
+    // + letter), so it's clearly a channel message AND shows who posted. The channel
+    // name is looked up by the conv_key's secret prefix.
+    char chname[CHAT_PEER_NAME_MAX] = "";
     uint8_t sec6[6];
     if (conv_key && strncmp(conv_key, "ch_", 3) == 0 && mesh::Utils::fromHex(sec6, 6, conv_key + 3)) {
       for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
         ChannelDetails ch;
         if (!mproxy::getChannel(i, ch) || ch.name[0] == 0) continue;
-        if (memcmp(ch.channel.secret, sec6, 6) == 0) {
-          const char* cn = ch.name; while (*cn == '#' || *cn == ' ') cn++;
-          chcol = nameColor(cn[0] ? cn : ch.name);
-          break;
-        }
+        if (memcmp(ch.channel.secret, sec6, 6) == 0) { strncpy(chname, ch.name, sizeof(chname) - 1); break; }
       }
     }
-    lv_obj_add_flag(_banner_avatar, LV_OBJ_FLAG_USER_1);            // hexagon
-    lv_obj_set_style_bg_opa(_banner_avatar, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_radius(_banner_avatar, 0, 0);
-    lv_obj_set_style_bg_color(_banner_avatar, lv_color_hex(chcol), 0);
-    lv_obj_clear_flag(_banner_inner, LV_OBJ_FLAG_HIDDEN);          // sender circle on top
-    lv_obj_set_style_bg_color(_banner_inner, lv_color_hex(nameColor(who)), 0);
+    brandChannelUserAvatar(_banner_avatar, _banner_avatar_lbl, chname[0] ? chname : "#", who);
   } else {
-    lv_obj_clear_flag(_banner_avatar, LV_OBJ_FLAG_USER_1);          // plain sender circle
-    lv_obj_set_style_bg_opa(_banner_avatar, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(_banner_avatar, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(_banner_avatar, lv_color_hex(nameColor(who)), 0);
-    lv_obj_add_flag(_banner_inner, LV_OBJ_FLAG_HIDDEN);
+    char cl[CHAT_PEER_NAME_MAX + 4]; sanitizeForFont(who, cl, sizeof(cl));
+    brandAvatar(_banner_avatar, _banner_avatar_lbl, cl, ADV_TYPE_CHAT);   // plain sender circle
   }
 
   char clean[CHAT_PEER_NAME_MAX + 4];
