@@ -81,8 +81,7 @@ class UITask : public AbstractUITask {
   char            _muted_keys[MUTE_MAX][CHAT_PEER_NAME_MAX];
   int             _muted_count;
   lv_obj_t*       _banner;              // top-layer notification card (reused)
-  lv_obj_t*       _banner_avatar;       // sender circle (DM) / channel hexagon (channel msg)
-  lv_obj_t*       _banner_inner;        // channel msg: sender's circle layered on the hexagon
+  lv_obj_t*       _banner_avatar;       // sender circle (DM) / channel avatar (channel msg)
   lv_obj_t*       _banner_avatar_lbl;   // sender grapheme (on the circle / inner circle)
   lv_obj_t*       _banner_title;        // sender name
   lv_obj_t*       _banner_body;         // 1-line message preview
@@ -839,7 +838,7 @@ public:
       _channels_list(NULL), _status_label(NULL),
       _contacts_dirty(false), _contacts_rebuilt_ms(0),
       _contacts_pending(false), _channels_pending(false),
-      _unread_count(0), _muted_count(0), _banner(NULL), _banner_avatar(NULL), _banner_inner(NULL), _banner_avatar_lbl(NULL),
+      _unread_count(0), _muted_count(0), _banner(NULL), _banner_avatar(NULL), _banner_avatar_lbl(NULL),
       _banner_title(NULL), _banner_body(NULL), _banner_timer(NULL),
       _pending_chime(UIEventType::none),
       _pick_popup(NULL), _pick_search_ta(NULL), _pick_kb(NULL),

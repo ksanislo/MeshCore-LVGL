@@ -1084,7 +1084,7 @@ void UITask::channel_clicked_cb(lv_event_t* e) {
   }
 }
 
-static void hexAvatarDrawCb(lv_event_t* e);                                 // (defined below)
+static void channelAvatarDrawCb(lv_event_t* e);                                 // (defined below)
 static void brandChannelAvatar(lv_obj_t* hex, lv_obj_t* lbl, const char* cname);
 
 void UITask::rebuildChannelsList() {
@@ -1094,7 +1094,7 @@ void UITask::rebuildChannelsList() {
   // "+ New channel" entry: a hollow white circle ring (an empty channel waiting to be
   // created), matching the New Contact placeholder. Same row layout as the channel
   // rows below, so the two pages read consistently. (Channels are circles overall;
-  // the per-channel hexagon brand would be too busy at this size for a placeholder.)
+  // the per-channel circle brand would be too busy at this size for a placeholder.)
   {
     lv_obj_t* row = lv_obj_create(_channels_list);
     lv_obj_remove_style_all(row);
@@ -1136,7 +1136,7 @@ void UITask::rebuildChannelsList() {
 
   // getChannel() returns true for any in-range slot incl. empty ones, so skip
   // slots with no name. The Public channel is added on every boot (MyMesh).
-  // Rows match the contacts list: a name-colored hexagon avatar + the shared red
+  // Rows match the contacts list: a name-colored channel circle + the shared red
   // unread chevron + the name. (Few channels, so plain rows -- no recycler.)
   for (int idx = 0; idx < MAX_GROUP_CHANNELS; idx++) {
     ChannelDetails ch;
@@ -1171,14 +1171,14 @@ void UITask::rebuildChannelsList() {
     lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
     lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(av, LV_OBJ_FLAG_OVERFLOW_VISIBLE);   // let the unread badge sit on/over the ring
-    lv_obj_add_event_cb(av, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);
+    lv_obj_add_event_cb(av, channelAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);
     lv_obj_t* dot = makeUnreadBadge(av);   // envelope badge centred on the top-right ring (before the letter)
     if (!unread) lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
     lv_obj_t* avl = lv_label_create(av);
     lv_obj_center(avl);
     lv_obj_set_style_text_color(avl, lv_color_hex(UI_ON_COLOR), 0);
     lv_obj_set_style_text_font(avl, fontHeading(), 0);
-    brandChannelAvatar(av, avl, ch.name);   // name-colored hexagon
+    brandChannelAvatar(av, avl, ch.name);   // name-colored channel circle
 
     lv_obj_t* nm = lv_label_create(row);
     lv_obj_set_flex_grow(nm, 1);
@@ -2182,12 +2182,6 @@ static bool textHasContactRef(const char* text) {
 // message may contain several cards). Freed on the card's LV_EVENT_DELETE.
 struct CardTarget { uint8_t pubkey[PUB_KEY_SIZE]; uint8_t type; char name[CHAT_PEER_NAME_MAX]; };
 
-// Channel avatar = a name-colored CIRCLE (the object's normal bg) with a hexagon
-// "hole" punched in it. The hole shows the background (an empty channel) or, in a
-// user-in-channel alert, the user's name-hash color + their letter. The circle is
-// drawn by LVGL (bg_color + radius); this hook draws the inner hexagon on top in
-// the obj's BORDER color (used purely as the hole-color slot). Gated by USER_1.
-//
 // Filled circle inscribed in the (square) box `a` -- the inner concentric circle of
 // a channel avatar. (radius = CIRCLE on a square area -> a circle.)
 static void drawCircleBox(lv_draw_ctx_t* ctx, const lv_area_t* a, lv_color_t color) {
@@ -2201,7 +2195,7 @@ static void drawCircleBox(lv_draw_ctx_t* ctx, const lv_area_t* a, lv_color_t col
 // object's own bg) with an inner circle drawn here. For a plain channel the inner
 // circle is the background color (reads as a ring + letter); for a user-in-channel
 // it's the user's color. A 1px background ring separates them when colors are close.
-static void hexAvatarDrawCb(lv_event_t* e) {
+static void channelAvatarDrawCb(lv_event_t* e) {
   lv_obj_t* o = lv_event_get_target(e);
   if (!lv_obj_has_flag(o, LV_OBJ_FLAG_USER_1)) return;   // only on channel avatars
   lv_area_t a; lv_obj_get_coords(o, &a);                 // the (channel-color) outer circle's box
@@ -2218,7 +2212,7 @@ static void hexAvatarDrawCb(lv_event_t* e) {
 }
 
 // Brand a CONTACT avatar: a name-colored circle (chat) or neutral type-glyph
-// circle (repeater/room/sensor). Also resets any prior hexagon (channel) state.
+// circle (repeater/room/sensor). Also resets any prior channel (inner-circle) state.
 static void brandAvatar(lv_obj_t* circle, lv_obj_t* lbl, const char* sname, uint8_t type) {
   lv_obj_clear_flag(circle, LV_OBJ_FLAG_USER_1);              // back to circle mode
   lv_obj_set_style_bg_opa(circle, LV_OPA_COVER, 0);
@@ -2234,19 +2228,19 @@ static void brandAvatar(lv_obj_t* circle, lv_obj_t* lbl, const char* sname, uint
 }
 
 // The name-colored circle shared by both channel-avatar variants (leading '#' is
-// skipped for the color seed). Requires hexAvatarDrawCb attached to the avatar.
+// skipped for the color seed). Requires channelAvatarDrawCb attached to the avatar.
 static void brandChannelCircle(lv_obj_t* hex, const char* cname) {
   const char* nm = cname ? cname : "";
   while (*nm == '#' || *nm == ' ') nm++;
   lv_obj_set_style_bg_color(hex, lv_color_hex(nameColor(nm[0] ? nm : cname)), 0);  // channel circle
   lv_obj_set_style_bg_opa(hex, LV_OPA_COVER, 0);
   lv_obj_set_style_radius(hex, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_border_width(hex, 0, 0);                   // border_color is just the hole-color slot
-  lv_obj_add_flag(hex, LV_OBJ_FLAG_USER_1);                   // -> hexAvatarDrawCb punches the hole
+  lv_obj_set_style_border_width(hex, 0, 0);                   // border_color is just the inner-circle color slot
+  lv_obj_add_flag(hex, LV_OBJ_FLAG_USER_1);                   // -> channelAvatarDrawCb draws the inner circle
 }
 
 // Plain CHANNEL avatar (branding itself): the channel circle with a background-
-// colored hexagon hole and the CHANNEL's own first letter (leading '#' skipped).
+// colored inner circle and the CHANNEL's own first letter (leading '#' skipped).
 static void brandChannelAvatar(lv_obj_t* hex, lv_obj_t* lbl, const char* cname) {
   brandChannelCircle(hex, cname);
   lv_color_t bg = lv_obj_get_style_bg_color(lv_obj_get_parent(hex), LV_PART_MAIN);  // "show the background"
@@ -2599,7 +2593,7 @@ void UITask::updateChatHeader() {
   lv_label_set_text(_chat_title, tname);
 
   if (_chat_is_channel) {
-    brandChannelAvatar(_chat_avatar, _chat_avatar_lbl, shown);   // name-colored hexagon
+    brandChannelAvatar(_chat_avatar, _chat_avatar_lbl, shown);   // name-colored channel circle
     lv_label_set_text(_chat_status, "Channel");
     return;
   }
@@ -2646,7 +2640,7 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_set_style_radius(_chat_avatar, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(_chat_avatar, LV_OPA_COVER, 0);
     lv_obj_clear_flag(_chat_avatar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(_chat_avatar, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel hexagon
+    lv_obj_add_event_cb(_chat_avatar, channelAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel inner circle
     _chat_avatar_lbl = lv_label_create(_chat_avatar);
     lv_obj_center(_chat_avatar_lbl);
     lv_obj_set_style_text_color(_chat_avatar_lbl, lv_color_hex(UI_ON_COLOR), 0);
@@ -3235,7 +3229,7 @@ void UITask::ensureBanner() {
     lv_obj_set_style_border_width(_banner_avatar, 0, 0);
     lv_obj_set_style_pad_all(_banner_avatar, 0, 0);
     lv_obj_clear_flag(_banner_avatar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(_banner_avatar, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel hole
+    lv_obj_add_event_cb(_banner_avatar, channelAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel inner circle
     _banner_avatar_lbl = lv_label_create(_banner_avatar);
     lv_obj_center(_banner_avatar_lbl);
     lv_obj_set_style_text_color(_banner_avatar_lbl, lv_color_hex(UI_ON_COLOR), 0);
@@ -3477,7 +3471,7 @@ static void makeHeroCard(lv_obj_t* parent, lv_obj_t** avatarOut, lv_obj_t** avat
   lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
   lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(av, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel hexagon support
+  lv_obj_add_event_cb(av, channelAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel inner-circle support
   lv_obj_t* avl = lv_label_create(av);
   lv_obj_center(avl);
   lv_obj_set_style_text_color(avl, lv_color_hex(UI_ON_COLOR), 0);
@@ -4531,7 +4525,7 @@ static bool uriParam(const char* uri, const char* key, char* out, size_t cap) {
   return true;
 }
 
-// ===== Channel Details page (hexagon hero + editable name + key) =========
+// ===== Channel Details page (circle hero + editable name + key) =========
 void UITask::buildChannelInfoScreen() {
   if (_chinfo_screen) return;
   _chinfo_screen = lv_obj_create(NULL);
@@ -4616,7 +4610,7 @@ void UITask::commitChannelName() {
   cmd.path_len = sizeof(_chinfo_secret);
   strncpy(cmd.name, _chinfo_name, sizeof(cmd.name) - 1);
   mproxy::postCommand(cmd);
-  populateChannelInfo();   // refresh title + hexagon (name-seeded color may change)
+  populateChannelInfo();   // refresh title + avatar (name-seeded color may change)
 }
 
 void UITask::chinfo_back_cb(lv_event_t* e) {
@@ -4694,7 +4688,7 @@ void UITask::buildNewChannelScreen() {
   lv_obj_set_style_pad_row(body, 8, 0);
   lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
 
-  // Live hexagon hero (branded like a built channel) -- updates as the name is typed.
+  // Live circle hero (branded like a built channel) -- updates as the name is typed.
   makeHeroCard(body, &_newchan_hero_av, &_newchan_hero_avl, &_newchan_hero_nm, &_newchan_hero_key, newchan_key_cb);
 
   lv_obj_t* fn = makeField(body, "Name");
@@ -4738,7 +4732,7 @@ void UITask::openNewChannel() {
   lv_scr_load(_newchan_screen);
 }
 
-// Live hexagon hero + "Public channel" key handling. Auto-checks Public for the
+// Live circle hero + "Public channel" key handling. Auto-checks Public for the
 // name "Public"; when public, derives the key from the name and shows it read-only.
 void UITask::refreshNewChannelHero() {
   if (!_newchan_hero_nm) return;
