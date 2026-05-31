@@ -343,11 +343,15 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _pinset_ta2;
   lv_obj_t*       _pinset_err;
   lv_obj_t*       _pinset_kb;
-  // Lock overlay (PIN entry). Lazily built; _locked gates the whole UI.
+  // Lock overlay (keypad PIN entry). Lazily built; _locked gates the whole UI.
+  static const int LOCK_PIN_MAX = 6;       // PINs are 4-6 digits
+  static const intptr_t LOCK_KEY_CLEAR = -1;
+  static const intptr_t LOCK_KEY_DEL   = -2;
   lv_obj_t*       _lock_screen;
-  lv_obj_t*       _lock_pin_ta;
   lv_obj_t*       _lock_err;
-  lv_obj_t*       _lock_kb;
+  lv_obj_t*       _lock_dot[LOCK_PIN_MAX]; // entered-digit indicators
+  char            _lock_entry[LOCK_PIN_MAX + 1];
+  int             _lock_len;
   bool            _locked;
   lv_obj_t*       _confirm_popup;       // share-position warning modal (top layer)
   lv_obj_t*       _joinch_popup;        // "Add channel #name?" confirm modal
@@ -780,11 +784,11 @@ private:
   static void pinset_kb_event_cb(lv_event_t* e);
   // PIN lock screen
   void      buildLockScreen();
-  void      showLock();                              // lock now (overlay PIN entry)
+  void      showLock();                              // lock now (overlay keypad entry)
+  void      updateLockDots();                        // refresh the entered-digit indicators
+  lv_obj_t* makeLockKey(lv_obj_t* grid, const char* text, intptr_t tag, lv_coord_t d);
   static void lock_now_cb(lv_event_t* e);
-  static void lock_unlock_cb(lv_event_t* e);
-  static void lock_ta_event_cb(lv_event_t* e);
-  static void lock_kb_event_cb(lv_event_t* e);
+  static void lock_key_cb(lv_event_t* e);            // a keypad key press
   static void set_shareme_cb(lv_event_t* e);         // export own contact as QR
   void      showSharePosWarning();
   static void profile_key_cb(lv_event_t* e);   // owner hero key line -> long-press copy
@@ -913,7 +917,7 @@ public:
       _set_gps_chk(NULL), _set_gps_interval_ta(NULL),
       _set_radio_sw(NULL),
       _pinset_popup(NULL), _pinset_ta1(NULL), _pinset_ta2(NULL), _pinset_err(NULL), _pinset_kb(NULL),
-      _lock_screen(NULL), _lock_pin_ta(NULL), _lock_err(NULL), _lock_kb(NULL), _locked(false),
+      _lock_screen(NULL), _lock_err(NULL), _lock_len(0), _locked(false),
       _confirm_popup(NULL), _joinch_popup(NULL), _joinch_lbl(NULL),
       _info_popup(NULL), _info_title_lbl(NULL), _info_body_lbl(NULL),
       _keypop_popup(NULL), _keypop_lbl(NULL), _keypop_hex{},

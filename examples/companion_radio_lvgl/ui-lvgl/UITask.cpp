@@ -122,7 +122,7 @@ void UITask::dismiss_kb_cb(lv_event_t* e) {
   UITask* s = _instance;
   if (s->_chat_keyboard && lv_scr_act() == s->_chat_screen) s->layoutChatBody(false);  // also restores chat layout
   lv_obj_t* kbs[] = { s->_set_kb, s->_cinfo_kb, s->_path_kb, s->_newchan_kb, s->_login_kb,
-                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_lock_kb, s->_profile_kb };
+                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_profile_kb };
   for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -3411,7 +3411,7 @@ void UITask::ta_done_cb(lv_event_t* e) {
   lv_event_send(ta, LV_EVENT_DEFOCUSED, NULL);   // run the field's commit-on-defocus
   lv_obj_clear_state(ta, LV_STATE_FOCUSED);
   lv_obj_t* kbs[] = { s->_set_kb, s->_cinfo_kb, s->_path_kb, s->_newchan_kb, s->_login_kb,
-                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_lock_kb, s->_profile_kb };
+                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_profile_kb };
   for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -7562,7 +7562,7 @@ void UITask::applyTheme(const UiPalette& pal) {
   if (_banner) { lv_obj_del(_banner); _banner = NULL; }
   ensureBanner();                                                  // rebuild now, themed (keeps the fast first frame)
   if (_toast) { lv_obj_del(_toast); _toast = NULL; }               // rebuilt on next showToast
-  if (_lock_screen) { lv_obj_del(_lock_screen); _lock_screen = NULL; _lock_kb = NULL; }  // rebuilt on next lock
+  if (_lock_screen) { lv_obj_del(_lock_screen); _lock_screen = NULL; _lock_err = NULL; }  // rebuilt on next lock
   if (_tabview) lv_tabview_set_act(_tabview, 2, LV_ANIM_OFF);       // stay on the Settings tab
   lv_scr_load(_home_screen);
   // Deferred: applyTheme runs from the theme dropdown's own event callback, and the
@@ -7884,6 +7884,72 @@ void UITask::lock_now_cb(lv_event_t* e) {
   _instance->showLock();
 }
 
+// Refresh the row of PIN dots: as many dots as the stored PIN is long, the first
+// `_lock_len` of them filled (accent), the rest hollow (border only).
+void UITask::updateLockDots() {
+  if (!_node_prefs) return;
+  int total = (int)strlen(_node_prefs->lock_pin);
+  if (total > LOCK_PIN_MAX) total = LOCK_PIN_MAX;
+  for (int i = 0; i < LOCK_PIN_MAX; i++) {
+    if (!_lock_dot[i]) continue;
+    if (i >= total) { lv_obj_add_flag(_lock_dot[i], LV_OBJ_FLAG_HIDDEN); continue; }
+    lv_obj_clear_flag(_lock_dot[i], LV_OBJ_FLAG_HIDDEN);
+    bool filled = (i < _lock_len);
+    lv_obj_set_style_bg_opa(_lock_dot[i], filled ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(_lock_dot[i], lv_color_hex(UI_ACCENT), 0);
+    lv_obj_set_style_border_color(_lock_dot[i], lv_color_hex(filled ? UI_ACCENT : UI_BORDER), 0);
+  }
+}
+
+// A keypad press: digits append to _lock_entry, the bottom-left key clears, the
+// bottom-right backspaces. On reaching the PIN length we check it automatically.
+void UITask::lock_key_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  UITask* s = _instance;
+  intptr_t tag = (intptr_t)lv_obj_get_user_data(lv_event_get_current_target(e));
+  lv_obj_add_flag(s->_lock_err, LV_OBJ_FLAG_HIDDEN);   // any key clears the error
+  if (tag == LOCK_KEY_CLEAR) {
+    s->_lock_len = 0;
+  } else if (tag == LOCK_KEY_DEL) {
+    if (s->_lock_len > 0) s->_lock_len--;
+  } else {                                              // a digit '0'..'9'
+    if (s->_lock_len < LOCK_PIN_MAX) s->_lock_entry[s->_lock_len++] = (char)tag;
+  }
+  s->_lock_entry[s->_lock_len] = 0;
+  s->updateLockDots();
+
+  int target = (int)strlen(s->_node_prefs->lock_pin);
+  if (s->_lock_len >= target && target > 0) {          // full-length entry -> verify
+    if (strcmp(s->_lock_entry, s->_node_prefs->lock_pin) == 0) {
+      s->_locked = false;
+      s->_lock_len = 0; s->_lock_entry[0] = 0;
+      lv_obj_add_flag(s->_lock_screen, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_label_set_text(s->_lock_err, "Wrong PIN");
+      lv_obj_clear_flag(s->_lock_err, LV_OBJ_FLAG_HIDDEN);
+      s->_lock_len = 0; s->_lock_entry[0] = 0;
+      s->updateLockDots();
+    }
+  }
+}
+
+// One keypad key: a fixed-size rounded button with a big centered glyph, tagged so
+// lock_key_cb knows what it does. `tag` is the digit char, or LOCK_KEY_*.
+lv_obj_t* UITask::makeLockKey(lv_obj_t* grid, const char* text, intptr_t tag, lv_coord_t d) {
+  lv_obj_t* b = lv_btn_create(grid);
+  lv_obj_set_size(b, d, d);
+  lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(b, lv_color_hex(UI_SURFACE), 0);
+  lv_obj_set_style_bg_color(b, lv_color_hex(UI_ACCENT), LV_STATE_PRESSED);
+  lv_obj_set_user_data(b, (void*)tag);
+  lv_obj_add_event_cb(b, lock_key_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* l = lv_label_create(b);
+  lv_label_set_text(l, text);
+  lv_obj_set_style_text_font(l, fontHeading(), 0);
+  lv_obj_center(l);
+  return b;
+}
+
 void UITask::buildLockScreen() {
   if (_lock_screen) return;
   _lock_screen = lv_obj_create(lv_layer_top());   // opaque full-screen overlay; blocks the UI
@@ -7897,99 +7963,71 @@ void UITask::buildLockScreen() {
   lv_obj_clear_flag(_lock_screen, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(_lock_screen, LV_OBJ_FLAG_HIDDEN);
 
-  lv_obj_t* card = lv_obj_create(_lock_screen);
-  lv_obj_set_width(card, LV_PCT(80));
-  lv_obj_set_height(card, LV_SIZE_CONTENT);
-  lv_obj_align(card, LV_ALIGN_TOP_MID, 0, HEADER_H + 8);
-  lv_obj_set_style_bg_color(card, lv_color_hex(UI_SURFACE), 0);
-  lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
-  lv_obj_set_style_radius(card, 8, 0);
-  lv_obj_set_style_border_width(card, 0, 0);
-  lv_obj_set_style_pad_all(card, 12, 0);
-  lv_obj_set_style_pad_row(card, 8, 0);
-  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+  // Centered column: lock glyph, dot row, keypad, error line. No text box.
+  lv_obj_t* col = lv_obj_create(_lock_screen);
+  lv_obj_remove_style_all(col);
+  lv_obj_set_width(col, LV_SIZE_CONTENT);
+  lv_obj_set_height(col, LV_SIZE_CONTENT);
+  lv_obj_center(col);
+  lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_row(col, 14, 0);
+  lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
 
-  lv_obj_t* title = lv_label_create(card);
-  lv_label_set_text(title, LV_SYMBOL_SETTINGS "  Locked - enter PIN");
+  lv_obj_t* title = lv_label_create(col);
+  lv_label_set_text(title, LV_SYMBOL_SETTINGS "  Locked");
   lv_obj_set_style_text_color(title, lv_color_hex(FG_HEX), 0);
   lv_obj_set_style_text_font(title, fontHeading(), 0);
 
-  lv_obj_t* row = lv_obj_create(card);
-  lv_obj_set_width(row, LV_PCT(100));
-  lv_obj_set_height(row, LV_SIZE_CONTENT);
-  lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(row, 0, 0);
-  lv_obj_set_style_pad_all(row, 0, 0);
-  lv_obj_set_style_pad_column(row, 6, 0);
-  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  _lock_pin_ta = makeSelTextarea(row);
-  lv_textarea_set_one_line(_lock_pin_ta, true); lv_obj_add_event_cb(_lock_pin_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
-  lv_textarea_set_max_length(_lock_pin_ta, 6);
-  lv_textarea_set_accepted_chars(_lock_pin_ta, "0123456789");
-  lv_obj_set_flex_grow(_lock_pin_ta, 1);
-  lv_obj_add_event_cb(_lock_pin_ta, lock_ta_event_cb, LV_EVENT_ALL, NULL);
-  attachInlineEye(_lock_pin_ta);   // hidden by default + eye toggle
-  lv_obj_t* ok = lv_btn_create(row);
-  lv_obj_add_event_cb(ok, lock_unlock_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* okl = lv_label_create(ok);
-  lv_label_set_text(okl, LV_SYMBOL_OK);
-  lv_obj_center(okl);
+  // Dot indicators (count of digits entered) -- one per PIN digit, filled as typed.
+  lv_obj_t* dots = lv_obj_create(col);
+  lv_obj_remove_style_all(dots);
+  lv_obj_set_size(dots, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(dots, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(dots, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(dots, 12, 0);
+  lv_obj_clear_flag(dots, LV_OBJ_FLAG_SCROLLABLE);
+  for (int i = 0; i < LOCK_PIN_MAX; i++) {
+    lv_obj_t* dot = lv_obj_create(dots);
+    lv_obj_remove_style_all(dot);
+    lv_obj_set_size(dot, 16, 16);
+    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(dot, 2, 0);
+    lv_obj_set_style_border_color(dot, lv_color_hex(UI_BORDER), 0);
+    lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    _lock_dot[i] = dot;
+  }
 
-  _lock_err = lv_label_create(card);
+  // 3x4 keypad: 1-9, then [clear, 0, backspace]. Big round keys, sized to the screen.
+  lv_coord_t kd = (lv_coord_t)((_screen_w < _screen_h ? _screen_w : _screen_h) / 6);
+  if (kd < 48) kd = 48; if (kd > 72) kd = 72;
+  lv_obj_t* grid = lv_obj_create(col);
+  lv_obj_remove_style_all(grid);
+  lv_obj_set_size(grid, kd * 3 + 24, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+  lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_row(grid, 10, 0);
+  lv_obj_set_style_pad_column(grid, 10, 0);
+  lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+  for (int n = 1; n <= 9; n++) { char t[2] = { (char)('0' + n), 0 }; makeLockKey(grid, t, '0' + n, kd); }
+  makeLockKey(grid, LV_SYMBOL_CLOSE, LOCK_KEY_CLEAR, kd);   // clear all
+  makeLockKey(grid, "0", '0', kd);
+  makeLockKey(grid, LV_SYMBOL_BACKSPACE, LOCK_KEY_DEL, kd); // delete one
+
+  _lock_err = lv_label_create(col);
   lv_label_set_text(_lock_err, "");
   lv_obj_set_style_text_color(_lock_err, lv_color_hex(UI_ERROR), 0);
   lv_obj_add_flag(_lock_err, LV_OBJ_FLAG_HIDDEN);
-
-  _lock_kb = lv_keyboard_create(_lock_screen);
-  lv_keyboard_set_mode(_lock_kb, LV_KEYBOARD_MODE_NUMBER);
-  lv_obj_add_event_cb(_lock_kb, lock_kb_event_cb, LV_EVENT_ALL, NULL);
-  lv_obj_add_flag(_lock_kb, LV_OBJ_FLAG_HIDDEN);
 }
 
 void UITask::showLock() {
   buildLockScreen();
   _locked = true;
-  lv_textarea_set_text(_lock_pin_ta, "");
+  _lock_len = 0; _lock_entry[0] = 0;
+  updateLockDots();
   lv_obj_add_flag(_lock_err, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(_lock_kb, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(_lock_screen, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(_lock_screen);
-}
-
-void UITask::lock_unlock_cb(lv_event_t* e) {
-  (void)e;
-  if (!_instance || !_instance->_node_prefs) return;
-  const char* entered = lv_textarea_get_text(_instance->_lock_pin_ta);
-  if (entered && strcmp(entered, _instance->_node_prefs->lock_pin) == 0) {
-    _instance->_locked = false;
-    lv_obj_add_flag(_instance->_lock_kb, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(_instance->_lock_screen, LV_OBJ_FLAG_HIDDEN);
-  } else {
-    lv_label_set_text(_instance->_lock_err, "Wrong PIN");
-    lv_obj_clear_flag(_instance->_lock_err, LV_OBJ_FLAG_HIDDEN);
-    lv_textarea_set_text(_instance->_lock_pin_ta, "");
-  }
-}
-
-void UITask::lock_ta_event_cb(lv_event_t* e) {
-  if (!_instance) return;
-  if (lv_event_get_code(e) == LV_EVENT_FOCUSED || lv_event_get_code(e) == LV_EVENT_CLICKED) {
-    lv_keyboard_set_textarea(_instance->_lock_kb, _instance->_lock_pin_ta);
-    lv_keyboard_set_mode(_instance->_lock_kb, LV_KEYBOARD_MODE_NUMBER);
-    lv_obj_clear_flag(_instance->_lock_kb, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_align(_instance->_lock_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_move_foreground(_instance->_lock_kb);
-  }
-}
-
-void UITask::lock_kb_event_cb(lv_event_t* e) {
-  if (!_instance) return;
-  lv_event_code_t code = lv_event_get_code(e);
-  if (code == LV_EVENT_READY) lock_unlock_cb(e);        // "enter" tries to unlock
-  else if (code == LV_EVENT_CANCEL) lv_obj_add_flag(_instance->_lock_kb, LV_OBJ_FLAG_HIDDEN);
 }
 
 void UITask::set_shareme_cb(lv_event_t* e) {
@@ -8288,6 +8326,10 @@ void UITask::loop() {
   if (timeout_s && !_display_off && idle_ms > (uint32_t)timeout_s * 1000) {
     board_set_backlight(0);
     _display_off = true;
+    // Auto-lock on sleep: if a PIN is set, raise the lock now so the screen is
+    // locked behind the keypad on wake. (No PIN = never auto-locks = the safety.)
+    const char* pin = _node_prefs ? _node_prefs->lock_pin : nullptr;
+    if (!_locked && pin && strlen(pin) >= 4) showLock();
   }
   // While the screen is off, skip the clock repaint and list rebuilds: nothing is
   // visible, and a per-second clock update would needlessly invalidate + flush.
