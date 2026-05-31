@@ -1812,6 +1812,38 @@ static const lv_font_t* fontCaption() { return withEmoji(&lv_font_montserrat_12)
 // labelSelToLogical() (defined with the selection controller).
 static const uint32_t MSG_FG_TEXT = 0xF3F4F6;
 static const uint32_t MSG_MENTION  = 0x34D399;  // emerald-400; reads on gray + blue bubbles
+static const uint32_t MSG_HASHTAG  = 0x60A5FA;  // blue-400 (UI_ACCENT); #channel tags
+
+// Public #hashtag channel key derivation -- matches the Flutter client's
+// Channel.derivePskFromHashtag(): PSK = SHA256("#" + name)[0:16] (AES-128), and
+// the on-air channel id = SHA256(psk)[0]. `name` is the bare tag (no '#').
+static void deriveHashtagPsk(const char* name, uint8_t psk[16]) {
+  char buf[80];
+  snprintf(buf, sizeof(buf), "#%s", name ? name : "");
+  mesh::Utils::sha256(psk, 16, (const uint8_t*)buf, (int)strlen(buf));
+}
+
+// A '#hashtag' is a '#' at a word boundary (start, or preceded by a non-alnum)
+// followed by >=1 tag char [A-Za-z0-9_-]. Returns the '#' and sets *name_end to
+// the char past the tag; nullptr if none from `p` onward. `base` = string start.
+static const char* findHashtag(const char* p, const char* base, const char** name_end) {
+  for (const char* q = p; *q; q++) {
+    if (*q != '#') continue;
+    if (q != base && isalnum((unsigned char)q[-1])) continue;   // not a word boundary
+    const char* e = q + 1;
+    while (*e && (isalnum((unsigned char)*e) || *e == '_' || *e == '-')) e++;
+    if (e == q + 1) continue;   // '#' with no tag chars -> literal '#'
+    *name_end = e;
+    return q;
+  }
+  return nullptr;
+}
+
+// Frees the logical-source copy stashed on a message label (for chip tap resolution).
+static void msglabel_free_cb(lv_event_t* e) {
+  void* p = lv_obj_get_user_data(lv_event_get_target(e));
+  if (p) lv_mem_free(p);
+}
 
 // Append [s,len) to the markup writer, escaping '#' -> '##'. `w` advances; never
 // overruns `end` (leaves room for a trailing NUL).
@@ -1834,19 +1866,39 @@ static void addMessageText(lv_obj_t* bubble, const char* text) {
   char* end = markup + sizeof(markup);
   const char* p = clean;
   while (*p && w < end - 16) {
+    // Find the earliest interactive token from here: an @[name] mention or a
+    // #hashtag channel tag. Emit the plain run before it, then the colored chip.
     const char* at = strstr(p, "@[");
-    if (!at) { appendEscaped(w, end, p, strlen(p)); break; }
-    appendEscaped(w, end, p, at - p);                 // plain run before mention
-    const char* close = strchr(at + 2, ']');
-    if (!close) { appendEscaped(w, end, at, strlen(at)); break; }  // malformed -> literal
-    // Mention: "#34D399 @name#". The closing '#' is always followed by plain text
-    // (or end), so it never collides with a following color command.
-    int wrote = snprintf(w, end - w, "#%06X @", (unsigned)MSG_MENTION);
-    if (wrote < 0 || wrote >= end - w) break;          // out of room -> stop (never advance past end)
-    w += wrote;
-    appendEscaped(w, end, at + 2, close - (at + 2));  // the username (escaped)
-    if (w < end - 1) *w++ = '#';                      // close color region
-    p = close + 1;
+    const char* atclose = at ? strchr(at + 2, ']') : nullptr;
+    if (at && !atclose) at = nullptr;                  // malformed mention -> treat as plain
+    const char* htend = nullptr;
+    const char* ht = findHashtag(p, clean, &htend);
+    const char* tok = at;
+    bool is_mention = (at != nullptr);
+    if (ht && (!tok || ht < tok)) { tok = ht; is_mention = false; }
+    if (!tok) { appendEscaped(w, end, p, strlen(p)); break; }   // no more tokens
+
+    appendEscaped(w, end, p, tok - p);                 // plain run before the token
+    if (is_mention) {
+      // "#34D399 @name#" -- closing '#' is always followed by plain text/end.
+      int wrote = snprintf(w, end - w, "#%06X @", (unsigned)MSG_MENTION);
+      if (wrote < 0 || wrote >= end - w) break;
+      w += wrote;
+      appendEscaped(w, end, at + 2, atclose - (at + 2));   // username
+      if (w < end - 1) *w++ = '#';
+      p = atclose + 1;
+    } else {
+      // A literal '#' can't live inside a recolor span (it closes the color), so
+      // render the '#' in the default color, then the name in the tag color:
+      // "##" (literal '#') + "#RRGGBB name#".
+      appendEscaped(w, end, "#", 1);                       // -> "##" = one literal '#'
+      int wrote = snprintf(w, end - w, "#%06X ", (unsigned)MSG_HASHTAG);
+      if (wrote < 0 || wrote >= end - w) break;
+      w += wrote;
+      appendEscaped(w, end, tok + 1, htend - (tok + 1));   // the tag name (without '#')
+      if (w < end - 1) *w++ = '#';
+      p = htend;
+    }
   }
   *w = 0;
 
@@ -1857,96 +1909,96 @@ static void addMessageText(lv_obj_t* bubble, const char* text) {
   lv_obj_set_style_text_font(lbl, msgFont(), 0);            // emoji/unicode-capable
   lv_obj_set_style_text_color(lbl, lv_color_hex(MSG_FG_TEXT), 0);  // default (non-recolored) color
   lv_label_set_text(lbl, markup);
-}
 
-// Resolved @mention targets, stashed on a bubble's user_data so a tap can open
-// the contact(s) without re-parsing. Freed on the bubble's LV_EVENT_DELETE.
-static const int MENTION_MAX = 6;
-struct MentionTargets {
-  int     count;
-  uint8_t keys[MENTION_MAX][PUB_KEY_SIZE];
-  char    names[MENTION_MAX][CHAT_PEER_NAME_MAX];
-};
-
-void UITask::attachMentions(lv_obj_t* bubble, const char* text) {
-  MentionTargets t;
-  t.count = 0;
-  const char* p = text;
-  while (*p && t.count < MENTION_MAX) {
-    const char* at = strstr(p, "@[");
-    if (!at) break;
-    const char* close = strchr(at + 2, ']');
-    if (!close) break;
-    int nlen = (int)(close - (at + 2));
-    if (nlen > 0 && nlen < (int)CHAT_PEER_NAME_MAX) {
-      char nm[CHAT_PEER_NAME_MAX];
-      memcpy(nm, at + 2, nlen);
-      nm[nlen] = 0;
-      int total = mproxy::getNumContacts();
-      ContactInfo c;
-      for (int ci = 0; ci < total; ci++) {
-        if (!mproxy::getContactByIdx(ci, c)) continue;
-        if ((int)strlen(c.name) == nlen && strncmp(c.name, nm, nlen) == 0) {
-          bool dup = false;
-          for (int i = 0; i < t.count; i++)
-            if (memcmp(t.keys[i], c.id.pub_key, PUB_KEY_SIZE) == 0) { dup = true; break; }
-          if (!dup) {
-            memcpy(t.keys[t.count], c.id.pub_key, PUB_KEY_SIZE);
-            strncpy(t.names[t.count], c.name, CHAT_PEER_NAME_MAX - 1);
-            t.names[t.count][CHAT_PEER_NAME_MAX - 1] = 0;
-            t.count++;
-          }
-          break;
-        }
-      }
+  // If the run has tappable tokens (@mention / #hashtag), stash the logical source
+  // on the label so a tap can resolve the exact chip under the finger (per-chip,
+  // no picker). Plain runs store nothing. Freed on the label's LV_EVENT_DELETE.
+  const char* htmp = nullptr;
+  if (strstr(clean, "@[") || findHashtag(clean, clean, &htmp)) {
+    size_t n = strlen(clean);
+    char* src = (char*)lv_mem_alloc(n + 1);
+    if (src) {
+      memcpy(src, clean, n + 1);
+      lv_obj_set_user_data(lbl, src);
+      lv_obj_add_event_cb(lbl, msglabel_free_cb, LV_EVENT_DELETE, NULL);
     }
-    p = close + 1;
   }
-  if (t.count == 0) return;
-  MentionTargets* heap = (MentionTargets*)lv_mem_alloc(sizeof(MentionTargets));
-  if (!heap) return;
-  *heap = t;
-  lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_set_user_data(bubble, heap);
-  lv_obj_add_event_cb(bubble, mention_bubble_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_add_event_cb(bubble, mention_free_cb, LV_EVENT_DELETE, NULL);
 }
 
-void UITask::mention_free_cb(lv_event_t* e) {
-  MentionTargets* t = (MentionTargets*)lv_obj_get_user_data(lv_event_get_target(e));
-  if (t) lv_mem_free(t);
+// Chips (@mentions / #hashtags) are resolved per-tap by hit-testing the touched
+// character against the message's source text -- see resolveChip() + sel_event_cb.
+// No bubble-level collection or picker: you tap the exact chip you want.
+
+// Tap a #hashtag: open the public channel if we already have it (matched by the
+// derived secret), otherwise offer to join it.
+void UITask::openOrJoinHashtag(const char* name) {
+  uint8_t psk[16]; deriveHashtagPsk(name, psk);
+  char convkey[20]; convkey[0] = 'c'; convkey[1] = 'h'; convkey[2] = '_';
+  mesh::Utils::toHex(convkey + 3, psk, 6);          // ch_ + first 6 bytes of the secret
+  if (openConversationByKey(convkey)) return;       // already joined -> open it
+  strncpy(_joinch_name, name, sizeof(_joinch_name) - 1);
+  _joinch_name[sizeof(_joinch_name) - 1] = 0;
+  memcpy(_joinch_psk, psk, 16);
+  showJoinChannel(name);
 }
 
-void UITask::mention_pick_cb(lv_event_t* e) {
+void UITask::showJoinChannel(const char* name) {
+  if (!_joinch_popup) {
+    lv_obj_t* card = makeModalCard(&_joinch_popup, NULL);
+    _joinch_lbl = lv_label_create(card);
+    lv_label_set_long_mode(_joinch_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(_joinch_lbl, LV_PCT(100));
+    lv_obj_set_style_text_color(_joinch_lbl, lv_color_hex(UI_FG_BRIGHT), 0);
+
+    lv_obj_t* btns = lv_obj_create(card);
+    lv_obj_set_width(btns, LV_PCT(100));
+    lv_obj_set_height(btns, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(btns, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btns, 0, 0);
+    lv_obj_set_style_pad_all(btns, 0, 0);
+    lv_obj_set_style_pad_column(btns, 8, 0);
+    lv_obj_clear_flag(btns, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t* cancel = lv_btn_create(btns);
+    lv_obj_add_event_cb(cancel, joinch_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* cl = lv_label_create(cancel);
+    lv_label_set_text(cl, "Cancel");
+
+    lv_obj_t* ok = lv_btn_create(btns);
+    lv_obj_set_style_bg_color(ok, lv_color_hex(UI_PRIMARY), 0);
+    lv_obj_add_event_cb(ok, joinch_join_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* okl = lv_label_create(ok);
+    lv_label_set_text(okl, LV_SYMBOL_OK " Join");
+  }
+  char q[CHAT_PEER_NAME_MAX + 48];
+  snprintf(q, sizeof(q), "Join the public channel #%s?", name);
+  lv_label_set_text(_joinch_lbl, q);
+  lv_obj_clear_flag(_joinch_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_joinch_popup);
+}
+
+void UITask::joinch_cancel_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance && _instance->_joinch_popup) lv_obj_add_flag(_instance->_joinch_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::joinch_join_cb(lv_event_t* e) {
+  (void)e;
   if (!_instance) return;
-  uint32_t key = (uint32_t)(uintptr_t)lv_obj_get_user_data(lv_event_get_target(e));
-  uint8_t pfx[4];
-  memcpy(pfx, &key, 4);
-  const ContactInfo* c = mproxy::lookupContactByPubKey(pfx, 4);
-  _instance->closeMenuPopup();
-  if (c) _instance->openContactInfo(c->id.pub_key, _instance->_chat_screen);
-}
-
-void UITask::mention_bubble_cb(lv_event_t* e) {
-  if (!_instance) return;
-  if (_instance->_sel.state != SS_IDLE) return;   // a long-press started a text selection
-  MentionTargets* t = (MentionTargets*)lv_obj_get_user_data(lv_event_get_target(e));
-  if (!t || t->count == 0) return;
-  if (t->count == 1) {
-    _instance->openContactInfo(t->keys[0], _instance->_chat_screen);
-    return;
-  }
-  lv_obj_t* list = _instance->ensureMenuPopup();
-  for (int i = 0; i < t->count; i++) {
-    char nm[CHAT_PEER_NAME_MAX + 4];
-    sanitizeForFont(t->names[i], nm, sizeof(nm));
-    lv_obj_t* b = lv_list_add_btn(list, LV_SYMBOL_BELL, nm);
-    uint32_t key = 0;
-    memcpy(&key, t->keys[i], 4);
-    lv_obj_set_user_data(b, (void*)(uintptr_t)key);
-    lv_obj_add_event_cb(b, mention_pick_cb, LV_EVENT_CLICKED, NULL);
-  }
-  _instance->showMenuPopup();
+  char chname[CHAT_PEER_NAME_MAX];
+  snprintf(chname, sizeof(chname), "#%s", _instance->_joinch_name);   // stored/displayed with the '#'
+  mproxy::MeshCmd cmd{};
+  cmd.kind = mproxy::CmdKind::AddChannel;
+  strncpy(cmd.name, chname, sizeof(cmd.name) - 1);
+  memcpy(cmd.path, _instance->_joinch_psk, 16);
+  cmd.path_len = 16;
+  mproxy::postCommand(cmd);
+  if (_instance->_joinch_popup) lv_obj_add_flag(_instance->_joinch_popup, LV_OBJ_FLAG_HIDDEN);
+  char toast[CHAT_PEER_NAME_MAX + 16];
+  snprintf(toast, sizeof(toast), "Joined #%s", _instance->_joinch_name);
+  _instance->showToast(toast);   // appears in the channels list on the next snapshot
 }
 
 // Case-insensitive substring test (ASCII), for in-conversation search.
@@ -2299,10 +2351,10 @@ void UITask::rebuildChatHistory() {
         lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);  // tap to resend
         lv_obj_set_user_data(bubble, (void*)m);
         lv_obj_add_event_cb(bubble, chat_resend_cb, LV_EVENT_CLICKED, NULL);
-      } else {
-        attachMentions(bubble, m->text);
       }
     }
+    // @mention / #hashtag chips are resolved per-tap on the text label itself
+    // (makeLabelSelectable wires sel_event_cb -> resolveChip).
 
     // Make every text run in the bubble selectable (cards are wired in
     // buildContactCard). Long-press a label -> drag-select -> Copy.
@@ -5842,6 +5894,80 @@ uint32_t UITask::labelCharAt(lv_obj_t* lbl, lv_point_t abs_pt) {
   return lv_label_get_letter_on(lbl, &rel);
 }
 
+// ----- Chip tap resolution -------------------------------------------------
+// UTF-8 codepoints in [s, e).
+static uint32_t cpCount(const char* s, const char* e) {
+  uint32_t n = 0;
+  while (s < e) { unsigned char c = (unsigned char)*s; s += (c >= 0xF0) ? 4 : (c >= 0xE0) ? 3 : (c >= 0xC0) ? 2 : 1; n++; }
+  return n;
+}
+
+// Map a markup char-id (what lv_label_get_letter_on returns -- codepoint index
+// including recolor command chars) to a LOGICAL offset (count of visible
+// codepoints before it), i.e. an index into the displayed text.
+static uint32_t markupToLogical(const char* markup, uint32_t char_id) {
+  uint8_t st = TCMD_WAIT;
+  uint32_t cid = 0, loff = 0;
+  const char* p = markup;
+  while (*p && cid < char_id) {
+    unsigned char c0 = (unsigned char)*p;
+    uint32_t step = (c0 >= 0xF0) ? 4 : (c0 >= 0xE0) ? 3 : (c0 >= 0xC0) ? 2 : 1;
+    if (!selTxtIsCmd(st, (char)c0)) loff++;
+    cid++;
+    p += step;
+  }
+  return loff;
+}
+
+// Find the chip (mention / hashtag) covering logical offset `off` in the source
+// text. Logical text = plain 1:1, "@[name]" shown as "@name", "#name" as "#name".
+// Returns true + kind + the bare name (no @/#).
+static bool tokenAtLogical(const char* src, uint32_t off, bool* is_hashtag, char* name, size_t cap) {
+  const char* p = src;
+  uint32_t loff = 0;
+  while (*p) {
+    const char* at = strstr(p, "@[");
+    const char* atclose = at ? strchr(at + 2, ']') : nullptr;
+    if (at && !atclose) at = nullptr;
+    const char* htend = nullptr;
+    const char* ht = findHashtag(p, src, &htend);
+    const char* tok = at; bool mention = (at != nullptr);
+    if (ht && (!tok || ht < tok)) { tok = ht; mention = false; }
+    if (!tok) return false;                              // only plain text remains
+
+    uint32_t run = cpCount(p, tok);                      // plain text before the token
+    if (off < loff + run) return false;                  // tap landed in plain text
+    loff += run;
+
+    const char* nm_s = mention ? at + 2 : tok + 1;       // bare name (after "@[" or "#")
+    const char* nm_e = mention ? atclose : htend;
+    uint32_t toklen = 1 + cpCount(nm_s, nm_e);           // shown as "@name" / "#name"
+    if (off < loff + toklen) {
+      size_t n = (size_t)(nm_e - nm_s);
+      if (n > cap - 1) n = cap - 1;
+      memcpy(name, nm_s, n); name[n] = 0;
+      *is_hashtag = !mention;
+      return true;
+    }
+    loff += toklen;
+    p = mention ? atclose + 1 : htend;
+  }
+  return false;
+}
+
+// Act on a tapped chip: open the contact (mention) or open/join the channel (hashtag).
+void UITask::resolveChip(uint8_t kind, const char* name) {
+  if (kind == CHIP_HASHTAG) { openOrJoinHashtag(name); return; }
+  // mention -> resolve the name to a local contact (exact match) and open it
+  int total = mproxy::getNumContacts();
+  ContactInfo c;
+  for (int i = 0; i < total; i++) {
+    if (!mproxy::getContactByIdx(i, c)) continue;
+    if (strcmp(c.name, name) == 0) { openContactInfo(c.id.pub_key, _chat_screen); return; }
+  }
+  // unknown contact -> no action (the name renders highlighted but isn't a contact)
+}
+
 void UITask::makeLabelSelectable(lv_obj_t* lbl) {
   // Clickable so it receives press/long-press; EVENT_BUBBLE so a normal tap still
   // reaches the bubble's mention/resend handler (selection long-press does not, and
@@ -6250,10 +6376,22 @@ void UITask::sel_event_cb(lv_event_t* e) {
         _instance->finishSel();
       break;
     case LV_EVENT_CLICKED: {
-      // Double-tap a text label -> select the word. (Single tap on a label does
-      // nothing; mention/card taps are handled by their own CLICKED cbs.)
       if (!is_label || _instance->_sel.state != SS_IDLE) break;
       lv_point_t p; lv_indev_get_point(lv_indev_get_act(), &p);
+      // First: did the tap land on a chip (@mention / #hashtag)? The label stores
+      // its logical source text in user_data when it has tappable tokens. Resolve
+      // the exact chip under the finger (per-chip, no picker).
+      const char* src = (const char*)lv_obj_get_user_data(target);
+      if (src) {
+        uint32_t off = markupToLogical(lv_label_get_text(target), labelCharAt(target, p));
+        bool is_hashtag; char nm[CHAT_PEER_NAME_MAX];
+        if (tokenAtLogical(src, off, &is_hashtag, nm, sizeof(nm))) {
+          _instance->resolveChip(is_hashtag ? CHIP_HASHTAG : CHIP_MENTION, nm);
+          lv_event_stop_bubbling(e);   // don't also fire the bubble's resend handler
+          break;
+        }
+      }
+      // Otherwise: double-tap a word selects it; single tap on plain text does nothing.
       SelectionCtl& s = _instance->_sel;
       uint32_t now = millis();
       bool dbl = (s.last_tap_obj == target) && (now - s.last_tap_ms < 300) &&

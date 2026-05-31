@@ -320,6 +320,10 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _lock_kb;
   bool            _locked;
   lv_obj_t*       _confirm_popup;       // share-position warning modal (top layer)
+  lv_obj_t*       _joinch_popup;        // "Add channel #name?" confirm modal
+  lv_obj_t*       _joinch_lbl;          // its question text (repopulated per tag)
+  char            _joinch_name[CHAT_PEER_NAME_MAX];   // pending hashtag name to join
+  uint8_t         _joinch_psk[16];                     // its derived PSK
 
   // Reusable info modal (telemetry response now; repeater status/CLI later).
   lv_obj_t*       _info_popup;
@@ -545,11 +549,15 @@ class UITask : public AbstractUITask {
   void      buildContactCard(lv_obj_t* parent, const ChatMessage* m,
                              const uint8_t* pubkey, uint8_t type, const char* name);
 
-  // Clickable @mentions in message bubbles
-  void      attachMentions(lv_obj_t* bubble, const char* text);
-  static void mention_bubble_cb(lv_event_t* e);
-  static void mention_pick_cb(lv_event_t* e);
-  static void mention_free_cb(lv_event_t* e);
+  // Clickable chips in message text: @mentions (open a known contact) and
+  // #hashtags (open a known public channel, or offer to join it). Resolved
+  // per-tap by hit-testing the touched character (resolveChip, from sel_event_cb).
+  enum ChipKind : uint8_t { CHIP_MENTION, CHIP_HASHTAG };
+  void      resolveChip(uint8_t kind, const char* name);   // act on the tapped chip
+  void      openOrJoinHashtag(const char* name);   // open the channel, or offer to join it
+  void      showJoinChannel(const char* name);     // "Add channel #name?" confirm
+  static void joinch_join_cb(lv_event_t* e);
+  static void joinch_cancel_cb(lv_event_t* e);
 
   // In-conversation search
   static void chat_search_ta_event_cb(lv_event_t* e);
@@ -826,7 +834,7 @@ public:
       _set_radio_sw(NULL),
       _pinset_popup(NULL), _pinset_ta1(NULL), _pinset_ta2(NULL), _pinset_err(NULL), _pinset_kb(NULL),
       _lock_screen(NULL), _lock_pin_ta(NULL), _lock_err(NULL), _lock_kb(NULL), _locked(false),
-      _confirm_popup(NULL),
+      _confirm_popup(NULL), _joinch_popup(NULL), _joinch_lbl(NULL),
       _info_popup(NULL), _info_title_lbl(NULL), _info_body_lbl(NULL),
       _keypop_popup(NULL), _keypop_lbl(NULL), _keypop_hex{},
       _qr_screen(NULL), _qr_code(NULL), _qr_name_lbl(NULL), _qr_key_lbl(NULL),
@@ -847,6 +855,7 @@ public:
         _search_filter[0] = 0;
         _clip_text[0] = 0;
         _crash_note[0] = 0;
+        _joinch_name[0] = 0;
         _clip_kind = CLIP_EMPTY;
         memset(&_sel, 0, sizeof(_sel));
         _contacts_filter[0] = 0;
