@@ -1247,7 +1247,7 @@ void UITask::chat_kb_event_cb(lv_event_t* e) {
     if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) _instance->layoutChatBody(false);
     return;
   }
-  if (code == LV_EVENT_READY)       _instance->sendCurrentMessage();   // checkmark key
+  if (code == LV_EVENT_READY)     { _instance->sendCurrentMessage(); _instance->layoutChatBody(false); }  // ✓ = send, then close kb (restores the in-line send button)
   else if (code == LV_EVENT_CANCEL) _instance->layoutChatBody(false);  // close key
 }
 
@@ -1300,6 +1300,12 @@ void UITask::layoutChatBody(bool keyboard_shown) {
     } else {
       lv_obj_add_flag(_chat_keyboard, LV_OBJ_FLAG_HIDDEN);
     }
+  }
+  // The keyboard's ✓ is the send while it's up, so hide the in-line send button then
+  // (more room to type); show it again when the keyboard is down.
+  if (_chat_send_btn) {
+    if (keyboard_shown) lv_obj_add_flag(_chat_send_btn, LV_OBJ_FLAG_HIDDEN);
+    else                lv_obj_clear_flag(_chat_send_btn, LV_OBJ_FLAG_HIDDEN);
   }
 
   // The search bar (when active) sits between the top bar and the history.
@@ -2771,14 +2777,17 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_center(plus_lbl);
 
     _chat_input = makeSelTextarea(_chat_compose);
-    lv_textarea_set_one_line(_chat_input, true); lv_obj_add_event_cb(_chat_input, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    // Multi-line: the keyboard's Enter (LV_SYMBOL_NEW_LINE) inserts a '\n', while the ✓
+    // (LV_SYMBOL_OK) key still fires READY -> send. (One-line would make Enter send too.)
+    lv_textarea_set_one_line(_chat_input, false);
+    lv_obj_add_event_cb(_chat_input, UITask::ta_done_cb, LV_EVENT_READY, NULL);
     lv_textarea_set_placeholder_text(_chat_input, "Message");
     lv_obj_set_flex_grow(_chat_input, 1);
     lv_obj_add_event_cb(_chat_input, chat_input_event_cb, LV_EVENT_ALL, NULL);
 
-    lv_obj_t* send = lv_btn_create(_chat_compose);
-    lv_obj_add_event_cb(send, chat_send_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t* send_lbl = lv_label_create(send);
+    _chat_send_btn = lv_btn_create(_chat_compose);   // in-line send (hidden while the keyboard is up)
+    lv_obj_add_event_cb(_chat_send_btn, chat_send_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* send_lbl = lv_label_create(_chat_send_btn);
     lv_label_set_text(send_lbl, LV_SYMBOL_OK);
     lv_obj_center(send_lbl);
 

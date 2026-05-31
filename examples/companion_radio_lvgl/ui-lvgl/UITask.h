@@ -155,6 +155,8 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _chat_sb;             // draggable scrollbar thumb for chat history
   lv_obj_t*       _chat_compose;        // fixed compose band (textarea + send)
   lv_obj_t*       _chat_input;          // lv_textarea
+  lv_obj_t*       _chat_send_btn;       // in-line send button (hidden while the keyboard is up)
+  lv_obj_t*       _chat_count_lbl;      // live char count above the compose box
   lv_obj_t*       _chat_keyboard;       // lv_keyboard, shown on input focus
   lv_obj_t*       _insert_popup;        // backdrop for the insert (+) menu
   lv_obj_t*       _insert_list;         // lv_list inside the popup
@@ -851,7 +853,7 @@ public:
       _pick_title(NULL), _pick_action(0), _pick_list{},
       _chat_screen(NULL), _chat_title(NULL), _chat_avatar(NULL), _chat_avatar_lbl(NULL),
       _chat_status(NULL), _chat_history(NULL), _chat_sb(NULL),
-      _chat_compose(NULL), _chat_input(NULL), _chat_keyboard(NULL),
+      _chat_compose(NULL), _chat_input(NULL), _chat_send_btn(NULL), _chat_count_lbl(NULL), _chat_keyboard(NULL),
       _insert_popup(NULL), _insert_list(NULL),
       _chat_is_channel(false), _chat_channel_idx(-1), _chat_contact_type(0),
       _chat_search_bar(NULL), _chat_search_ta(NULL), _search_active(false),
