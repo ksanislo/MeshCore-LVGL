@@ -299,6 +299,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_screen_dd;       // screen idle-off timeout dropdown
   lv_obj_t*       _set_tz_ta;           // UTC offset (hours) for local-time display
   lv_obj_t*       _set_clock_chk;       // 12-hour clock toggle
+  lv_obj_t*       _set_autolock_chk;    // auto-lock on sleep toggle
   lv_obj_t*       _set_avatar_dd;       // contact avatar color scheme (Default / iOS app)
   lv_obj_t*       _set_theme_dd;        // UI color theme picker (built-ins + SD /themes)
   lv_obj_t*       _set_mention_chk;     // chat: color @mentions by user color
@@ -372,10 +373,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _keypop_lbl;
   char            _keypop_hex[2 * PUB_KEY_SIZE + 1];
 
-  // Private-key export popup + import flow (owner profile kebab).
-  lv_obj_t*       _expkey_popup;
-  lv_obj_t*       _expkey_lbl;
-  char            _expkey_hex[2 * 64 + 1];   // 64-byte private key as hex
+  // Private-key popup (owner profile kebab): one box, Export fills it, Import writes it.
   lv_obj_t*       _impkey_popup;
   lv_obj_t*       _impkey_ta;
   lv_obj_t*       _impkey_err;
@@ -760,6 +758,7 @@ private:
   void      commitTz();
   static void set_tz_ta_event_cb(lv_event_t* e);
   static void set_clock_cb(lv_event_t* e);
+  static void set_autolock_cb(lv_event_t* e);
   static void set_avatar_cb(lv_event_t* e);
   static void set_theme_cb(lv_event_t* e);
   static void theme_async_cb(void* unused);   // deferred theme rebuild (lv_async_call)
@@ -803,13 +802,15 @@ private:
   void      buildLockScreen();
   void      showLock();                              // lock now (overlay keypad entry)
   void      updateLockDots();                        // refresh the entered-digit indicators
-  lv_obj_t* makeLockKey(lv_obj_t* grid, const char* text, intptr_t tag, lv_coord_t d);
+  lv_obj_t* makeLockKey(lv_obj_t* grid, const char* text, intptr_t tag, lv_coord_t w, lv_coord_t h);
   static void lock_now_cb(lv_event_t* e);
   static void lock_key_cb(lv_event_t* e);            // a keypad key press
   static void set_shareme_cb(lv_event_t* e);         // export own contact as QR
   void      showSharePosWarning();
   static void profile_key_cb(lv_event_t* e);   // owner hero key line -> long-press copy
   static void profile_kebab_cb(lv_event_t* e);       // owner profile overflow menu
+  static void profile_share_cb(lv_event_t* e);       // kebab -> Share submenu
+  void        showOwnerShareMenu();                  // QR + adverts (owner)
   static void profile_advert_zhop_cb(lv_event_t* e);
   static void profile_advert_flood_cb(lv_event_t* e);
   static void profile_shareqr_cb(lv_event_t* e);
@@ -817,17 +818,13 @@ private:
   void        showKeyPopup(const char* hex);
   static void keypop_copy_cb(lv_event_t* e);
   static void keypop_close_cb(lv_event_t* e);
-  // Private-key export popup + import flow (owner profile kebab).
-  static void profile_exportkey_cb(lv_event_t* e);
-  static void profile_importkey_cb(lv_event_t* e);
-  void        showExportKey();
-  static void expkey_copy_cb(lv_event_t* e);
-  static void expkey_close_cb(lv_event_t* e);
-  void        buildImportKeyPopup();
-  void        openImportKey();
+  // Private-key popup (owner profile kebab): one box; Export fills it, Import writes it.
+  static void profile_keypopup_cb(lv_event_t* e);
+  void        buildKeyPopup();
+  void        openKeyPopup();
+  static void impkey_export_cb(lv_event_t* e);
   static void impkey_dismiss_cb(lv_event_t* e);
   static void impkey_cancel_cb(lv_event_t* e);
-  static void impkey_paste_cb(lv_event_t* e);
   static void impkey_ta_event_cb(lv_event_t* e);
   static void impkey_kb_event_cb(lv_event_t* e);
   static void impkey_import_cb(lv_event_t* e);
@@ -940,7 +937,7 @@ public:
       _profile_screen(NULL), _profile_body(NULL), _profile_kb(NULL), _profile_return_screen(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
-      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_avatar_dd(NULL), _set_theme_dd(NULL), _set_mention_chk(NULL), _set_hashtag_chk(NULL), _set_chsender_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_mutedef_chk(NULL), _set_kb(NULL),
+      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_autolock_chk(NULL), _set_avatar_dd(NULL), _set_theme_dd(NULL), _set_mention_chk(NULL), _set_hashtag_chk(NULL), _set_chsender_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_mutedef_chk(NULL), _set_kb(NULL),
       _set_active_ta(NULL),
       _set_launcher(NULL), _set_pane{}, _set_pane_body{}, _set_active_pane(NULL),
       _set_key_ta(NULL),
@@ -955,7 +952,6 @@ public:
       _confirm_popup(NULL), _joinch_popup(NULL), _joinch_lbl(NULL),
       _info_popup(NULL), _info_title_lbl(NULL), _info_body_lbl(NULL),
       _keypop_popup(NULL), _keypop_lbl(NULL), _keypop_hex{},
-      _expkey_popup(NULL), _expkey_lbl(NULL), _expkey_hex{},
       _impkey_popup(NULL), _impkey_ta(NULL), _impkey_err(NULL), _impkey_kb(NULL), _impkey_confirm(NULL), _impkey_bytes{},
       _qr_screen(NULL), _qr_code(NULL), _qr_name_lbl(NULL), _qr_key_lbl(NULL),
       _qr_return_screen(NULL),

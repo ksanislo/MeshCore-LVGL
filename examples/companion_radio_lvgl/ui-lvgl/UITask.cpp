@@ -2510,12 +2510,14 @@ void UITask::buildChannelLinkCard(lv_obj_t* parent, const char* name, const uint
   lv_obj_remove_style_all(card);
   lv_obj_set_width(card, LV_PCT(100));
   lv_obj_set_height(card, LV_SIZE_CONTENT);
-  lv_obj_set_style_bg_color(card, lv_color_hex(UI_BG), 0);
+  lv_obj_set_style_bg_color(card, lv_color_hex(UI_BG), 0);   // inset, darker than the bubble
   lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
   lv_obj_set_style_border_color(card, lv_color_hex(UI_BORDER), 0);
   lv_obj_set_style_border_width(card, 1, 0);
   lv_obj_set_style_radius(card, 8, 0);
   lv_obj_set_style_pad_all(card, 8, 0);
+  lv_obj_set_style_pad_row(card, 4, 0);
+  lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
   ChanCardTarget* t = (ChanCardTarget*)lv_mem_alloc(sizeof(ChanCardTarget));
@@ -2528,13 +2530,66 @@ void UITask::buildChannelLinkCard(lv_obj_t* parent, const char* name, const uint
     lv_obj_add_event_cb(card, chan_card_free_cb, LV_EVENT_DELETE, NULL);
   }
   lv_obj_add_event_cb(card, chan_card_cb, LV_EVENT_CLICKED, NULL);
+
   char sn[CHAT_PEER_NAME_MAX + 4]; sanitizeForFont(name, sn, sizeof(sn));
-  char line[CHAT_PEER_NAME_MAX + 24]; snprintf(line, sizeof(line), LV_SYMBOL_PLUS " Join channel: %s", sn);
-  lv_obj_t* lbl = lv_label_create(card);
-  lv_obj_set_width(lbl, LV_PCT(100));
-  lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
-  lv_obj_set_style_text_color(lbl, lv_color_hex(UI_ACCENT), 0);
-  lv_label_set_text(lbl, line);
+
+  // Branded row: channel avatar on the left, name over "<channel>" on the right --
+  // same layout as a contact card (just a channel brand + label instead of a key).
+  lv_obj_t* row = lv_obj_create(card);
+  lv_obj_remove_style_all(row);
+  lv_obj_set_width(row, LV_PCT(100));
+  lv_obj_set_height(row, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(row, 10, 0);
+  lv_obj_set_style_bg_color(row, lv_color_hex(UI_BG), 0);   // channel avatar's inner circle "shows" this
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+  lv_obj_t* av = lv_obj_create(row);
+  lv_obj_remove_style_all(av);
+  lv_obj_set_size(av, UI_AVATAR_D, UI_AVATAR_D);
+  lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(av, channelAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);   // inner-circle ring
+  lv_obj_t* avl = lv_label_create(av);
+  lv_obj_center(avl);
+  lv_obj_set_style_text_color(avl, lv_color_hex(UI_ON_COLOR), 0);
+  lv_obj_set_style_text_font(avl, fontHeading(), 0);
+  brandChannelAvatar(av, avl, name);
+
+  lv_obj_t* col = lv_obj_create(row);
+  lv_obj_remove_style_all(col);
+  lv_obj_set_flex_grow(col, 1);
+  lv_obj_set_height(col, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(col, 2, 0);
+  lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_t* nm = lv_label_create(col);
+  lv_obj_set_width(nm, LV_PCT(100));
+  lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
+  lv_label_set_text(nm, sn);
+  lv_obj_set_style_text_color(nm, lv_color_hex(UI_FG_STRONG), 0);
+  lv_obj_set_style_text_font(nm, fontBody(), 0);
+  lv_obj_t* sub = lv_label_create(col);
+  lv_obj_set_width(sub, LV_PCT(100));
+  lv_label_set_long_mode(sub, LV_LABEL_LONG_DOT);
+  lv_label_set_text(sub, "<channel>");
+  lv_obj_set_style_text_color(sub, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_font(sub, fontCaption(), 0);
+
+  // Tap-to-join hint, but only if it isn't already one of our channels.
+  bool have = false;
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    ChannelDetails ch;
+    if (mproxy::getChannel(i, ch) && ch.name[0] && memcmp(ch.channel.secret, secret, seclen) == 0) { have = true; break; }
+  }
+  if (!have) {
+    lv_obj_t* hint = lv_label_create(card);
+    lv_label_set_text(hint, LV_SYMBOL_PLUS " Tap to add channel");
+    lv_obj_set_style_text_color(hint, lv_color_hex(UI_ACCENT), 0);
+    lv_obj_set_style_text_font(hint, fontCaption(), 0);
+  }
 }
 
 void UITask::renderRichBody(lv_obj_t* bubble, const ChatMessage* m, uint32_t fg) {
@@ -6323,6 +6378,11 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_label_set_text(spl, LV_SYMBOL_KEYBOARD " Set lock PIN");
   lv_obj_center(spl);
 
+  _set_autolock_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_autolock_chk, "Auto-lock on sleep");
+  lv_obj_set_style_text_color(_set_autolock_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_autolock_chk, set_autolock_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
   lv_obj_t* lockb = lv_btn_create(body);
   lv_obj_set_width(lockb, LV_PCT(100));
   lv_obj_add_event_cb(lockb, lock_now_cb, LV_EVENT_CLICKED, NULL);
@@ -6490,6 +6550,10 @@ void UITask::populateSettings() {
   if (_set_clock_chk) {
     if (_node_prefs->clock_12h) lv_obj_add_state(_set_clock_chk, LV_STATE_CHECKED);
     else                        lv_obj_clear_state(_set_clock_chk, LV_STATE_CHECKED);
+  }
+  if (_set_autolock_chk) {
+    if (_node_prefs->auto_lock) lv_obj_add_state(_set_autolock_chk, LV_STATE_CHECKED);
+    else                        lv_obj_clear_state(_set_autolock_chk, LV_STATE_CHECKED);
   }
   if (_set_avatar_dd) lv_dropdown_set_selected(_set_avatar_dd, _node_prefs->avatar_palette ? 1 : 0);
   if (_set_theme_dd) {   // re-list (picks up SD themes) + select the active one
@@ -7996,6 +8060,15 @@ void UITask::lock_now_cb(lv_event_t* e) {
   _instance->showLock();
 }
 
+void UITask::set_autolock_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  _instance->_node_prefs->auto_lock = on ? 1 : 0;
+  pushPrefs();
+  if (on && (!_instance->_node_prefs->lock_pin[0] || strlen(_instance->_node_prefs->lock_pin) < 4))
+    _instance->showToast("Set a PIN to use auto-lock");
+}
+
 // Refresh the row of PIN dots: as many dots as the stored PIN is long, the first
 // `_lock_len` of them filled (accent), the rest hollow (border only).
 void UITask::updateLockDots() {
@@ -8045,11 +8118,11 @@ void UITask::lock_key_cb(lv_event_t* e) {
   }
 }
 
-// One keypad key: a fixed-size rounded button with a big centered glyph, tagged so
+// One keypad key: a big rounded (pill) button with a centered glyph, tagged so
 // lock_key_cb knows what it does. `tag` is the digit char, or LOCK_KEY_*.
-lv_obj_t* UITask::makeLockKey(lv_obj_t* grid, const char* text, intptr_t tag, lv_coord_t d) {
+lv_obj_t* UITask::makeLockKey(lv_obj_t* grid, const char* text, intptr_t tag, lv_coord_t w, lv_coord_t h) {
   lv_obj_t* b = lv_btn_create(grid);
-  lv_obj_set_size(b, d, d);
+  lv_obj_set_size(b, w, h);
   lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_bg_color(b, lv_color_hex(UI_SURFACE), 0);
   lv_obj_set_style_bg_color(b, lv_color_hex(UI_ACCENT), LV_STATE_PRESSED);
@@ -8057,7 +8130,7 @@ lv_obj_t* UITask::makeLockKey(lv_obj_t* grid, const char* text, intptr_t tag, lv
   lv_obj_add_event_cb(b, lock_key_cb, LV_EVENT_CLICKED, NULL);
   lv_obj_t* l = lv_label_create(b);
   lv_label_set_text(l, text);
-  lv_obj_set_style_text_font(l, fontHeading(), 0);
+  lv_obj_set_style_text_font(l, fontHero(), 0);
   lv_obj_center(l);
   return b;
 }
@@ -8110,21 +8183,24 @@ void UITask::buildLockScreen() {
     _lock_dot[i] = dot;
   }
 
-  // 3x4 keypad: 1-9, then [clear, 0, backspace]. Big round keys, sized to the screen.
-  lv_coord_t kd = (lv_coord_t)((_screen_w < _screen_h ? _screen_w : _screen_h) / 6);
-  if (kd < 48) kd = 48; if (kd > 72) kd = 72;
+  // 3x4 keypad: 1-9, then [clear, 0, backspace]. Sized to fill (nearly) the whole
+  // display -- big pill keys, rectangular so they use the full width too.
+  const lv_coord_t gap = 8;
+  lv_coord_t kw = (lv_coord_t)((_screen_w - 2 * 10 - 2 * gap) / 3);          // 3 columns, 10px side margin
+  lv_coord_t kh = (lv_coord_t)((_screen_h - 104 - 3 * gap) / 4);            // 4 rows; ~104 for title/dots/error
+  if (kh < 40) kh = 40;
   lv_obj_t* grid = lv_obj_create(col);
   lv_obj_remove_style_all(grid);
-  lv_obj_set_size(grid, kd * 3 + 24, LV_SIZE_CONTENT);
+  lv_obj_set_size(grid, kw * 3 + 2 * gap, LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
   lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_row(grid, 10, 0);
-  lv_obj_set_style_pad_column(grid, 10, 0);
+  lv_obj_set_style_pad_row(grid, gap, 0);
+  lv_obj_set_style_pad_column(grid, gap, 0);
   lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
-  for (int n = 1; n <= 9; n++) { char t[2] = { (char)('0' + n), 0 }; makeLockKey(grid, t, '0' + n, kd); }
-  makeLockKey(grid, LV_SYMBOL_CLOSE, LOCK_KEY_CLEAR, kd);   // clear all
-  makeLockKey(grid, "0", '0', kd);
-  makeLockKey(grid, LV_SYMBOL_BACKSPACE, LOCK_KEY_DEL, kd); // delete one
+  for (int n = 1; n <= 9; n++) { char t[2] = { (char)('0' + n), 0 }; makeLockKey(grid, t, '0' + n, kw, kh); }
+  makeLockKey(grid, LV_SYMBOL_CLOSE, LOCK_KEY_CLEAR, kw, kh);   // clear all
+  makeLockKey(grid, "0", '0', kw, kh);
+  makeLockKey(grid, LV_SYMBOL_BACKSPACE, LOCK_KEY_DEL, kw, kh); // delete one
 
   _lock_err = lv_label_create(col);
   lv_label_set_text(_lock_err, "");
@@ -8154,12 +8230,23 @@ void UITask::profile_kebab_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   lv_obj_t* list = _instance->ensureMenuPopup();
-  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_WIFI, "Advert (zero-hop)"), profile_advert_zhop_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_WIFI, "Advert (flood)"),    profile_advert_flood_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_UPLOAD, "Share QR"),        profile_shareqr_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_DOWNLOAD, "Export private key"), profile_exportkey_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_KEYBOARD, "Import private key"), profile_importkey_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_UPLOAD,   "Share"),       profile_share_cb,   LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_KEYBOARD, "Private key"), profile_keypopup_cb, LV_EVENT_CLICKED, NULL);
   _instance->showMenuPopup();
+}
+// Owner Share submenu (same shape as the contact Share menu): QR + the two adverts.
+void UITask::profile_share_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  // showOwnerShareMenu rebuilds _menu_list (deleting this button); defer it.
+  lv_async_call([](void*) { if (_instance) _instance->showOwnerShareMenu(); }, NULL);
+}
+void UITask::showOwnerShareMenu() {
+  lv_obj_t* list = ensureMenuPopup();
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_IMAGE, "Show QR code"),     profile_shareqr_cb,      LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_WIFI,  "Advert (zero-hop)"), profile_advert_zhop_cb,  LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_WIFI,  "Advert (flood)"),    profile_advert_flood_cb, LV_EVENT_CLICKED, NULL);
+  showMenuPopup();
 }
 void UITask::profile_advert_zhop_cb(lv_event_t* e) {
   (void)e;
@@ -8181,99 +8268,61 @@ void UITask::profile_shareqr_cb(lv_event_t* e) {
   set_shareme_cb(e);
 }
 
-// ---- Private-key export / import (owner profile kebab) ----------------------
-// Export: show the 128-char hex private key in a copyable popup, with a clear
-// "keep this secret" warning. The key is read from the backend on demand.
-void UITask::profile_exportkey_cb(lv_event_t* e) {
+// ---- Private key: one shared popup (owner profile kebab) --------------------
+// Opens empty. "Export" fills the box with this device's key; "Import" writes the
+// box's key to the device (validated here, then a confirm + reboot). The box is a
+// normal selectable textarea, so you can long-press it to Copy an exported key.
+void UITask::profile_keypopup_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   _instance->closeMenuPopup();
-  _instance->showExportKey();
+  _instance->openKeyPopup();
 }
 
-void UITask::showExportKey() {
+// Export: pull this device's private key into the box (hex). It stays on-screen so
+// you can read / long-press-Copy it; nothing leaves the device on its own.
+void UITask::impkey_export_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
   uint8_t prv[64];
-  if (!mproxy::exportPrivKey(prv)) { showToast("Key unavailable"); return; }
-  mesh::Utils::toHex(_expkey_hex, prv, 64);   // 128 hex chars + NUL
-  if (!_expkey_popup) {
-    lv_obj_t* card = makeModalCard(&_expkey_popup, [](lv_event_t* ev) {
-      (void)ev;
-      if (_instance) lv_obj_add_flag(_instance->_expkey_popup, LV_OBJ_FLAG_HIDDEN);
-    });
-    lv_obj_t* title = lv_label_create(card);
-    lv_label_set_text(title, "Private key");
-    lv_obj_set_style_text_color(title, lv_color_hex(UI_ACCENT), 0);
-    lv_obj_set_style_text_font(title, fontHeading(), 0);
-
-    lv_obj_t* warn = lv_label_create(card);
-    lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(warn, LV_PCT(100));
-    lv_label_set_text(warn, "Keep this secret. Anyone with it can take over this node's identity.");
-    lv_obj_set_style_text_color(warn, lv_color_hex(UI_ERROR), 0);
-
-    _expkey_lbl = lv_label_create(card);
-    lv_label_set_long_mode(_expkey_lbl, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(_expkey_lbl, LV_PCT(100));
-    lv_obj_set_style_text_color(_expkey_lbl, lv_color_hex(UI_FG_STRONG), 0);
-    lv_obj_set_style_text_font(_expkey_lbl, &lv_font_montserrat_12, 0);
-
-    lv_obj_t* btnrow = lv_obj_create(card);
-    lv_obj_remove_style_all(btnrow);
-    lv_obj_set_width(btnrow, LV_PCT(100));
-    lv_obj_set_height(btnrow, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(btnrow, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(btnrow, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(btnrow, 8, 0);
-    lv_obj_clear_flag(btnrow, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_t* closeb = lv_btn_create(btnrow);
-    lv_obj_add_event_cb(closeb, expkey_close_cb, LV_EVENT_CLICKED, NULL);
-    lv_label_set_text(lv_label_create(closeb), "Close");
-    lv_obj_t* copyb = lv_btn_create(btnrow);
-    lv_obj_set_style_bg_color(copyb, lv_color_hex(UI_PRIMARY), 0);
-    lv_obj_add_event_cb(copyb, expkey_copy_cb, LV_EVENT_CLICKED, NULL);
-    lv_label_set_text(lv_label_create(copyb), LV_SYMBOL_COPY " Copy");
-  }
-  lv_label_set_text(_expkey_lbl, _expkey_hex);
-  lv_obj_clear_flag(_expkey_popup, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_move_foreground(_expkey_popup);
+  if (!mproxy::exportPrivKey(prv)) { _instance->showToast("Key unavailable"); return; }
+  char hex[2 * 64 + 1]; mesh::Utils::toHex(hex, prv, 64);
+  lv_textarea_set_text(_instance->_impkey_ta, hex);
+  lv_obj_add_flag(_instance->_impkey_err, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_instance->_impkey_kb, LV_OBJ_FLAG_HIDDEN);
 }
 
-void UITask::expkey_close_cb(lv_event_t* e) {
-  (void)e;
-  if (_instance && _instance->_expkey_popup) lv_obj_add_flag(_instance->_expkey_popup, LV_OBJ_FLAG_HIDDEN);
-}
-void UITask::expkey_copy_cb(lv_event_t* e) {
-  (void)e;
-  if (!_instance) return;
-  _instance->copyToClipboard(_instance->_expkey_hex);
-  _instance->showToast("Private key copied");
-  if (_instance->_expkey_popup) lv_obj_add_flag(_instance->_expkey_popup, LV_OBJ_FLAG_HIDDEN);
-}
-
-// Import: paste a 128-char hex private key, then confirm. On confirm the backend
-// validates + persists it and reboots into the new identity.
-void UITask::profile_importkey_cb(lv_event_t* e) {
-  (void)e;
-  if (!_instance) return;
-  _instance->closeMenuPopup();
-  _instance->openImportKey();
-}
-
-void UITask::buildImportKeyPopup() {
+void UITask::buildKeyPopup() {
   if (_impkey_popup) return;
   lv_obj_t* card = makeModalCard(&_impkey_popup, impkey_dismiss_cb);
   lv_obj_align(card, LV_ALIGN_TOP_MID, 0, HEADER_H + 8);   // top -> room for the keyboard
   lv_obj_add_flag(_impkey_popup, LV_OBJ_FLAG_HIDDEN);
 
   lv_obj_t* title = lv_label_create(card);
-  lv_label_set_text(title, "Import private key");
+  lv_label_set_text(title, "Private key");
   lv_obj_set_style_text_color(title, lv_color_hex(FG_HEX), 0);
   lv_obj_set_style_text_font(title, fontHeading(), 0);
+
+  // ✕ close, pinned to the content corner so its margin matches the title's left
+  // inset (the card's pad). Floating -> ignored by the card's column layout; the
+  // glyph hugs the button (no extra pad) so its edge lands at the same inset.
+  lv_obj_t* x = lv_btn_create(card);
+  lv_obj_add_flag(x, LV_OBJ_FLAG_FLOATING);
+  lv_obj_set_size(x, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(x, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_shadow_width(x, 0, 0);
+  lv_obj_set_style_pad_all(x, 0, 0);
+  lv_obj_align(x, LV_ALIGN_TOP_RIGHT, 0, 0);
+  lv_obj_add_event_cb(x, impkey_cancel_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* xl = lv_label_create(x);
+  lv_label_set_text(xl, LV_SYMBOL_CLOSE);
+  lv_obj_set_style_text_color(xl, lv_color_hex(DIM_HEX), 0);
+  lv_obj_center(xl);
 
   lv_obj_t* warn = lv_label_create(card);
   lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(warn, LV_PCT(100));
-  lv_label_set_text(warn, "Paste a 128-char hex key. This replaces this node's identity and reboots.");
+  lv_label_set_text(warn, "Secret - anyone with this key can take over this node. Export fills the box from this device. Import replaces the identity (the public key is regenerated to match) and reboots.");
   lv_obj_set_style_text_color(warn, lv_color_hex(DIM_HEX), 0);
 
   _impkey_ta = makeSelTextarea(card);
@@ -8294,24 +8343,18 @@ void UITask::buildImportKeyPopup() {
   lv_obj_set_width(btns, LV_PCT(100));
   lv_obj_set_height(btns, LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(btns, 8, 0);
   lv_obj_clear_flag(btns, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_t* pasteb = lv_btn_create(btns);
-  lv_obj_add_event_cb(pasteb, impkey_paste_cb, LV_EVENT_CLICKED, NULL);
-  lv_label_set_text(lv_label_create(pasteb), LV_SYMBOL_PASTE " Paste");
-  lv_obj_t* rgrp = lv_obj_create(btns);
-  lv_obj_remove_style_all(rgrp);
-  lv_obj_set_size(rgrp, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-  lv_obj_set_flex_flow(rgrp, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_column(rgrp, 8, 0);
-  lv_obj_clear_flag(rgrp, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_t* cancel = lv_btn_create(rgrp);
-  lv_obj_add_event_cb(cancel, impkey_cancel_cb, LV_EVENT_CLICKED, NULL);
-  lv_label_set_text(lv_label_create(cancel), "Cancel");
-  lv_obj_t* imp = lv_btn_create(rgrp);
+  lv_obj_t* exportb = lv_btn_create(btns);
+  lv_obj_set_flex_grow(exportb, 1);
+  lv_obj_add_event_cb(exportb, impkey_export_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* el = lv_label_create(exportb); lv_label_set_text(el, LV_SYMBOL_DOWNLOAD " Export"); lv_obj_center(el);
+  lv_obj_t* imp = lv_btn_create(btns);
+  lv_obj_set_flex_grow(imp, 1);
   lv_obj_set_style_bg_color(imp, lv_color_hex(UI_PRIMARY), 0);
   lv_obj_add_event_cb(imp, impkey_import_cb, LV_EVENT_CLICKED, NULL);
-  lv_label_set_text(lv_label_create(imp), "Import");
+  lv_obj_t* il = lv_label_create(imp); lv_label_set_text(il, LV_SYMBOL_UPLOAD " Import"); lv_obj_center(il);
 
   _impkey_kb = lv_keyboard_create(_impkey_popup);
   lv_obj_add_event_cb(_impkey_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ key
@@ -8320,9 +8363,9 @@ void UITask::buildImportKeyPopup() {
   lv_obj_add_flag(_impkey_kb, LV_OBJ_FLAG_HIDDEN);
 }
 
-void UITask::openImportKey() {
-  buildImportKeyPopup();
-  lv_textarea_set_text(_impkey_ta, "");
+void UITask::openKeyPopup() {
+  buildKeyPopup();
+  lv_textarea_set_text(_impkey_ta, "");   // opens empty -- no key shown until you tap Export
   lv_obj_add_flag(_impkey_err, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(_impkey_kb, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(_impkey_popup, LV_OBJ_FLAG_HIDDEN);
@@ -8341,13 +8384,6 @@ void UITask::impkey_cancel_cb(lv_event_t* e) {
   lv_obj_add_flag(_instance->_impkey_kb, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(_instance->_impkey_popup, LV_OBJ_FLAG_HIDDEN);
 }
-void UITask::impkey_paste_cb(lv_event_t* e) {
-  (void)e;
-  if (!_instance) return;
-  if (_instance->_clip_kind != CLIP_EMPTY)
-    lv_textarea_set_text(_instance->_impkey_ta,
-                         _instance->pasteTextFor(FK_HEX));   // a copied key pastes as raw hex
-}
 void UITask::impkey_ta_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_event_code_t code = lv_event_get_code(e);
@@ -8365,17 +8401,20 @@ void UITask::impkey_kb_event_cb(lv_event_t* e) {
   if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
     lv_obj_add_flag(_instance->_impkey_kb, LV_OBJ_FLAG_HIDDEN);
 }
-// Validate the pasted hex -> 64 bytes; on success raise the confirm modal.
+// Validate the box -> 64 bytes + a real keypair; on success raise the confirm modal.
 void UITask::impkey_import_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
+  auto err = [&](const char* m) {
+    lv_label_set_text(_instance->_impkey_err, m);
+    lv_obj_clear_flag(_instance->_impkey_err, LV_OBJ_FLAG_HIDDEN);
+  };
   const char* txt = lv_textarea_get_text(_instance->_impkey_ta);
   int n = hexToBytes(txt ? txt : "", _instance->_impkey_bytes, 64);
-  if (n != 64) {
-    lv_label_set_text(_instance->_impkey_err, "Need a 128-char (64-byte) hex key");
-    lv_obj_clear_flag(_instance->_impkey_err, LV_OBJ_FLAG_HIDDEN);
-    return;
-  }
+  if (n != 64) { err("Need a 128-char (64-byte) hex key"); return; }
+  // Same crypto check the backend uses (derives + verifies the keypair), run up front
+  // so a bad key is caught here -- with a message -- instead of silently on reboot.
+  if (!mesh::LocalIdentity::validatePrivateKey(_instance->_impkey_bytes)) { err("Invalid private key"); return; }
   lv_obj_add_flag(_instance->_impkey_kb, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(_instance->_impkey_popup, LV_OBJ_FLAG_HIDDEN);
   _instance->showImportConfirm();
@@ -8683,10 +8722,10 @@ void UITask::loop() {
   if (timeout_s && !_display_off && idle_ms > (uint32_t)timeout_s * 1000) {
     board_set_backlight(0);
     _display_off = true;
-    // Auto-lock on sleep: if a PIN is set, raise the lock now so the screen is
-    // locked behind the keypad on wake. (No PIN = never auto-locks = the safety.)
+    // Auto-lock on sleep (opt-in): only when enabled AND a PIN is set, raise the
+    // lock now so the screen is locked behind the keypad on wake.
     const char* pin = _node_prefs ? _node_prefs->lock_pin : nullptr;
-    if (!_locked && pin && strlen(pin) >= 4) showLock();
+    if (!_locked && _node_prefs && _node_prefs->auto_lock && pin && strlen(pin) >= 4) showLock();
   }
   // While the screen is off, skip the clock repaint and list rebuilds: nothing is
   // visible, and a per-second clock update would needlessly invalidate + flush.

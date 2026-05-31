@@ -53,4 +53,5 @@ struct NodePrefs {  // persisted to file
   uint8_t  hashtag_channel_colors;// chat: color #hashtags by the channel's color   (1=on default, 0=off -> theme accent)
   uint8_t  notify_mute_default;   // notifications: 1 = muted by default (opt-in per conv), 0 = opt-out (default)
   uint8_t  channel_sender_colors; // channel chat: brand+color each sender's name in the bubble (1=on default, 0=off -> dim)
+  uint8_t  auto_lock;             // 1 = auto-lock on screen sleep (needs a PIN set); 0 = manual lock only (default)
 };
