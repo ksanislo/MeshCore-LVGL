@@ -60,6 +60,7 @@ UiPalette g_ui_palette = UI_THEME_DARK;
 // addMessageText). On = color @mentions by user / #hashtags by channel; off = accent.
 static uint8_t s_mention_user_colors   = 1;
 static uint8_t s_hashtag_channel_colors = 1;
+static uint8_t s_channel_sender_colors = 1;   // channel bubbles: brand+color the sender header
 
 void UITask::disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
   if (!_instance || !_instance->_lgfx) {
@@ -2648,12 +2649,44 @@ void UITask::rebuildChatHistory() {
                      (first || last_outgoing ||
                       strncmp(last_sender, m->sender, CHAT_PEER_NAME_MAX) != 0);
     if (show_name) {
-      lv_obj_t* name = lv_label_create(_chat_history);
       char sname[CHAT_PEER_NAME_MAX + 4];
       sanitizeForFont(m->sender[0] ? m->sender : "?", sname, sizeof(sname));
-      lv_label_set_text(name, sname);
-      lv_obj_set_style_text_color(name, lv_color_hex(DIM_HEX), 0);  // gray-400
-      lv_obj_set_style_text_font(name, fontCaption(), 0);
+      if (_chat_is_channel && s_channel_sender_colors) {
+        // Channel bubbles: brand each sender with a small name-colored avatar stamp
+        // and color their name, so a busy channel is easy to scan by who said what.
+        lv_obj_t* hdr = lv_obj_create(_chat_history);
+        lv_obj_remove_style_all(hdr);
+        lv_obj_set_width(hdr, LV_PCT(100));
+        lv_obj_set_height(hdr, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(hdr, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(hdr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(hdr, 6, 0);
+        lv_obj_set_style_pad_left(hdr, 2, 0);
+        lv_obj_clear_flag(hdr, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+        const lv_coord_t d = 18;   // small sender stamp
+        lv_obj_t* av = lv_obj_create(hdr);
+        lv_obj_remove_style_all(av);
+        lv_obj_set_size(av, d, d);
+        lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
+        lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t* avl = lv_label_create(av);
+        lv_obj_center(avl);
+        lv_obj_set_style_text_color(avl, lv_color_hex(UI_ON_COLOR), 0);
+        lv_obj_set_style_text_font(avl, fontCaption(), 0);
+        brandAvatar(av, avl, sname, ADV_TYPE_CHAT);   // name-colored circle + first letter
+
+        lv_obj_t* name = lv_label_create(hdr);
+        lv_label_set_text(name, sname);
+        lv_obj_set_style_text_color(name, lv_color_hex(nameColor(sname)), 0);
+        lv_obj_set_style_text_font(name, fontCaption(), 0);
+      } else {
+        lv_obj_t* name = lv_label_create(_chat_history);
+        lv_label_set_text(name, sname);
+        lv_obj_set_style_text_color(name, lv_color_hex(DIM_HEX), 0);  // gray-400
+        lv_obj_set_style_text_font(name, fontCaption(), 0);
+      }
     }
 
     // Full-width row wrapper so we can left/right-align the bubble inside it.
@@ -3153,6 +3186,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   if (_node_prefs) {                                           // seed chat chip-color toggles
     s_mention_user_colors   = _node_prefs->mention_user_colors   ? 1 : 0;
     s_hashtag_channel_colors = _node_prefs->hashtag_channel_colors ? 1 : 0;
+    s_channel_sender_colors = _node_prefs->channel_sender_colors ? 1 : 0;
   }
 
   _splash_screen = buildSplashScreen();
@@ -6300,6 +6334,11 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_hashtag_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_hashtag_chk, set_hashtag_colors_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  _set_chsender_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_chsender_chk, "Channel sender colors");
+  lv_obj_set_style_text_color(_set_chsender_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_chsender_chk, set_chsender_colors_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
 #ifdef HAS_SD_CARD
   _set_history_chk = lv_checkbox_create(body);
   lv_checkbox_set_text(_set_history_chk, "Save chat history");
@@ -6401,6 +6440,10 @@ void UITask::populateSettings() {
   if (_set_hashtag_chk) {
     if (_node_prefs->hashtag_channel_colors) lv_obj_add_state(_set_hashtag_chk, LV_STATE_CHECKED);
     else                                     lv_obj_clear_state(_set_hashtag_chk, LV_STATE_CHECKED);
+  }
+  if (_set_chsender_chk) {
+    if (_node_prefs->channel_sender_colors) lv_obj_add_state(_set_chsender_chk, LV_STATE_CHECKED);
+    else                                    lv_obj_clear_state(_set_chsender_chk, LV_STATE_CHECKED);
   }
   if (_set_history_chk) {
     if (_node_prefs->persist_history != 0) lv_obj_add_state(_set_history_chk, LV_STATE_CHECKED);  // 0xFF/1 = on
@@ -7572,6 +7615,15 @@ void UITask::set_hashtag_colors_cb(lv_event_t* e) {
   s_hashtag_channel_colors = on;
   pushPrefs();
   if (_instance->_chat_screen) _instance->rebuildChatHistory();   // recolor any open chat's hashtags
+}
+
+void UITask::set_chsender_colors_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  uint8_t on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
+  _instance->_node_prefs->channel_sender_colors = on;
+  s_channel_sender_colors = on;
+  pushPrefs();
+  if (_instance->_chat_screen) _instance->rebuildChatHistory();   // restyle any open channel's sender headers
 }
 
 void UITask::set_notify_cb(lv_event_t* e) {

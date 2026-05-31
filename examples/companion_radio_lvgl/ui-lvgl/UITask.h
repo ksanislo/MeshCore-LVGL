@@ -300,6 +300,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_theme_dd;        // UI color theme picker (built-ins + SD /themes)
   lv_obj_t*       _set_mention_chk;     // chat: color @mentions by user color
   lv_obj_t*       _set_hashtag_chk;     // chat: color #hashtags by channel color
+  lv_obj_t*       _set_chsender_chk;    // channel chat: brand+color each sender's name
   lv_obj_t*       _set_history_chk;     // persist chat history to SD toggle
   lv_obj_t*       _set_notify_chk;      // master new-message notifications toggle
   lv_obj_t*       _set_mutedef_chk;     // "Mute by default" (opt-in per conversation)
@@ -743,6 +744,7 @@ private:
   static void theme_async_cb(void* unused);   // deferred theme rebuild (lv_async_call)
   static void set_mention_colors_cb(lv_event_t* e);
   static void set_hashtag_colors_cb(lv_event_t* e);
+  static void set_chsender_colors_cb(lv_event_t* e);
   void applyThemeByName(const char* name);   // resolve a built-in / SD theme by name + apply live
   void applyTheme(const UiPalette& pal);      // swap g_ui_palette + rebuild the UI in place
   int  buildThemeOptions(char* out, size_t cap, const char* sel, int* sel_idx);  // dropdown options + selected index
@@ -900,7 +902,7 @@ public:
       _profile_screen(NULL), _profile_body(NULL), _profile_kb(NULL), _profile_return_screen(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
-      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_avatar_dd(NULL), _set_theme_dd(NULL), _set_mention_chk(NULL), _set_hashtag_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_mutedef_chk(NULL), _set_kb(NULL),
+      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_avatar_dd(NULL), _set_theme_dd(NULL), _set_mention_chk(NULL), _set_hashtag_chk(NULL), _set_chsender_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_mutedef_chk(NULL), _set_kb(NULL),
       _set_active_ta(NULL),
       _set_launcher(NULL), _set_pane{}, _set_pane_body{}, _set_active_pane(NULL),
       _set_key_ta(NULL),
