@@ -1,0 +1,21 @@
+; Neon -- neon accents on true black. A real, usable example theme.
+; Copy this file to the SD card at  /themes/Neon.txt  then pick "Neon" in
+; Settings -> Appearance -> Theme.
+;
+; Format: one "role = #RRGGBB" per line. Lines without '=' (like these) are
+; ignored, so ';' comments are fine. Any omitted role falls back to the Dark theme.
+
+bg        = #000000   ; page background        (true black)
+surface   = #0B0B14   ; cards / top bars       (near-black)
+border    = #232336   ; hairlines / dividers   (dim indigo)
+msg_in    = #1A1A2E   ; incoming chat bubble   (deep indigo)
+dim       = #7A7A99   ; secondary text         (muted lavender)
+fg        = #D5F5FF   ; primary text           (soft cyan-white)
+fg_strong = #FFFFFF   ; emphasized text        (white)
+on_color  = #FFFFFF   ; avatar letters         (white)
+scrim     = #000000   ; modal backdrop         (black)
+accent    = #00E5FF   ; links / chips          (neon cyan)
+primary   = #FF2D95   ; buttons / outgoing bbl (neon magenta)
+alert     = #FF3B6B   ; unread / error         (neon red-pink)
+danger    = #7F1D1D   ; destructive button bg  (deep red)
+fav       = #FFE600   ; favourite accent       (neon yellow)

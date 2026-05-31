@@ -52,6 +52,11 @@ uint8_t g_avatar_palette_mode = 0;
 // as the built-in dark theme; the Settings "Theme" picker swaps it at runtime.
 UiPalette g_ui_palette = UI_THEME_DARK;
 
+// Chat chip coloring (seeded from prefs in begin(), toggled in Settings; read by
+// addMessageText). On = color @mentions by user / #hashtags by channel; off = accent.
+static uint8_t s_mention_user_colors   = 1;
+static uint8_t s_hashtag_channel_colors = 1;
+
 void UITask::disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
   if (!_instance || !_instance->_lgfx) {
     lv_disp_flush_ready(drv);
@@ -979,7 +984,7 @@ static lv_obj_t* addRadioRow(lv_obj_t* grp, const char* text, int value, lv_even
   lv_obj_set_style_text_color(ind, lv_color_hex(UI_ACCENT), 0);
   lv_obj_t* lbl = lv_label_create(row);
   lv_label_set_text(lbl, text);
-  lv_obj_set_style_text_color(lbl, lv_color_hex(UI_FG_BRIGHT), 0);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(UI_FG_STRONG), 0);
   return row;
 }
 
@@ -1354,7 +1359,7 @@ void UITask::ensureInsertPopup() {
 
 static void styleMenuBtn(lv_obj_t* b) {
   lv_obj_set_style_bg_color(b, lv_color_hex(UI_SURFACE), 0);
-  lv_obj_set_style_text_color(b, lv_color_hex(UI_FG_BRIGHT), 0);
+  lv_obj_set_style_text_color(b, lv_color_hex(UI_FG_STRONG), 0);
   lv_obj_set_style_border_color(b, lv_color_hex(UI_BORDER), 0);
   lv_obj_set_style_border_side(b, LV_BORDER_SIDE_BOTTOM, 0);
   lv_obj_set_style_border_width(b, 1, 0);
@@ -1891,9 +1896,10 @@ static const lv_font_t* fontCaption() { return withEmoji(&lv_font_montserrat_12)
 // renders that as one '#'). The visible/"logical" text therefore differs from the
 // rendered markup string -- selection slices the markup back to logical text in
 // labelSelToLogical() (defined with the selection controller).
-static const uint32_t MSG_FG_TEXT = 0xF3F4F6;
-static const uint32_t MSG_MENTION  = 0x34D399;  // emerald-400; reads on gray + blue bubbles
-static const uint32_t MSG_HASHTAG  = 0x60A5FA;  // blue-400 (UI_ACCENT); #channel tags
+// Bubble text color is now passed per-bubble (outgoing: UI_ON_COLOR; incoming:
+// UI_FG_STRONG) so it follows the theme -- see addMessageText()'s `fg` arg. @mentions
+// and #hashtags are colored by the mentioned user's / channel's own name color when
+// the toggles below are on, else the theme accent (UI_ACCENT).
 
 // Public #hashtag channel key derivation -- matches the Flutter client's
 // Channel.derivePskFromHashtag(): PSK = SHA256("#" + name)[0:16] (AES-128), and
@@ -1952,7 +1958,7 @@ static void appendEscaped(char*& w, char* end, const char* s, size_t len) {
   }
 }
 
-static void addMessageText(lv_obj_t* bubble, const char* text) {
+static void addMessageText(lv_obj_t* bubble, const char* text, uint32_t fg) {
   char clean[CHAT_MSG_TEXT_MAX + 8];
   sanitizeForFont(text, clean, sizeof(clean));
 
@@ -1978,19 +1984,29 @@ static void addMessageText(lv_obj_t* bubble, const char* text) {
 
     appendEscaped(w, end, p, tok - p);                 // plain run before the token
     if (is_mention) {
-      // "#34D399 @name#" -- closing '#' is always followed by plain text/end.
-      int wrote = snprintf(w, end - w, "#%06X @", (unsigned)MSG_MENTION);
+      // Color the mention by the user's own avatar color (toggle), else the theme accent.
+      char uname[CHAT_PEER_NAME_MAX]; size_t ul = (size_t)(atclose - (at + 2));
+      if (ul >= sizeof(uname)) ul = sizeof(uname) - 1;
+      memcpy(uname, at + 2, ul); uname[ul] = 0;
+      uint32_t mc = s_mention_user_colors ? nameColor(uname) : UI_ACCENT;
+      // "#RRGGBB @name#" -- closing '#' is always followed by plain text/end.
+      int wrote = snprintf(w, end - w, "#%06X @", (unsigned)mc);
       if (wrote < 0 || wrote >= end - w) break;
       w += wrote;
       appendEscaped(w, end, at + 2, atclose - (at + 2));   // username
       if (w < end - 1) *w++ = '#';
       p = atclose + 1;
     } else {
+      // Color the tag by the channel's own color (toggle), else the theme accent.
+      char cname[CHAT_PEER_NAME_MAX]; size_t cl = (size_t)(htend - (tok + 1));
+      if (cl >= sizeof(cname)) cl = sizeof(cname) - 1;
+      memcpy(cname, tok + 1, cl); cname[cl] = 0;
+      uint32_t hc = s_hashtag_channel_colors ? nameColor(cname) : UI_ACCENT;
       // A literal '#' can't live inside a recolor span (it closes the color), so
       // render the '#' in the default color, then the name in the tag color:
       // "##" (literal '#') + "#RRGGBB name#".
       appendEscaped(w, end, "#", 1);                       // -> "##" = one literal '#'
-      int wrote = snprintf(w, end - w, "#%06X ", (unsigned)MSG_HASHTAG);
+      int wrote = snprintf(w, end - w, "#%06X ", (unsigned)hc);
       if (wrote < 0 || wrote >= end - w) break;
       w += wrote;
       appendEscaped(w, end, tok + 1, htend - (tok + 1));   // the tag name (without '#')
@@ -2005,7 +2021,7 @@ static void addMessageText(lv_obj_t* bubble, const char* text) {
   lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
   lv_label_set_recolor(lbl, true);
   lv_obj_set_style_text_font(lbl, msgFont(), 0);            // emoji/unicode-capable
-  lv_obj_set_style_text_color(lbl, lv_color_hex(MSG_FG_TEXT), 0);  // default (non-recolored) color
+  lv_obj_set_style_text_color(lbl, lv_color_hex(fg), 0);  // default (non-recolored) color, per-bubble
   lv_label_set_text(lbl, markup);
 
   // If the run has tappable tokens (@mention / #hashtag), stash the logical source
@@ -2046,7 +2062,7 @@ void UITask::showJoinChannel(const char* name) {
     _joinch_lbl = lv_label_create(card);
     lv_label_set_long_mode(_joinch_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(_joinch_lbl, LV_PCT(100));
-    lv_obj_set_style_text_color(_joinch_lbl, lv_color_hex(UI_FG_BRIGHT), 0);
+    lv_obj_set_style_text_color(_joinch_lbl, lv_color_hex(UI_FG_STRONG), 0);
 
     lv_obj_t* btns = lv_obj_create(card);
     lv_obj_set_width(btns, LV_PCT(100));
@@ -2160,14 +2176,14 @@ static bool parseContactRefSpan(const char* b, const char* e, uint8_t* pk, uint8
 
 // Render a [s,len) text run into the bubble via the shared message pipeline; skips
 // whitespace-only runs (so the card doesn't get blank lines around it).
-static void addTextSpan(lv_obj_t* bubble, const char* s, size_t len) {
+static void addTextSpan(lv_obj_t* bubble, const char* s, size_t len, uint32_t fg) {
   bool nonblank = false;
   for (size_t i = 0; i < len; i++) if (!isspace((unsigned char)s[i])) { nonblank = true; break; }
   if (!nonblank) return;
   char buf[CHAT_MSG_TEXT_MAX + 8];
   if (len >= sizeof(buf)) len = sizeof(buf) - 1;
   memcpy(buf, s, len); buf[len] = 0;
-  addMessageText(bubble, buf);
+  addMessageText(bubble, buf, fg);
 }
 
 // Does the text contain at least one parseable contact ref anywhere?
@@ -2356,7 +2372,7 @@ void UITask::buildContactCard(lv_obj_t* parent, const ChatMessage* m,
   lv_obj_set_width(nm, LV_PCT(100));
   lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
   lv_label_set_text(nm, sname);
-  lv_obj_set_style_text_color(nm, lv_color_hex(UI_FG_BRIGHT), 0);
+  lv_obj_set_style_text_color(nm, lv_color_hex(UI_FG_STRONG), 0);
   lv_obj_set_style_text_font(nm, fontBody(), 0);
 
   char hex[2 * PUB_KEY_SIZE + 1];
@@ -2370,12 +2386,14 @@ void UITask::buildContactCard(lv_obj_t* parent, const ChatMessage* m,
   lv_obj_set_style_text_color(kl, lv_color_hex(DIM_HEX), 0);
   lv_obj_set_style_text_font(kl, fontCaption(), 0);
 
-  bool known = mproxy::lookupContactByPubKey(pubkey, PUB_KEY_SIZE) != nullptr;
-  lv_obj_t* hint = lv_label_create(card);
-  lv_label_set_text(hint, known ? LV_SYMBOL_OK " In contacts \xC2\xB7 tap to open"
-                                : LV_SYMBOL_PLUS " Tap to add contact");
-  lv_obj_set_style_text_color(hint, lv_color_hex(known ? 0x34D399 : UI_ACCENT), 0);
-  lv_obj_set_style_text_font(hint, fontCaption(), 0);
+  // Only hint when the contact is NOT yet saved -- "in contacts" is the default
+  // state and not worth a line; "tap to add" tells you it's missing.
+  if (!mproxy::lookupContactByPubKey(pubkey, PUB_KEY_SIZE)) {
+    lv_obj_t* hint = lv_label_create(card);
+    lv_label_set_text(hint, LV_SYMBOL_PLUS " Tap to add contact");
+    lv_obj_set_style_text_color(hint, lv_color_hex(UI_ACCENT), 0);
+    lv_obj_set_style_text_font(hint, fontCaption(), 0);
+  }
 }
 
 // Render a message body that mixes plain text with inline "rich tokens" -- emit
@@ -2383,7 +2401,7 @@ void UITask::buildContactCard(lv_obj_t* parent, const ChatMessage* m,
 // bubble. Today the only rich token is a contact ref (<pubkey:type:name>) -> an
 // inline contact card; this is the hook for future inline types (channel links,
 // http image links, etc.): add a detector + a builder in the scan below.
-void UITask::renderRichBody(lv_obj_t* bubble, const ChatMessage* m) {
+void UITask::renderRichBody(lv_obj_t* bubble, const ChatMessage* m, uint32_t fg) {
   lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(bubble, 4, 0);
   const char* p = m->text;
@@ -2392,14 +2410,14 @@ void UITask::renderRichBody(lv_obj_t* bubble, const ChatMessage* m) {
     const char* gt = lt ? strchr(lt, '>') : nullptr;
     uint8_t pk[PUB_KEY_SIZE], ty; char nm[CHAT_PEER_NAME_MAX];
     if (lt && gt && parseContactRefSpan(lt, gt + 1, pk, ty, nm, sizeof(nm))) {
-      addTextSpan(bubble, p, (size_t)(lt - p));   // text before the token (skips blanks)
-      buildContactCard(bubble, m, pk, ty, nm);    // inline contact card
+      addTextSpan(bubble, p, (size_t)(lt - p), fg);   // text before the token (skips blanks)
+      buildContactCard(bubble, m, pk, ty, nm);        // inline contact card
       p = gt + 1;
     } else if (lt) {
-      addTextSpan(bubble, p, (size_t)(lt - p) + 1);  // a stray '<' -> keep as text
+      addTextSpan(bubble, p, (size_t)(lt - p) + 1, fg);  // a stray '<' -> keep as text
       p = lt + 1;
     } else {
-      addTextSpan(bubble, p, strlen(p));          // trailing text
+      addTextSpan(bubble, p, strlen(p), fg);          // trailing text
       break;
     }
   }
@@ -2529,10 +2547,14 @@ void UITask::rebuildChatHistory() {
     lv_obj_set_style_bg_opa(bubble, LV_OPA_COVER, 0);
     lv_obj_align(bubble, m->outgoing ? LV_ALIGN_TOP_RIGHT : LV_ALIGN_TOP_LEFT, 0, 0);
 
+    // Text color contrasts with the bubble: white on the saturated outgoing bubble,
+    // the theme's bright/ink color on the neutral incoming bubble (so it stays legible
+    // in light themes too).
+    uint32_t bubble_fg = m->outgoing ? UI_ON_COLOR : UI_FG_STRONG;
     if (textHasContactRef(m->text)) {
-      renderRichBody(bubble, m);   // text runs + inline contact card(s)
+      renderRichBody(bubble, m, bubble_fg);   // text runs + inline contact card(s)
     } else {
-      addMessageText(bubble, m->text);
+      addMessageText(bubble, m->text, bubble_fg);
       if (m->outgoing && m->status == MSG_STATUS_FAILED) {
         lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);  // tap to resend
         lv_obj_set_user_data(bubble, (void*)m);
@@ -2984,6 +3006,11 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   lv_indev_drv_register(&_indev_drv);
 
   if (_node_prefs) g_avatar_palette_mode = _node_prefs->avatar_palette ? 1 : 0;  // seed avatar scheme BEFORE any list renders
+  if (_node_prefs) applyThemeByName(_node_prefs->theme_name);  // seed g_ui_palette BEFORE the UI builds (no rebuild yet)
+  if (_node_prefs) {                                           // seed chat chip-color toggles
+    s_mention_user_colors   = _node_prefs->mention_user_colors   ? 1 : 0;
+    s_hashtag_channel_colors = _node_prefs->hashtag_channel_colors ? 1 : 0;
+  }
 
   _splash_screen = buildSplashScreen();
   _home_screen   = buildHomeScreen();
@@ -3261,7 +3288,7 @@ void UITask::ensureBanner() {
     lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
     _banner_title = lv_label_create(col);
-    lv_obj_set_style_text_color(_banner_title, lv_color_hex(UI_FG_BRIGHT), 0);
+    lv_obj_set_style_text_color(_banner_title, lv_color_hex(UI_FG_STRONG), 0);
     lv_obj_set_style_text_font(_banner_title, fontBody(), 0);
     // Preview is rendered through the same pipeline as chat bubbles
     // (addMessageText in showBanner): "@[name]" mentions become a highlighted
@@ -3331,11 +3358,11 @@ void UITask::showBanner(const char* conv_key, const char* sender,
     lv_obj_t* lbl = lv_label_create(_banner_body);
     lv_obj_set_width(lbl, LV_PCT(100));
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_color(lbl, lv_color_hex(UI_FG_BRIGHT), 0);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(UI_FG_STRONG), 0);
     lv_obj_set_style_text_font(lbl, fontBody(), 0);
     lv_label_set_text(lbl, line);
   } else {
-    addMessageText(_banner_body, text ? text : "");   // same recolor render as a chat bubble
+    addMessageText(_banner_body, text ? text : "", UI_FG_STRONG);   // same recolor render as a chat bubble
   }
 
   lv_obj_clear_flag(_banner, LV_OBJ_FLAG_HIDDEN);
@@ -3419,7 +3446,7 @@ void UITask::showToast(const char* text) {
     _toast = lv_label_create(lv_layer_top());
     lv_obj_set_style_bg_color(_toast, lv_color_hex(UI_BORDER), 0);
     lv_obj_set_style_bg_opa(_toast, LV_OPA_COVER, 0);
-    lv_obj_set_style_text_color(_toast, lv_color_hex(UI_FG_BRIGHT), 0);
+    lv_obj_set_style_text_color(_toast, lv_color_hex(UI_FG_STRONG), 0);
     lv_obj_set_style_pad_all(_toast, 8, 0);
     lv_obj_set_style_radius(_toast, 6, 0);
     lv_obj_align(_toast, LV_ALIGN_BOTTOM_MID, 0, -10);
@@ -4024,7 +4051,7 @@ void UITask::showKeyPopup(const char* hex) {
     _keypop_lbl = lv_label_create(card);
     lv_label_set_long_mode(_keypop_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(_keypop_lbl, LV_PCT(100));
-    lv_obj_set_style_text_color(_keypop_lbl, lv_color_hex(UI_FG_BRIGHT), 0);
+    lv_obj_set_style_text_color(_keypop_lbl, lv_color_hex(UI_FG_STRONG), 0);
     lv_obj_set_style_text_font(_keypop_lbl, &lv_font_montserrat_12, 0);  // full hex, compact
 
     lv_obj_t* btnrow = lv_obj_create(card);
@@ -5908,6 +5935,28 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_width(_set_avatar_dd, LV_PCT(100));
   lv_obj_add_event_cb(_set_avatar_dd, set_avatar_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  // UI color theme: built-in palettes + any SD /themes files. Applies live.
+  lv_obj_t* fth = makeField(body, "Theme");
+  _set_theme_dd = lv_dropdown_create(fth);
+  lv_obj_set_width(_set_theme_dd, LV_PCT(100));
+  { char opts[768]; int sel = 0;
+    buildThemeOptions(opts, sizeof(opts), _node_prefs ? _node_prefs->theme_name : "", &sel);
+    lv_dropdown_set_options(_set_theme_dd, opts);
+    lv_dropdown_set_selected(_set_theme_dd, sel); }
+  lv_obj_add_event_cb(_set_theme_dd, set_theme_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  // Chat chip colors: color @mentions / #hashtags by the user's / channel's own
+  // color (on), or leave them the theme accent (off).
+  _set_mention_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_mention_chk, "@user colors");
+  lv_obj_set_style_text_color(_set_mention_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_mention_chk, set_mention_colors_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  _set_hashtag_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_hashtag_chk, "#channel colors");
+  lv_obj_set_style_text_color(_set_hashtag_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_hashtag_chk, set_hashtag_colors_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
 #ifdef HAS_SD_CARD
   _set_history_chk = lv_checkbox_create(body);
   lv_checkbox_set_text(_set_history_chk, "Save chat history");
@@ -5996,6 +6045,20 @@ void UITask::populateSettings() {
     else                        lv_obj_clear_state(_set_clock_chk, LV_STATE_CHECKED);
   }
   if (_set_avatar_dd) lv_dropdown_set_selected(_set_avatar_dd, _node_prefs->avatar_palette ? 1 : 0);
+  if (_set_theme_dd) {   // re-list (picks up SD themes) + select the active one
+    char opts[768]; int sel = 0;
+    buildThemeOptions(opts, sizeof(opts), _node_prefs->theme_name, &sel);
+    lv_dropdown_set_options(_set_theme_dd, opts);
+    lv_dropdown_set_selected(_set_theme_dd, sel);
+  }
+  if (_set_mention_chk) {
+    if (_node_prefs->mention_user_colors) lv_obj_add_state(_set_mention_chk, LV_STATE_CHECKED);
+    else                                  lv_obj_clear_state(_set_mention_chk, LV_STATE_CHECKED);
+  }
+  if (_set_hashtag_chk) {
+    if (_node_prefs->hashtag_channel_colors) lv_obj_add_state(_set_hashtag_chk, LV_STATE_CHECKED);
+    else                                     lv_obj_clear_state(_set_hashtag_chk, LV_STATE_CHECKED);
+  }
   if (_set_history_chk) {
     if (_node_prefs->persist_history != 0) lv_obj_add_state(_set_history_chk, LV_STATE_CHECKED);  // 0xFF/1 = on
     else                                   lv_obj_clear_state(_set_history_chk, LV_STATE_CHECKED);
@@ -6675,7 +6738,7 @@ void UITask::showSelMenu() {
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t* l = lv_label_create(b);
     lv_label_set_text(l, sym);
-    lv_obj_set_style_text_color(l, lv_color_hex(UI_FG_BRIGHT), 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(UI_FG_STRONG), 0);
     lv_obj_center(l);
   };
   if (_sel.kind == SEL_TEXTAREA) {
@@ -6967,6 +7030,201 @@ void UITask::set_avatar_cb(lv_event_t* e) {
   pushPrefs();
   _instance->_contacts_dirty = true;       // recolor the contact rows on next build
   _instance->updateOwnerProfile();         // live-refresh the avatar visible on Settings
+}
+
+// ---- SD-card custom themes (/themes/<name>.txt) ---------------------------
+// Format: one "role = #RRGGBB" per line (also accepts ':' and bare "#RRGGBB").
+// Unknown roles and lines without '='/':' (e.g. comments) are ignored; omitted
+// roles keep the dark base. No parser library -- just line reads + hex.
+static bool parseHexColor(const char* s, uint32_t& out) {
+  while (*s == ' ' || *s == '\t') s++;
+  if (*s == '#') s++;
+  uint32_t v = 0; int n = 0;
+  for (; n < 6; n++) {
+    char c = s[n];
+    uint32_t d;
+    if (c >= '0' && c <= '9') d = c - '0';
+    else if ((c | 32) >= 'a' && (c | 32) <= 'f') d = (c | 32) - 'a' + 10;
+    else break;
+    v = (v << 4) | d;
+  }
+  if (n < 6) return false;
+  out = v; return true;
+}
+
+#ifdef HAS_SD_CARD
+struct ThemeRole { const char* key; uint32_t UiPalette::* field; };
+static const ThemeRole THEME_ROLES[] = {
+  {"bg",&UiPalette::bg}, {"surface",&UiPalette::surface}, {"border",&UiPalette::border},
+  {"msg_in",&UiPalette::msg_in}, {"dim",&UiPalette::dim}, {"fg",&UiPalette::fg},
+  {"fg_strong",&UiPalette::fg_strong}, {"on_color",&UiPalette::on_color}, {"scrim",&UiPalette::scrim},
+  {"accent",&UiPalette::accent}, {"primary",&UiPalette::primary}, {"alert",&UiPalette::alert},
+  {"danger",&UiPalette::danger}, {"fav",&UiPalette::fav},
+};
+static const int THEME_ROLE_N = sizeof(THEME_ROLES) / sizeof(THEME_ROLES[0]);
+
+static bool sdLoadTheme(const char* name, UiPalette& out) {
+  if (!name || !name[0] || !SdSvc::ensureMounted()) return false;
+  char path[80]; snprintf(path, sizeof(path), "/themes/%s.txt", name);
+  SdSvc::Lock lk;
+  FsFile f = sd.open(path, O_RDONLY);
+  if (!f) return false;
+  out = UI_THEME_DARK;                        // base: file overrides only the roles it names
+  char line[80];
+  while (f.fgets(line, sizeof(line)) > 0) {
+    char* sep = strpbrk(line, "=:");
+    if (!sep) continue;                       // no key=value -> comment/blank, skip
+    *sep = 0;
+    char* k = line; while (*k == ' ' || *k == '\t') k++;
+    char* ke = k + strlen(k); while (ke > k && (ke[-1] == ' ' || ke[-1] == '\t')) *--ke = 0;
+    uint32_t col;
+    if (!parseHexColor(sep + 1, col)) continue;
+    for (int i = 0; i < THEME_ROLE_N; i++)
+      if (strcasecmp(k, THEME_ROLES[i].key) == 0) { out.*(THEME_ROLES[i].field) = col; break; }
+  }
+  f.close();
+  return true;
+}
+
+// List /themes/*.txt filenames (without extension) into names[]; returns the count.
+static int sdListThemes(char names[][24], int maxn) {
+  SdSvc::rescan();   // re-probe after a hot-swap: picks up a card inserted to add theme files
+  if (!SdSvc::ensureMounted()) return 0;
+  SdSvc::Lock lk;
+  int n = 0;
+  FsFile dir = sd.open("/themes", O_RDONLY);
+  if (dir && dir.isDir()) {
+    dir.rewind();                         // ensure iteration starts at the first entry
+    FsFile e;
+    while (n < maxn && e.openNext(&dir, O_RDONLY)) {
+      if (!e.isDir()) {
+        char fn[48]; e.getName(fn, sizeof(fn));
+        size_t L = strlen(fn);
+        if (L > 4 && L - 4 < 24 && strcasecmp(fn + L - 4, ".txt") == 0) {
+          fn[L - 4] = 0;
+          strncpy(names[n], fn, 23); names[n][23] = 0; n++;
+        }
+      }
+      e.close();
+    }
+  }
+  if (dir) dir.close();
+  return n;
+}
+#endif  // HAS_SD_CARD
+
+// Build the Theme dropdown's "\n"-joined option list (built-ins, then SD /themes
+// files in B2). Sets *sel_idx to the entry matching `sel` (the saved theme name),
+// defaulting to 0 (Dark). Returns the option count.
+int UITask::buildThemeOptions(char* out, size_t cap, const char* sel, int* sel_idx) {
+  size_t w = 0; int idx = 0, found = 0;
+  if (sel_idx) *sel_idx = 0;
+  for (int i = 0; i < UI_BUILTIN_THEME_N; i++) {
+    const char* nm = UI_BUILTIN_THEMES[i].name;
+    int wrote = snprintf(out + w, cap - w, "%s%s", i ? "\n" : "", nm);
+    if (wrote < 0 || (size_t)wrote >= cap - w) break;
+    w += wrote;
+    if (sel && sel[0] && sel_idx && !found && strcmp(sel, nm) == 0) { *sel_idx = idx; found = 1; }
+    idx++;
+  }
+#ifdef HAS_SD_CARD
+  char names[16][24];
+  int sdn = sdListThemes(names, 16);
+  for (int i = 0; i < sdn; i++) {
+    int wrote = snprintf(out + w, cap - w, "\n%s", names[i]);
+    if (wrote < 0 || (size_t)wrote >= cap - w) break;
+    w += wrote;
+    if (sel && sel[0] && sel_idx && !found && strcmp(sel, names[i]) == 0) { *sel_idx = idx; found = 1; }
+    idx++;
+  }
+#endif
+  return idx;
+}
+
+// Swap the active palette and re-theme the UI in place. Before the UI exists
+// (boot seeding) this just sets g_ui_palette; once built, it rebuilds the home
+// screen and drops the reused secondary screens so they rebuild themed on open.
+void UITask::applyTheme(const UiPalette& pal) {
+  g_ui_palette = pal;
+  // Drive LVGL's built-in default theme from the palette, so widgets we DON'T style
+  // explicitly (lv_btn / lv_dropdown / lv_checkbox / lv_switch) follow the accent +
+  // primary and flip dark<->light with the theme instead of staying fixed blue.
+  if (lv_disp_t* disp = lv_disp_get_default()) {
+    uint32_t bg = g_ui_palette.bg;
+    uint32_t lum = (((bg >> 16) & 0xFF) * 299 + ((bg >> 8) & 0xFF) * 587 + (bg & 0xFF) * 114) / 1000;
+    lv_theme_t* th = lv_theme_default_init(disp, lv_color_hex(UI_PRIMARY), lv_color_hex(UI_ACCENT),
+                                           lum < 128 /*dark*/, LV_FONT_DEFAULT);
+    lv_disp_set_theme(disp, th);
+  }
+  if (!_home_screen) return;                 // boot seed: palette set, nothing built yet
+  lv_obj_t* old_home = _home_screen;
+  _home_screen = buildHomeScreen();          // rebuilds tabview + all tabs (incl. Settings)
+  rebuildContactsList();
+  rebuildChannelsList();
+  populateSettings();                        // re-seed the Settings widgets from prefs
+  lv_obj_t** sec[] = { &_chat_screen, &_cinfo_screen, &_qr_screen, &_path_screen,
+                       &_chinfo_screen, &_newchan_screen, &_nodeinfo_screen, &_profile_screen };
+  for (lv_obj_t** s : sec) if (*s) { lv_obj_del(*s); *s = NULL; }   // rebuilt themed on next open
+  _cinfo_return_screen = _qr_return_screen = _path_return_screen =
+      _chinfo_return_screen = _profile_return_screen = NULL;
+
+  // Reused overlays live on the top layer (not on _home_screen), so re-theme them too.
+  if (_banner) { lv_obj_del(_banner); _banner = NULL; }
+  ensureBanner();                                                  // rebuild now, themed (keeps the fast first frame)
+  if (_toast) { lv_obj_del(_toast); _toast = NULL; }               // rebuilt on next showToast
+  if (_lock_screen) { lv_obj_del(_lock_screen); _lock_screen = NULL; _lock_kb = NULL; }  // rebuilt on next lock
+  if (_tabview) lv_tabview_set_act(_tabview, 2, LV_ANIM_OFF);       // stay on the Settings tab
+  lv_scr_load(_home_screen);
+  // Deferred: applyTheme runs from the theme dropdown's own event callback, and the
+  // dropdown lives on old_home -- deleting it synchronously would be a use-after-free.
+  if (old_home) lv_obj_del_async(old_home);
+}
+
+// Resolve a theme by name and apply it: a built-in first, then an SD /themes file,
+// else the default dark theme.
+void UITask::applyThemeByName(const char* name) {
+  for (int i = 0; i < UI_BUILTIN_THEME_N; i++)
+    if (name && name[0] && strcmp(name, UI_BUILTIN_THEMES[i].name) == 0) { applyTheme(UI_BUILTIN_THEMES[i].pal); return; }
+#ifdef HAS_SD_CARD
+  UiPalette pal;
+  if (sdLoadTheme(name, pal)) { applyTheme(pal); return; }
+#endif
+  applyTheme(UI_THEME_DARK);
+}
+
+// Run the live rebuild OUTSIDE the dropdown's event: applyTheme tears down the
+// screen the dropdown lives on and re-inits the global LVGL theme, which freezes
+// the UI if done mid-dispatch (with the dropdown's list still open).
+void UITask::theme_async_cb(void* /*unused*/) {
+  if (_instance && _instance->_node_prefs) _instance->applyThemeByName(_instance->_node_prefs->theme_name);
+}
+
+void UITask::set_theme_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  char name[24] = "";
+  lv_dropdown_get_selected_str(lv_event_get_target(e), name, sizeof(name));
+  strncpy(_instance->_node_prefs->theme_name, name, sizeof(_instance->_node_prefs->theme_name) - 1);
+  _instance->_node_prefs->theme_name[sizeof(_instance->_node_prefs->theme_name) - 1] = 0;
+  pushPrefs();
+  lv_async_call(theme_async_cb, NULL);       // defer the rebuild to after this event completes
+}
+
+void UITask::set_mention_colors_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  uint8_t on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
+  _instance->_node_prefs->mention_user_colors = on;
+  s_mention_user_colors = on;
+  pushPrefs();
+  if (_instance->_chat_screen) _instance->rebuildChatHistory();   // recolor any open chat's mentions
+}
+
+void UITask::set_hashtag_colors_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  uint8_t on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
+  _instance->_node_prefs->hashtag_channel_colors = on;
+  s_hashtag_channel_colors = on;
+  pushPrefs();
+  if (_instance->_chat_screen) _instance->rebuildChatHistory();   // recolor any open chat's hashtags
 }
 
 void UITask::set_notify_cb(lv_event_t* e) {
@@ -7390,7 +7648,7 @@ void UITask::showSharePosWarning() {
     lv_obj_t* warn = lv_label_create(card);
     lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(warn, LV_PCT(100));
-    lv_obj_set_style_text_color(warn, lv_color_hex(UI_FG_BRIGHT), 0);
+    lv_obj_set_style_text_color(warn, lv_color_hex(UI_FG_STRONG), 0);
     lv_label_set_text(warn,
       "When enabled, your exact latitude and longitude will be broadcast "
       "publically in your adverts.\n\n"
@@ -7461,7 +7719,7 @@ void UITask::showInfoPopup(const char* title, const char* body) {
     _info_body_lbl = lv_label_create(card);
     lv_label_set_long_mode(_info_body_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(_info_body_lbl, LV_PCT(100));
-    lv_obj_set_style_text_color(_info_body_lbl, lv_color_hex(UI_FG_BRIGHT), 0);
+    lv_obj_set_style_text_color(_info_body_lbl, lv_color_hex(UI_FG_STRONG), 0);
 
     lv_obj_t* ok = lv_btn_create(card);
     lv_obj_add_event_cb(ok, info_close_cb, LV_EVENT_CLICKED, NULL);

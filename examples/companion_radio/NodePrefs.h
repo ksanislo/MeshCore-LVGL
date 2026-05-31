@@ -48,4 +48,7 @@ struct NodePrefs {  // persisted to file
   char     lock_pin[8];        // settings-lock PIN (4-6 digits, NUL-terminated); "" = no PIN set
   uint8_t  notify_enable;      // master new-message notifications (wake+banner+buzzer); 0=off,1=on (0xFF unset -> on)
   uint8_t  avatar_palette;     // contact avatar color scheme: 0 = curated (default), 1 = iOS-app parity
+  char     theme_name[24];     // UI color theme: built-in name ("Dark"...) or an SD /themes file; "" = default (Dark)
+  uint8_t  mention_user_colors;   // chat: color @mentions by the user's avatar color (1=on default, 0=off -> theme accent)
+  uint8_t  hashtag_channel_colors;// chat: color #hashtags by the channel's color   (1=on default, 0=off -> theme accent)
 };

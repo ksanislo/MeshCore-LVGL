@@ -286,6 +286,9 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     _prefs.lock_pin[0] = 0;                                                                // 148 (default: no PIN)
     _prefs.notify_enable = 1;                                                              // 156 (default: notifications on)
     _prefs.avatar_palette = 0;                                                             // 157 (default: curated palette)
+    _prefs.theme_name[0] = 0;                                                              // 158 (default: "" -> Dark)
+    _prefs.mention_user_colors = 1;                                                        // 159 (default: on)
+    _prefs.hashtag_channel_colors = 1;                                                     // 160 (default: on)
     file.read((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
     file.read((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
     file.read((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
@@ -298,6 +301,9 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)_prefs.lock_pin, sizeof(_prefs.lock_pin));                        // 148
     file.read((uint8_t *)&_prefs.notify_enable, sizeof(_prefs.notify_enable));             // 156
     file.read((uint8_t *)&_prefs.avatar_palette, sizeof(_prefs.avatar_palette));           // 157
+    file.read((uint8_t *)_prefs.theme_name, sizeof(_prefs.theme_name));                    // 158
+    file.read((uint8_t *)&_prefs.mention_user_colors, sizeof(_prefs.mention_user_colors)); // 159
+    file.read((uint8_t *)&_prefs.hashtag_channel_colors, sizeof(_prefs.hashtag_channel_colors)); // 160
 
     file.close();
   }
@@ -351,6 +357,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)_prefs.lock_pin, sizeof(_prefs.lock_pin));                        // 148
     file.write((uint8_t *)&_prefs.notify_enable, sizeof(_prefs.notify_enable));             // 156
     file.write((uint8_t *)&_prefs.avatar_palette, sizeof(_prefs.avatar_palette));           // 157
+    file.write((uint8_t *)_prefs.theme_name, sizeof(_prefs.theme_name));                    // 158
+    file.write((uint8_t *)&_prefs.mention_user_colors, sizeof(_prefs.mention_user_colors)); // 159
+    file.write((uint8_t *)&_prefs.hashtag_channel_colors, sizeof(_prefs.hashtag_channel_colors)); // 160
 
     file.close();
     commitTmp(_fs, "/new_prefs.tmp", "/new_prefs");

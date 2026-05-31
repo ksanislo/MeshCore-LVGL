@@ -29,7 +29,7 @@ struct UiPalette {
   uint32_t msg_in;      // incoming chat bubble (own role; themeable apart from border)
   uint32_t dim;         // secondary / metadata text
   uint32_t fg;          // primary text
-  uint32_t fg_bright;   // emphasized text / wordmark
+  uint32_t fg_strong;   // emphasized text / wordmark
   uint32_t on_color;    // text/glyph on a saturated fill (avatar letters)
   uint32_t scrim;       // modal backdrop / scrim (used with opacity)
   // Brand
@@ -50,7 +50,7 @@ static constexpr UiPalette UI_THEME_DARK = {
   /*msg_in*/    0x374151,  // gray-700
   /*dim*/       0x6B7280,  // gray-500
   /*fg*/        0xD1D5DB,  // gray-300
-  /*fg_bright*/ 0xF3F4F6,  // gray-100
+  /*fg_strong*/ 0xF3F4F6,  // gray-100
   /*on_color*/  0xFFFFFF,  // white
   /*scrim*/     0x000000,  // black
   /*accent*/    0x60A5FA,  // blue-400
@@ -69,7 +69,7 @@ extern UiPalette g_ui_palette;   // active palette (defined in UITask.cpp)
 #define UI_MSG_IN      (g_ui_palette.msg_in)
 #define UI_DIM         (g_ui_palette.dim)
 #define UI_FG          (g_ui_palette.fg)
-#define UI_FG_BRIGHT   (g_ui_palette.fg_bright)
+#define UI_FG_STRONG   (g_ui_palette.fg_strong)
 #define UI_ON_COLOR    (g_ui_palette.on_color)
 #define UI_SCRIM       (g_ui_palette.scrim)
 #define UI_ACCENT      (g_ui_palette.accent)
@@ -81,7 +81,7 @@ extern UiPalette g_ui_palette;   // active palette (defined in UITask.cpp)
 // Semantic aliases (map onto the roles above; keep call sites unchanged).
 #define UI_AVATAR_NEUT UI_BORDER     // non-chat avatar bg
 #define UI_MSG_OUT     UI_PRIMARY    // outgoing chat bubble
-#define UI_LOGO        UI_FG_BRIGHT  // wordmark tint (recolorable)
+#define UI_LOGO        UI_FG_STRONG  // wordmark tint (recolorable)
 #define UI_UNREAD      UI_ALERT      // unread dot / mark
 #define UI_ERROR       UI_ALERT      // inline error / failure text
 
@@ -90,6 +90,48 @@ extern UiPalette g_ui_palette;   // active palette (defined in UITask.cpp)
 #define FG_HEX         UI_FG
 #define DIM_HEX        UI_DIM
 #define FAV_HEX        UI_FAV
+
+// ----- Built-in themes -----------------------------------------------------
+// True-black (OLED): pure-black bg, near-black surfaces, dark theme otherwise.
+static constexpr UiPalette UI_THEME_BLACK = {
+  /*bg*/0x000000, /*surface*/0x0D0D0D, /*border*/0x262626, /*msg_in*/0x1A1A1A,
+  /*dim*/0x6B7280, /*fg*/0xD1D5DB, /*fg_strong*/0xF3F4F6, /*on_color*/0xFFFFFF, /*scrim*/0x000000,
+  /*accent*/0x60A5FA, /*primary*/0x2563EB, /*alert*/0xEF4444, /*danger*/0x7F1D1D, /*fav*/0xFBBF24,
+};
+// Light: light bg, dark text; deeper accents/status for contrast on white. The
+// incoming bubble is a mid grey (darker than the page) so dark text reads clearly.
+static constexpr UiPalette UI_THEME_LIGHT = {
+  /*bg*/0xF9FAFB, /*surface*/0xFFFFFF, /*border*/0xD1D5DB, /*msg_in*/0xCBD5E1,
+  /*dim*/0x6B7280, /*fg*/0x111827, /*fg_strong*/0x000000, /*on_color*/0xFFFFFF, /*scrim*/0x000000,
+  /*accent*/0x2563EB, /*primary*/0x2563EB, /*alert*/0xDC2626, /*danger*/0xB91C1C, /*fav*/0xD97706,
+};
+// Accent variants: the dark neutrals, only the brand colors (accent + primary) change.
+static constexpr UiPalette UI_THEME_EMERALD = {
+  0x111827, 0x1F2937, 0x374151, 0x374151, 0x6B7280, 0xD1D5DB, 0xF3F4F6, 0xFFFFFF, 0x000000,
+  /*accent*/0x34D399, /*primary*/0x059669, 0xEF4444, 0x7F1D1D, 0xFBBF24,
+};
+static constexpr UiPalette UI_THEME_AMBER = {
+  0x111827, 0x1F2937, 0x374151, 0x374151, 0x6B7280, 0xD1D5DB, 0xF3F4F6, 0xFFFFFF, 0x000000,
+  /*accent*/0xFBBF24, /*primary*/0xD97706, 0xEF4444, 0x7F1D1D, 0xFBBF24,
+};
+static constexpr UiPalette UI_THEME_VIOLET = {
+  0x111827, 0x1F2937, 0x374151, 0x374151, 0x6B7280, 0xD1D5DB, 0xF3F4F6, 0xFFFFFF, 0x000000,
+  /*accent*/0xA78BFA, /*primary*/0x7C3AED, 0xEF4444, 0x7F1D1D, 0xFBBF24,
+};
+
+// Registry: name (also the Settings label) + palette. SD-card themes extend this
+// list at runtime by filename.
+struct UiTheme { const char* name; UiPalette pal; };
+static const UiTheme UI_BUILTIN_THEMES[] = {
+  { "Dark",    UI_THEME_DARK    },
+  { "Black",   UI_THEME_BLACK   },
+  { "Light",   UI_THEME_LIGHT   },
+  { "Emerald", UI_THEME_EMERALD },
+  { "Amber",   UI_THEME_AMBER   },
+  { "Violet",  UI_THEME_VIOLET  },
+};
+static constexpr int UI_BUILTIN_THEME_N =
+    sizeof(UI_BUILTIN_THEMES) / sizeof(UI_BUILTIN_THEMES[0]);
 
 // ----- Layout metrics ------------------------------------------------------
 // (HEADER_H / TABBAR_H / COMPOSE_H / SEARCH_BAR_H still live in UITask.cpp.)

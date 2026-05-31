@@ -15,6 +15,8 @@
   #define CHAT_HISTORY_CAP 48
 #endif
 
+struct UiPalette;   // ui_theme.h (full definition); only a reference is used here
+
 class UITask : public AbstractUITask {
   LGFX_Device*    _lgfx;
   NodePrefs*      _node_prefs;       // -> _node_prefs_store (UI-owned working copy)
@@ -289,6 +291,9 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_tz_ta;           // UTC offset (hours) for local-time display
   lv_obj_t*       _set_clock_chk;       // 12-hour clock toggle
   lv_obj_t*       _set_avatar_dd;       // contact avatar color scheme (Default / iOS app)
+  lv_obj_t*       _set_theme_dd;        // UI color theme picker (built-ins + SD /themes)
+  lv_obj_t*       _set_mention_chk;     // chat: color @mentions by user color
+  lv_obj_t*       _set_hashtag_chk;     // chat: color #hashtags by channel color
   lv_obj_t*       _set_history_chk;     // persist chat history to SD toggle
   lv_obj_t*       _set_notify_chk;      // master new-message notifications toggle
   lv_obj_t*       _set_kb;
@@ -568,7 +573,7 @@ class UITask : public AbstractUITask {
   static void insert_share_cb(lv_event_t* e);
   static void contact_card_cb(lv_event_t* e);   // tap inline card -> open / add contact
   static void card_free_cb(lv_event_t* e);       // free the card's heap target on delete
-  void      renderRichBody(lv_obj_t* bubble, const ChatMessage* m);  // text + inline rich tokens
+  void      renderRichBody(lv_obj_t* bubble, const ChatMessage* m, uint32_t fg);  // text + inline rich tokens
   void      buildContactCard(lv_obj_t* parent, const ChatMessage* m,
                              const uint8_t* pubkey, uint8_t type, const char* name);
 
@@ -713,6 +718,13 @@ private:
   static void set_tz_ta_event_cb(lv_event_t* e);
   static void set_clock_cb(lv_event_t* e);
   static void set_avatar_cb(lv_event_t* e);
+  static void set_theme_cb(lv_event_t* e);
+  static void theme_async_cb(void* unused);   // deferred theme rebuild (lv_async_call)
+  static void set_mention_colors_cb(lv_event_t* e);
+  static void set_hashtag_colors_cb(lv_event_t* e);
+  void applyThemeByName(const char* name);   // resolve a built-in / SD theme by name + apply live
+  void applyTheme(const UiPalette& pal);      // swap g_ui_palette + rebuild the UI in place
+  int  buildThemeOptions(char* out, size_t cap, const char* sel, int* sel_idx);  // dropdown options + selected index
   static void set_history_cb(lv_event_t* e);
   static void category_row_cb(lv_event_t* e);
   static void settings_back_cb(lv_event_t* e);
@@ -861,7 +873,7 @@ public:
       _profile_screen(NULL), _profile_body(NULL), _profile_kb(NULL), _profile_return_screen(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
-      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_avatar_dd(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_kb(NULL),
+      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_avatar_dd(NULL), _set_theme_dd(NULL), _set_mention_chk(NULL), _set_hashtag_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_kb(NULL),
       _set_active_ta(NULL),
       _set_launcher(NULL), _set_pane{}, _set_pane_body{}, _set_active_pane(NULL),
       _set_key_ta(NULL),
