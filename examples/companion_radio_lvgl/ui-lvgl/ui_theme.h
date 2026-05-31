@@ -15,27 +15,40 @@
 // tokens map to Tailwind shades so the scheme stays coherent as it grows.
 // ---------------------------------------------------------------------------
 
-// ----- Color tokens --------------------------------------------------------
-// Canonical names. The short legacy aliases (BG_HEX/FG_HEX/...) below keep the
-// hundreds of existing call sites compiling unchanged.
+// ----- Color tokens (role-based palette) -----------------------------------
+// ~13 distinct colors. CANONICAL ROLE tokens come first; the semantic + legacy
+// aliases below map onto them, so the palette stays small while the hundreds of
+// existing call sites compile unchanged. When the palette becomes runtime-
+// swappable, only the canonical roles need a slot.
+
+// Neutrals
 static constexpr uint32_t UI_BG          = 0x111827;  // gray-900  page background
 static constexpr uint32_t UI_SURFACE     = 0x1F2937;  // gray-800  cards / top bars
-static constexpr uint32_t UI_BORDER      = 0x374151;  // gray-700  hairlines / dividers
+static constexpr uint32_t UI_BORDER      = 0x374151;  // gray-700  hairlines, dividers, neutral fills
+static constexpr uint32_t UI_MSG_IN      = 0x374151;  // gray-700  incoming chat bubble (own role; themeable apart from UI_BORDER)
+static constexpr uint32_t UI_DIM         = 0x6B7280;  // gray-500  secondary / metadata text
 static constexpr uint32_t UI_FG          = 0xD1D5DB;  // gray-300  primary text
-static constexpr uint32_t UI_FG_BRIGHT   = 0xF3F4F6;  // gray-100  emphasized text
-static constexpr uint32_t UI_DIM         = 0x6B7280;  // gray-500  secondary / metadata
-static constexpr uint32_t UI_ACCENT      = 0x60A5FA;  // blue-400  links / accents
-static constexpr uint32_t UI_FAV         = 0xFBBF24;  // amber-400 favourite accent
-static constexpr uint32_t UI_UNREAD      = 0xEF4444;  // red-500   unread dot
-static constexpr uint32_t UI_AVATAR_NEUT = 0x374151;  // gray-700  non-chat avatar bg
-static constexpr uint32_t UI_PRIMARY     = 0x2563EB;  // blue-600  primary action button
-static constexpr uint32_t UI_DANGER      = 0x7F1D1D;  // red-900   destructive action button
-static constexpr uint32_t UI_ERROR       = 0xF87171;  // red-400   inline error / failure text
-static constexpr uint32_t UI_MSG_OUT     = 0x2563EB;  // blue-600  outgoing chat bubble
-static constexpr uint32_t UI_MSG_IN      = 0x374151;  // gray-700  incoming chat bubble
-static constexpr uint32_t UI_LOGO       = 0xF3F4F6;  // gray-100  wordmark tint (recolorable)
+static constexpr uint32_t UI_FG_BRIGHT   = 0xF3F4F6;  // gray-100  emphasized text / wordmark
+static constexpr uint32_t UI_ON_COLOR    = 0xFFFFFF;  // white     text/glyph on a saturated fill (avatar letters)
+static constexpr uint32_t UI_SCRIM       = 0x000000;  // black     modal backdrop / scrim (used with opacity)
 
-// Legacy aliases (do not remove -- referenced widely in UITask.cpp).
+// Brand
+static constexpr uint32_t UI_ACCENT      = 0x60A5FA;  // blue-400  links, chips, selected indicator
+static constexpr uint32_t UI_PRIMARY     = 0x2563EB;  // blue-600  primary action button / outgoing bubble
+
+// Status
+static constexpr uint32_t UI_ALERT       = 0xEF4444;  // red-500   unread + error + alerts (one bright red)
+static constexpr uint32_t UI_DANGER      = 0x7F1D1D;  // red-900   destructive-action button bg
+static constexpr uint32_t UI_FAV         = 0xFBBF24;  // amber-400 favourite accent
+
+// Semantic aliases (map onto the roles above; keep call sites unchanged).
+static constexpr uint32_t UI_AVATAR_NEUT = UI_BORDER;    // non-chat avatar bg
+static constexpr uint32_t UI_MSG_OUT     = UI_PRIMARY;   // outgoing chat bubble
+static constexpr uint32_t UI_LOGO        = UI_FG_BRIGHT; // wordmark tint (recolorable)
+static constexpr uint32_t UI_UNREAD      = UI_ALERT;     // unread dot / mark
+static constexpr uint32_t UI_ERROR       = UI_ALERT;     // inline error / failure text
+
+// Legacy short aliases (do not remove -- referenced widely in UITask.cpp).
 static constexpr uint32_t BG_HEX  = UI_BG;
 static constexpr uint32_t FG_HEX  = UI_FG;
 static constexpr uint32_t DIM_HEX = UI_DIM;

@@ -188,7 +188,7 @@ static lv_obj_t* attachScrollHandle(lv_obj_t* content) {
   lv_obj_clear_flag(thumb, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_size(thumb, 10, 24);
   lv_obj_set_style_radius(thumb, 5, 0);
-  lv_obj_set_style_bg_color(thumb, lv_color_hex(0x6B7280), 0);
+  lv_obj_set_style_bg_color(thumb, lv_color_hex(DIM_HEX), 0);
   lv_obj_set_style_bg_opa(thumb, LV_OPA_60, 0);
   lv_obj_set_style_border_width(thumb, 0, 0);
   lv_obj_set_style_pad_all(thumb, 0, 0);
@@ -276,7 +276,7 @@ lv_obj_t* UITask::makeBackdrop(lv_event_cb_t tap_cb) {
   lv_obj_t* bd = lv_obj_create(lv_layer_top());
   lv_obj_set_size(bd, _screen_w, _screen_h);
   lv_obj_set_pos(bd, 0, 0);
-  lv_obj_set_style_bg_color(bd, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_color(bd, lv_color_hex(UI_SCRIM), 0);
   lv_obj_set_style_bg_opa(bd, LV_OPA_60, 0);
   lv_obj_set_style_border_width(bd, 0, 0);
   lv_obj_set_style_pad_all(bd, 0, 0);
@@ -607,7 +607,7 @@ static void buildUnreadMark() {
   lv_point_t loop[5] = { pts[0], pts[1], pts[2], pts[3], pts[0] };
   lv_canvas_draw_line(cv, loop, 5, &ld);
   lv_draw_rect_dsc_t d; lv_draw_rect_dsc_init(&d);
-  d.bg_color = lv_color_hex(0xFF0000); d.bg_opa = LV_OPA_COVER;   // pure red -- with the outline it has the pop
+  d.bg_color = lv_color_hex(UI_UNREAD); d.bg_opa = LV_OPA_COVER;   // alert red -- the outline gives it pop
   // LVGL's canvas polygon fill is convex-only; this chevron is concave (the notch),
   // so fill it as two triangles meeting at the front spine (notch <-> tip).
   lv_point_t tri_top[3] = { pts[0], pts[1], pts[3] };
@@ -660,7 +660,7 @@ void UITask::makeContactRowSlot(lv_obj_t* parent, ContactRow& w, lv_event_cb_t t
 
   lv_obj_t* avl = lv_label_create(av);
   lv_obj_center(avl);
-  lv_obj_set_style_text_color(avl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_color(avl, lv_color_hex(UI_ON_COLOR), 0);
   lv_obj_set_style_text_font(avl, fontHeading(), 0);
 
   lv_obj_t* nm = lv_label_create(row);
@@ -686,7 +686,7 @@ void UITask::fillContactRow(ContactRow& w, const ContactInfo& c) {
   lv_label_set_text(w.name, clean);
 
   lv_obj_set_style_border_width(w.avatar, 0, 0);   // clear any New-Contact ring (slot reuse)
-  lv_obj_set_style_text_color(w.avatar_lbl, lv_color_hex(0xFFFFFF), 0);   // letter back to white
+  lv_obj_set_style_text_color(w.avatar_lbl, lv_color_hex(UI_ON_COLOR), 0);   // letter back to white
   bool is_chat = (c.type == ADV_TYPE_CHAT || c.type == 0);
   if (is_chat) {
     char g[8]; firstGrapheme(clean, g, sizeof(g));
@@ -771,7 +771,7 @@ void UITask::fillLeadRow(ContactListView& lv, ContactRow& w) {
     lv_label_set_text(w.seen, "");
   } else {  // LEAD_SELF: our own identity, like a contact card
     lv_obj_set_style_border_width(w.avatar, 0, 0);   // clear the New-Contact ring (slot reuse)
-    lv_obj_set_style_text_color(w.avatar_lbl, lv_color_hex(0xFFFFFF), 0);   // letter back to white
+    lv_obj_set_style_text_color(w.avatar_lbl, lv_color_hex(UI_ON_COLOR), 0);   // letter back to white
     const char* who = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "(unnamed)";
     char clean[CHAT_PEER_NAME_MAX + 4];
     sanitizeForFont(who, clean, sizeof(clean));
@@ -972,10 +972,10 @@ static lv_obj_t* addRadioRow(lv_obj_t* grp, const char* text, int value, lv_even
   lv_obj_t* ind = lv_label_create(row);
   lv_obj_set_width(ind, 16);
   lv_label_set_text(ind, " ");
-  lv_obj_set_style_text_color(ind, lv_color_hex(0x34D399), 0);
+  lv_obj_set_style_text_color(ind, lv_color_hex(UI_ACCENT), 0);
   lv_obj_t* lbl = lv_label_create(row);
   lv_label_set_text(lbl, text);
-  lv_obj_set_style_text_color(lbl, lv_color_hex(0xF3F4F6), 0);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(UI_FG_BRIGHT), 0);
   return row;
 }
 
@@ -1190,7 +1190,7 @@ void UITask::rebuildChannelsList() {
     if (!unread) lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
     lv_obj_t* avl = lv_label_create(av);
     lv_obj_center(avl);
-    lv_obj_set_style_text_color(avl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(avl, lv_color_hex(UI_ON_COLOR), 0);
     lv_obj_set_style_text_font(avl, fontHeading(), 0);
     brandChannelAvatar(av, avl, ch.name);   // name-colored hexagon
 
@@ -1329,7 +1329,7 @@ void UITask::ensureInsertPopup() {
   _insert_popup = lv_obj_create(_chat_screen);
   lv_obj_set_size(_insert_popup, _screen_w, _screen_h);
   lv_obj_set_pos(_insert_popup, 0, 0);
-  lv_obj_set_style_bg_color(_insert_popup, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_color(_insert_popup, lv_color_hex(UI_SCRIM), 0);
   lv_obj_set_style_bg_opa(_insert_popup, LV_OPA_50, 0);
   lv_obj_set_style_border_width(_insert_popup, 0, 0);
   lv_obj_set_style_radius(_insert_popup, 0, 0);
@@ -1350,8 +1350,8 @@ void UITask::ensureInsertPopup() {
 
 static void styleMenuBtn(lv_obj_t* b) {
   lv_obj_set_style_bg_color(b, lv_color_hex(UI_SURFACE), 0);
-  lv_obj_set_style_text_color(b, lv_color_hex(0xF3F4F6), 0);
-  lv_obj_set_style_border_color(b, lv_color_hex(0x374151), 0);
+  lv_obj_set_style_text_color(b, lv_color_hex(UI_FG_BRIGHT), 0);
+  lv_obj_set_style_border_color(b, lv_color_hex(UI_BORDER), 0);
   lv_obj_set_style_border_side(b, LV_BORDER_SIDE_BOTTOM, 0);
   lv_obj_set_style_border_width(b, 1, 0);
 }
@@ -2337,7 +2337,7 @@ void UITask::buildContactCard(lv_obj_t* parent, const ChatMessage* m,
   lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
   lv_obj_t* avl = lv_label_create(av);
   lv_obj_center(avl);
-  lv_obj_set_style_text_color(avl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_color(avl, lv_color_hex(UI_ON_COLOR), 0);
   lv_obj_set_style_text_font(avl, fontHeading(), 0);
   brandAvatar(av, avl, sname, type);
 
@@ -2501,7 +2501,7 @@ void UITask::rebuildChatHistory() {
       char sname[CHAT_PEER_NAME_MAX + 4];
       sanitizeForFont(m->sender[0] ? m->sender : "?", sname, sizeof(sname));
       lv_label_set_text(name, sname);
-      lv_obj_set_style_text_color(name, lv_color_hex(0x9CA3AF), 0);  // gray-400
+      lv_obj_set_style_text_color(name, lv_color_hex(DIM_HEX), 0);  // gray-400
       lv_obj_set_style_text_font(name, fontCaption(), 0);
     }
 
@@ -2660,7 +2660,7 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_add_event_cb(_chat_avatar, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel hexagon
     _chat_avatar_lbl = lv_label_create(_chat_avatar);
     lv_obj_center(_chat_avatar_lbl);
-    lv_obj_set_style_text_color(_chat_avatar_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(_chat_avatar_lbl, lv_color_hex(UI_ON_COLOR), 0);
     lv_obj_set_style_text_font(_chat_avatar_lbl, fontHeading(), 0);
 
     // Name (top) + route status (bottom). Tap anywhere here -> Contact Info.
@@ -2699,7 +2699,7 @@ void UITask::openChat(const char* peer_name) {
     // In-conversation search bar: hidden until the kebab "Search" reveals it.
     // Geometry (position/height) is applied by layoutChatBody when active.
     _chat_search_bar = lv_obj_create(_chat_screen);
-    lv_obj_set_style_bg_color(_chat_search_bar, lv_color_hex(0x111827), 0);
+    lv_obj_set_style_bg_color(_chat_search_bar, lv_color_hex(BG_HEX), 0);
     lv_obj_set_style_bg_opa(_chat_search_bar, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(_chat_search_bar, 0, 0);
     lv_obj_set_style_radius(_chat_search_bar, 0, 0);
@@ -3244,7 +3244,7 @@ void UITask::ensureBanner() {
     lv_obj_add_event_cb(_banner_avatar, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel hole
     _banner_avatar_lbl = lv_label_create(_banner_avatar);
     lv_obj_center(_banner_avatar_lbl);
-    lv_obj_set_style_text_color(_banner_avatar_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(_banner_avatar_lbl, lv_color_hex(UI_ON_COLOR), 0);
     lv_obj_set_style_text_font(_banner_avatar_lbl, fontHeading(), 0);
 
     lv_obj_t* col = lv_obj_create(_banner);
@@ -3413,9 +3413,9 @@ void UITask::cinfo_toast_timer_cb(lv_timer_t* t) {
 void UITask::showToast(const char* text) {
   if (!_toast) {  // lazily build on the top layer so it shows from any screen
     _toast = lv_label_create(lv_layer_top());
-    lv_obj_set_style_bg_color(_toast, lv_color_hex(0x374151), 0);
+    lv_obj_set_style_bg_color(_toast, lv_color_hex(UI_BORDER), 0);
     lv_obj_set_style_bg_opa(_toast, LV_OPA_COVER, 0);
-    lv_obj_set_style_text_color(_toast, lv_color_hex(0xF3F4F6), 0);
+    lv_obj_set_style_text_color(_toast, lv_color_hex(UI_FG_BRIGHT), 0);
     lv_obj_set_style_pad_all(_toast, 8, 0);
     lv_obj_set_style_radius(_toast, 6, 0);
     lv_obj_align(_toast, LV_ALIGN_BOTTOM_MID, 0, -10);
@@ -3486,7 +3486,7 @@ static void makeHeroCard(lv_obj_t* parent, lv_obj_t** avatarOut, lv_obj_t** avat
   lv_obj_add_event_cb(av, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel hexagon support
   lv_obj_t* avl = lv_label_create(av);
   lv_obj_center(avl);
-  lv_obj_set_style_text_color(avl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_color(avl, lv_color_hex(UI_ON_COLOR), 0);
   lv_obj_set_style_text_font(avl, fontHero(), 0);
 
   lv_obj_t* col = lv_obj_create(hero);
@@ -5326,7 +5326,7 @@ static void addSettingsSection(lv_obj_t* body, const char* title) {
   lv_obj_set_style_text_font(h, fontHeading(), 0);
   lv_obj_set_style_pad_top(h, 8, 0);
   lv_obj_set_style_pad_bottom(h, 4, 0);
-  lv_obj_set_style_border_color(h, lv_color_hex(0x374151), 0);  // gray-700 underline
+  lv_obj_set_style_border_color(h, lv_color_hex(UI_BORDER), 0);  // gray-700 underline
   lv_obj_set_style_border_side(h, LV_BORDER_SIDE_BOTTOM, 0);
   lv_obj_set_style_border_width(h, 1, 0);
 }
@@ -5684,7 +5684,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_clear_flag(_set_profile_avatar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
   _set_profile_avatar_lbl = lv_label_create(_set_profile_avatar);
   lv_obj_center(_set_profile_avatar_lbl);
-  lv_obj_set_style_text_color(_set_profile_avatar_lbl, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_color(_set_profile_avatar_lbl, lv_color_hex(UI_ON_COLOR), 0);
   lv_obj_set_style_text_font(_set_profile_avatar_lbl, fontTitle(), 0);
 
   lv_obj_t* pcol = lv_obj_create(prof);
@@ -5744,7 +5744,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_pad_all(rhdr, 0, 0);
   lv_obj_set_style_pad_top(rhdr, 8, 0);
   lv_obj_set_style_pad_bottom(rhdr, 4, 0);
-  lv_obj_set_style_border_color(rhdr, lv_color_hex(0x374151), 0);
+  lv_obj_set_style_border_color(rhdr, lv_color_hex(UI_BORDER), 0);
   lv_obj_set_style_border_side(rhdr, LV_BORDER_SIDE_BOTTOM, 0);
   lv_obj_set_style_border_width(rhdr, 1, 0);
   lv_obj_clear_flag(rhdr, LV_OBJ_FLAG_SCROLLABLE);
@@ -7386,7 +7386,7 @@ void UITask::showSharePosWarning() {
     lv_obj_t* warn = lv_label_create(card);
     lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(warn, LV_PCT(100));
-    lv_obj_set_style_text_color(warn, lv_color_hex(0xF3F4F6), 0);
+    lv_obj_set_style_text_color(warn, lv_color_hex(UI_FG_BRIGHT), 0);
     lv_label_set_text(warn,
       "When enabled, your exact latitude and longitude will be broadcast "
       "publically in your adverts.\n\n"
@@ -7457,7 +7457,7 @@ void UITask::showInfoPopup(const char* title, const char* body) {
     _info_body_lbl = lv_label_create(card);
     lv_label_set_long_mode(_info_body_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(_info_body_lbl, LV_PCT(100));
-    lv_obj_set_style_text_color(_info_body_lbl, lv_color_hex(0xF3F4F6), 0);
+    lv_obj_set_style_text_color(_info_body_lbl, lv_color_hex(UI_FG_BRIGHT), 0);
 
     lv_obj_t* ok = lv_btn_create(card);
     lv_obj_add_event_cb(ok, info_close_cb, LV_EVENT_CLICKED, NULL);
