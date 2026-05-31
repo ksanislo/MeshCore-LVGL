@@ -285,7 +285,10 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
       break;
     }
     case CmdKind::Advert:
-      mesh.advert();
+      mesh.advert();        // zero-hop self advert
+      break;
+    case CmdKind::AdvertFlood:
+      mesh.advertFlood();   // flooded self advert
       break;
     case CmdKind::UpdatePrefs:
       *mesh.getNodePrefs() = cmd.prefs;

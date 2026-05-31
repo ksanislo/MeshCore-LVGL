@@ -5784,7 +5784,15 @@ void UITask::buildProfileScreen() {
   styleAsDarkScreen(_profile_screen);
   lv_obj_set_style_pad_all(_profile_screen, 0, 0);
 
-  makeHeaderBar(_profile_screen, "Profile", profile_back_cb);
+  {
+    lv_obj_t* bar = makeHeaderBar(_profile_screen, "Profile", profile_back_cb);
+    lv_obj_t* kebab = lv_btn_create(bar);   // overflow: adverts + Share QR
+    lv_obj_set_style_bg_opa(kebab, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_width(kebab, 0, 0);
+    lv_obj_set_style_pad_all(kebab, 4, 0);
+    lv_obj_add_event_cb(kebab, profile_kebab_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(kebab), LV_SYMBOL_LIST);
+  }
 
   _profile_body = lv_obj_create(_profile_screen);
   lv_obj_add_event_cb(_profile_body, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap empty -> hide kb
@@ -5838,13 +5846,7 @@ void UITask::buildProfileScreen() {
   lv_obj_set_style_text_color(_set_sharepos, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_sharepos, set_sharepos_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-  // Export our own contact as a scannable QR (reuses the share-QR screen).
-  lv_obj_t* shareme = lv_btn_create(_profile_body);
-  lv_obj_set_width(shareme, LV_PCT(100));
-  lv_obj_add_event_cb(shareme, set_shareme_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* sml = lv_label_create(shareme);
-  lv_label_set_text(sml, LV_SYMBOL_DOWNLOAD " Share my contact (QR)");
-  lv_obj_center(sml);
+  // (Share QR + self-adverts moved to the header kebab -- see profile_kebab_cb.)
 
   _profile_kb = lv_keyboard_create(_profile_screen);
   lv_obj_add_event_cb(_profile_kb, profile_kb_event_cb, LV_EVENT_ALL, NULL);
@@ -7818,6 +7820,36 @@ void UITask::set_shareme_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   _instance->openShareQR(mproxy::selfPubKey(), ADV_TYPE_CHAT,
                          _instance->_node_prefs->node_name, _instance->_profile_screen);
+}
+
+// Owner profile overflow menu: re-advertise ourselves + Share QR.
+void UITask::profile_kebab_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  lv_obj_t* list = _instance->ensureMenuPopup();
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_WIFI, "Advert (zero-hop)"), profile_advert_zhop_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_WIFI, "Advert (flood)"),    profile_advert_flood_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_UPLOAD, "Share QR"),        profile_shareqr_cb, LV_EVENT_CLICKED, NULL);
+  _instance->showMenuPopup();
+}
+void UITask::profile_advert_zhop_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->closeMenuPopup();
+  mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::Advert; mproxy::postCommand(c);
+  _instance->showToast("Advert sent (zero-hop)");
+}
+void UITask::profile_advert_flood_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->closeMenuPopup();
+  mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::AdvertFlood; mproxy::postCommand(c);
+  _instance->showToast("Advert sent (flood)");
+}
+void UITask::profile_shareqr_cb(lv_event_t* e) {
+  if (!_instance) return;
+  _instance->closeMenuPopup();
+  set_shareme_cb(e);
 }
 
 void UITask::set_tz_ta_event_cb(lv_event_t* e) {

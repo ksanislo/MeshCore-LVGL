@@ -64,6 +64,7 @@ enum class CmdKind : uint8_t {
   SetMute,      // mute/unmute a conversation: name = conv-key, muted = on/off; persists
   RemoveContact,// delete a contact: pubkey
   RemoveChannel,// delete a channel: path = its 32-byte secret (identity)
+  AdvertFlood,  // self-advert, flooded (Advert is zero-hop)
 };
 
 struct MeshCmd {

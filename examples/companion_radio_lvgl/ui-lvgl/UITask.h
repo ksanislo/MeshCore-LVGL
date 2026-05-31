@@ -783,7 +783,11 @@ private:
   static void lock_kb_event_cb(lv_event_t* e);
   static void set_shareme_cb(lv_event_t* e);         // export own contact as QR
   void      showSharePosWarning();
-  static void profile_key_cb(lv_event_t* e);   // owner hero key line -> full key popup
+  static void profile_key_cb(lv_event_t* e);   // owner hero key line -> long-press copy
+  static void profile_kebab_cb(lv_event_t* e);       // owner profile overflow menu
+  static void profile_advert_zhop_cb(lv_event_t* e);
+  static void profile_advert_flood_cb(lv_event_t* e);
+  static void profile_shareqr_cb(lv_event_t* e);
   // Shared full-public-key popup (full hex + copy), opened from either key line.
   void        showKeyPopup(const char* hex);
   static void keypop_copy_cb(lv_event_t* e);

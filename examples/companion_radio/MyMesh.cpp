@@ -2345,3 +2345,12 @@ bool MyMesh::advert() {
     return false;
   }
 }
+
+bool MyMesh::advertFlood() {
+  mesh::Packet* pkt = (_prefs.advert_loc_policy == ADVERT_LOC_NONE)
+                          ? createSelfAdvert(_prefs.node_name)
+                          : createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
+  if (!pkt) return false;
+  sendFlood(pkt);
+  return true;
+}
