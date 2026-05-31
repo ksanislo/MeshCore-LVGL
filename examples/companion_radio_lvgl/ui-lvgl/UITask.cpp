@@ -586,49 +586,31 @@ void UITask::rebuildContactsList() {
       ? "No contacts match." : "No contacts yet.\nWaiting for adverts...");
 }
 
-// Unread marker: a bold red right-pointing chevron ">" (a concave dart) drawn once
-// into a shared image and layered between the avatar circle and its letter. Spans the
-// avatar's left half: rear arms at the box's left edge 2px from top/bottom, tip in at
-// the center (behind the letter), back notch pushed in ~1/3 so it stays thick. A thin
-// background-colored outline separates the red from the avatar color underneath.
-#define UNREAD_MARK_W 22
-#define UNREAD_MARK_H 40
-static uint8_t s_mark_buf[LV_CANVAS_BUF_SIZE_TRUE_COLOR_ALPHA(UNREAD_MARK_W, UNREAD_MARK_H)];
-static lv_img_dsc_t s_mark_img;
-static void buildUnreadMark() {
-  static bool built = false;
-  if (built) return;
-  built = true;
-  lv_obj_t* cv = lv_canvas_create(lv_layer_top());   // temp; draw is immediate into the buffer
-  lv_canvas_set_buffer(cv, s_mark_buf, UNREAD_MARK_W, UNREAD_MARK_H, LV_IMG_CF_TRUE_COLOR_ALPHA);
-  lv_canvas_fill_bg(cv, lv_color_black(), LV_OPA_TRANSP);
-  // top rear arm -> front tip (box center) -> bottom rear arm -> back notch (1/3 in).
-  lv_point_t pts[4] = {
-    { 0, 2 }, { 13, UNREAD_MARK_H / 2 }, { 0, UNREAD_MARK_H - 2 }, { 4, UNREAD_MARK_H / 2 },
-  };
-  // Outline FIRST: a thick BG-colored loop straddling the silhouette edges. The red
-  // fill (drawn next) then covers the inner half, leaving the outline OUTSIDE the red
-  // -- so the points keep full oomph instead of being masked. Where the marker
-  // overhangs onto the row background the BG outline blends away, so it only reads
-  // where the red sits over the avatar circle.
-  lv_draw_line_dsc_t ld; lv_draw_line_dsc_init(&ld);
-  ld.color = lv_color_hex(BG_HEX); ld.width = 2; ld.round_start = 1; ld.round_end = 1;
-  lv_point_t loop[5] = { pts[0], pts[1], pts[2], pts[3], pts[0] };
-  lv_canvas_draw_line(cv, loop, 5, &ld);
-  lv_draw_rect_dsc_t d; lv_draw_rect_dsc_init(&d);
-  d.bg_color = lv_color_hex(UI_UNREAD); d.bg_opa = LV_OPA_COVER;   // alert red -- the outline gives it pop
-  // LVGL's canvas polygon fill is convex-only; this chevron is concave (the notch),
-  // so fill it as two triangles meeting at the front spine (notch <-> tip).
-  lv_point_t tri_top[3] = { pts[0], pts[1], pts[3] };
-  lv_point_t tri_bot[3] = { pts[2], pts[1], pts[3] };
-  lv_canvas_draw_polygon(cv, tri_top, 3, &d);
-  lv_canvas_draw_polygon(cv, tri_bot, 3, &d);
-  lv_obj_del(cv);
-  s_mark_img.header.cf = LV_IMG_CF_TRUE_COLOR_ALPHA;
-  s_mark_img.header.w  = UNREAD_MARK_W;
-  s_mark_img.header.h  = UNREAD_MARK_H;
-  s_mark_img.data_size = sizeof(s_mark_buf);
-  s_mark_img.data      = s_mark_buf;
+
+// Unread badge: an envelope glyph on a bg-filled, slightly-rounded rect with a 1px
+// outline, sized to the glyph (the label's own box), centred on the avatar ring at
+// the top-right (45 deg). Created hidden-capable; caller toggles HIDDEN. Returns it
+// so the caller can stash it as the row's marker. Requires the avatar to have
+// LV_OBJ_FLAG_OVERFLOW_VISIBLE so the badge can sit over the ring.
+static lv_obj_t* makeUnreadBadge(lv_obj_t* av) {
+  lv_obj_t* b = lv_label_create(av);
+  lv_label_set_text(b, LV_SYMBOL_ENVELOPE);
+  lv_obj_set_style_text_color(b, lv_color_hex(UI_ALERT), 0);          // the envelope
+  lv_obj_set_style_text_font(b, fontHeading(), 0);
+  lv_obj_set_style_bg_color(b, lv_color_hex(BG_HEX), 0);              // backing behind the glyph
+  lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(b, 2, 0);                                   // sharp-ish corner with a touch of AA
+  lv_obj_set_style_border_color(b, lv_color_hex(BG_HEX), 0);          // 1px bg outline -> thin halo around the glyph
+  lv_obj_set_style_border_width(b, 1, 0);
+  lv_obj_set_style_pad_all(b, 0, 0);
+  lv_obj_set_style_pad_top(b, -3, 0);                                 // trim the font line-box dead space (~3px each)
+  lv_obj_set_style_pad_bottom(b, -3, 0);                              // so the backing hugs the envelope ink
+  lv_obj_add_flag(b, LV_OBJ_FLAG_OVERFLOW_VISIBLE);                   // glyph's transparent overhang isn't clipped
+  lv_obj_add_flag(b, LV_OBJ_FLAG_FLOATING);
+  lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE);
+  lv_coord_t ro = (lv_coord_t)lroundf(UI_AVATAR_D * 0.3536f);         // R*cos45 from centre (R = D/2)
+  lv_obj_align(b, LV_ALIGN_CENTER, ro, -ro);                         // centred on the top-right ring point
+  return b;
 }
 
 // One contact-list row's widget tree (avatar + unread marker + first-grapheme/glyph
@@ -658,14 +640,13 @@ void UITask::makeContactRowSlot(lv_obj_t* parent, ContactRow& w, lv_event_cb_t t
   lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
   lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(av, LV_OBJ_FLAG_OVERFLOW_VISIBLE);   // let the unread badge sit on/over the ring
 
-  // Unread marker: shared red chevron, child of the avatar created BEFORE the letter
-  // so the draw order is circle -> dart -> letter (letter stays on top + crisp).
-  lv_obj_t* dot = lv_img_create(av);
-  lv_img_set_src(dot, &s_mark_img);
-  lv_obj_add_flag(dot, LV_OBJ_FLAG_FLOATING);
-  lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_align(dot, LV_ALIGN_LEFT_MID, 0, 0);
+  // Unread marker: an envelope, centred on the ring at the top-right (45 deg, so
+  // offset (R*cos45, -R*sin45) ~= (0.354*D, ...) from centre). The label's own box is
+  // the badge backing: a bg-filled, slightly-rounded rect with a 1px outline, sized
+  // to the glyph -- so the envelope's transparent detail lines read as background.
+  lv_obj_t* dot = makeUnreadBadge(av);
 
   lv_obj_t* avl = lv_label_create(av);
   lv_obj_center(avl);
@@ -724,7 +705,6 @@ void UITask::fillContactRow(ContactRow& w, const ContactInfo& c) {
 // Create the scroll container, content spacer, empty-placeholder, and the recycled
 // pool of row widgets (avatar + name + last-seen + unread marker).
 void UITask::clistBuild(ContactListView& lv, lv_obj_t* parent) {
-  buildUnreadMark();
   lv.scroll = lv_obj_create(parent);
   lv_obj_set_width(lv.scroll, LV_PCT(100));
   lv_obj_set_flex_grow(lv.scroll, 1);            // fill remaining height
@@ -1190,12 +1170,9 @@ void UITask::rebuildChannelsList() {
     lv_obj_set_size(av, UI_AVATAR_D, UI_AVATAR_D);
     lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
     lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(av, LV_OBJ_FLAG_OVERFLOW_VISIBLE);   // let the unread badge sit on/over the ring
     lv_obj_add_event_cb(av, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);
-    lv_obj_t* dot = lv_img_create(av);   // shared unread chevron (created before the letter)
-    lv_img_set_src(dot, &s_mark_img);
-    lv_obj_add_flag(dot, LV_OBJ_FLAG_FLOATING);
-    lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_align(dot, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_t* dot = makeUnreadBadge(av);   // envelope badge centred on the top-right ring (before the letter)
     if (!unread) lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
     lv_obj_t* avl = lv_label_create(av);
     lv_obj_center(avl);
@@ -2211,47 +2188,33 @@ struct CardTarget { uint8_t pubkey[PUB_KEY_SIZE]; uint8_t type; char name[CHAT_P
 // drawn by LVGL (bg_color + radius); this hook draws the inner hexagon on top in
 // the obj's BORDER color (used purely as the hole-color slot). Gated by USER_1.
 //
-// Regular flat-top hexagon filling the inclusive box `a` (coords are LVGL-inclusive:
-// x1/x2, y1/y2 are the first/last pixels). Sized to the box width; a regular hexagon
-// is sqrt(3)/2 (~0.866) as tall as wide, so it's centred vertically. Every vertex is
-// placed relative to its OWN edge (left/right points on x1/x2; top/bottom edges inset
-// `ex` from each side), so it's symmetric at any size with no rounded centre to drift.
-static void drawHexBox(lv_draw_ctx_t* ctx, const lv_area_t* a, lv_color_t color) {
-  lv_coord_t lx = a->x1, rx = a->x2;                         // left/right points sit on the box edges
-  lv_coord_t span = rx - lx;                                 // vertex-to-vertex width
-  lv_coord_t ex = (lv_coord_t)lroundf(span * 0.25f);         // top/bottom edge horizontal inset (R*cos60)
-  lv_coord_t hh = (lv_coord_t)lroundf(span * 0.8660254f);    // regular hexagon height (= span*sin60)
-  // Place the top/bottom edges by EQUAL margins from each edge (not via a rounded
-  // centre) so the shape is symmetric vertically on even-height boxes too.
-  lv_coord_t m = ((a->y2 - a->y1) - hh) / 2; if (m < 0) m = 0;
-  lv_coord_t ty = a->y1 + m, by = a->y2 - m, cy = (ty + by) / 2;
-  lv_point_t pts[6] = {
-    { rx,                    cy },                           // right point
-    { (lv_coord_t)(rx - ex), ty },                           // top-right
-    { (lv_coord_t)(lx + ex), ty },                           // top-left
-    { lx,                    cy },                           // left point
-    { (lv_coord_t)(lx + ex), by },                           // bottom-left
-    { (lv_coord_t)(rx - ex), by },                           // bottom-right
-  };
+// Filled circle inscribed in the (square) box `a` -- the inner concentric circle of
+// a channel avatar. (radius = CIRCLE on a square area -> a circle.)
+static void drawCircleBox(lv_draw_ctx_t* ctx, const lv_area_t* a, lv_color_t color) {
   lv_draw_rect_dsc_t d; lv_draw_rect_dsc_init(&d);
   d.bg_color = color; d.bg_opa = LV_OPA_COVER;
-  lv_draw_polygon(ctx, &d, pts, 6);
+  d.radius = LV_RADIUS_CIRCLE;
+  lv_draw_rect(ctx, &d, a);
 }
 
+// Channel avatar = two concentric circles: the channel-color outer circle (the
+// object's own bg) with an inner circle drawn here. For a plain channel the inner
+// circle is the background color (reads as a ring + letter); for a user-in-channel
+// it's the user's color. A 1px background ring separates them when colors are close.
 static void hexAvatarDrawCb(lv_event_t* e) {
   lv_obj_t* o = lv_event_get_target(e);
   if (!lv_obj_has_flag(o, LV_OBJ_FLAG_USER_1)) return;   // only on channel avatars
-  lv_area_t a; lv_obj_get_coords(o, &a);                 // the (channel-color) circle's box
-  lv_coord_t inset = (lv_coord_t)lroundf(lv_area_get_width(&a) * 0.12f);   // channel-color ring
+  lv_area_t a; lv_obj_get_coords(o, &a);                 // the (channel-color) outer circle's box
+  lv_coord_t inset = (lv_coord_t)lroundf(lv_area_get_width(&a) * 0.12f);   // channel-color ring width
   lv_area_t hole = { (lv_coord_t)(a.x1 + inset), (lv_coord_t)(a.y1 + inset),
                      (lv_coord_t)(a.x2 - inset), (lv_coord_t)(a.y2 - inset) };
   lv_draw_ctx_t* ctx = lv_event_get_draw_ctx(e);
   lv_color_t bg   = lv_obj_get_style_bg_color(lv_obj_get_parent(o), LV_PART_MAIN);  // the background
   lv_color_t fill = lv_obj_get_style_border_color(o, LV_PART_MAIN);                 // empty(bg) or user color
-  drawHexBox(ctx, &hole, bg);                            // 1px background outline -> always separates the hole
+  drawCircleBox(ctx, &hole, bg);                         // 1px background ring -> always separates the inner circle
   lv_area_t in = { (lv_coord_t)(hole.x1 + 1), (lv_coord_t)(hole.y1 + 1),
                    (lv_coord_t)(hole.x2 - 1), (lv_coord_t)(hole.y2 - 1) };
-  drawHexBox(ctx, &in, fill);
+  drawCircleBox(ctx, &in, fill);
 }
 
 // Brand a CONTACT avatar: a name-colored circle (chat) or neutral type-glyph
