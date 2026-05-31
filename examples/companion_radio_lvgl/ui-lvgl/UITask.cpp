@@ -35,6 +35,7 @@ static lv_obj_t* attachClearX(lv_obj_t* ta);  // floating ✕ in a textarea; sho
 extern const lv_font_t meshcore_icons_16;     // generated icon font (FontAwesome magnifier 0xF002)
 #define MC_SYMBOL_SEARCH "\xEF\x80\x82"        // U+F002 magnifying-glass (in meshcore_icons_16)
 static void attachSearchIcon(lv_obj_t* ta);    // left-aligned magnifier glyph in a search field
+static void kbAccentDrawCb(lv_event_t* e);     // tint a keyboard's ✓ accept key (attach to any kb)
 
 // Type ramp: one place that maps a text role to a size (all emoji/unicode-capable).
 // hero=page name, title=screen header, heading=section/dialog title, body=default,
@@ -434,6 +435,7 @@ lv_obj_t* UITask::buildHomeScreen() {
 
   // Search keyboard (hidden; overlays the home screen, like the settings one).
   _contacts_kb = lv_keyboard_create(scr);
+  lv_obj_add_event_cb(_contacts_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ key
   lv_keyboard_set_textarea(_contacts_kb, _contacts_search_ta);
   lv_obj_add_event_cb(_contacts_kb, contacts_kb_cb, LV_EVENT_ALL, NULL);
   lv_obj_add_flag(_contacts_kb, LV_OBJ_FLAG_HIDDEN);
@@ -1271,6 +1273,19 @@ void UITask::chat_kb_event_cb(lv_event_t* e) {
   else if (code == LV_EVENT_CANCEL) _instance->layoutChatBody(false);  // close key
 }
 
+// Tint the keyboard's accept (✓ = send/READY) key with the primary/go color so it
+// reads as the action key. The keyboard is an lv_btnmatrix, so we recolor it in the
+// per-button draw pass rather than via a normal style. Attach to any keyboard.
+static void kbAccentDrawCb(lv_event_t* e) {
+  lv_obj_t* kb = lv_event_get_target(e);
+  lv_obj_draw_part_dsc_t* dsc = lv_event_get_draw_part_dsc(e);
+  if (!dsc || dsc->part != LV_PART_ITEMS || dsc->id == 0xFFFF) return;
+  const char* txt = lv_btnmatrix_get_btn_text(kb, dsc->id);
+  if (!txt || strcmp(txt, LV_SYMBOL_OK) != 0) return;     // only the ✓ accept key
+  if (dsc->rect_dsc) { dsc->rect_dsc->bg_color = lv_color_hex(UI_PRIMARY); dsc->rect_dsc->bg_opa = LV_OPA_COVER; }
+  if (dsc->label_dsc) dsc->label_dsc->color = lv_color_hex(UI_ON_COLOR);
+}
+
 void UITask::chat_search_ta_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_obj_t* ta = lv_event_get_target(e);
@@ -1476,6 +1491,7 @@ void UITask::buildContactPickerScreen() {
   _pick_list.on_lead = clistPickSelf;   // lead row (set per-open) selects our own contact
 
   _pick_kb = lv_keyboard_create(_pick_popup);
+  lv_obj_add_event_cb(_pick_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ key
   lv_obj_add_flag(_pick_kb, LV_OBJ_FLAG_FLOATING);   // overlay, don't take a flex slot
   lv_keyboard_set_textarea(_pick_kb, _pick_search_ta);
   lv_obj_add_event_cb(_pick_kb, pick_kb_cb, LV_EVENT_ALL, NULL);
@@ -2962,6 +2978,11 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_add_event_cb(_chat_input, UITask::ta_done_cb, LV_EVENT_READY, NULL);
     lv_textarea_set_placeholder_text(_chat_input, "Message");
     lv_obj_set_flex_grow(_chat_input, 1);
+    // Look like the old single-line box: hug the text (one line when empty), but since
+    // multi-line is on (so Enter inserts '\n'), grow with added lines up to the band
+    // height, then scroll internally -- instead of the tall default multi-line block.
+    lv_obj_set_height(_chat_input, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(_chat_input, COMPOSE_H - 10, 0);
     lv_obj_add_event_cb(_chat_input, chat_input_event_cb, LV_EVENT_ALL, NULL);
 
     _chat_send_btn = lv_btn_create(_chat_compose);   // in-line send (hidden while the keyboard is up)
@@ -2984,6 +3005,7 @@ void UITask::openChat(const char* peer_name) {
     _chat_keyboard = lv_keyboard_create(_chat_screen);
     lv_keyboard_set_textarea(_chat_keyboard, _chat_input);
     lv_obj_add_event_cb(_chat_keyboard, chat_kb_event_cb, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(_chat_keyboard, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ send key
     lv_obj_add_flag(_chat_keyboard, LV_OBJ_FLAG_HIDDEN);
   }
 
@@ -3937,6 +3959,7 @@ void UITask::buildContactInfoScreen() {
 
   // keyboard (hidden) + toast
   _cinfo_kb = lv_keyboard_create(_cinfo_screen);
+  lv_obj_add_event_cb(_cinfo_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ key
   lv_obj_add_event_cb(_cinfo_kb, cinfo_kb_event_cb, LV_EVENT_ALL, NULL);
   lv_obj_add_flag(_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
 }
@@ -4692,6 +4715,7 @@ void UITask::buildPathEditorScreen() {
   lv_obj_add_flag(_path_err, LV_OBJ_FLAG_HIDDEN);
 
   _path_kb = lv_keyboard_create(_path_screen);
+  lv_obj_add_event_cb(_path_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ key
   lv_obj_add_event_cb(_path_kb, path_kb_event_cb, LV_EVENT_ALL, NULL);
   lv_obj_add_flag(_path_kb, LV_OBJ_FLAG_HIDDEN);
 }
@@ -4869,6 +4893,7 @@ void UITask::buildChannelInfoScreen() {
   lv_obj_center(dchl);
 
   _chinfo_kb = lv_keyboard_create(_chinfo_screen);
+  lv_obj_add_event_cb(_chinfo_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ key
   lv_obj_add_event_cb(_chinfo_kb, chinfo_kb_event_cb, LV_EVENT_ALL, NULL);
   lv_obj_add_flag(_chinfo_kb, LV_OBJ_FLAG_HIDDEN);
 }
@@ -5080,6 +5105,7 @@ void UITask::buildNewChannelScreen() {
   lv_obj_add_flag(_newchan_err, LV_OBJ_FLAG_HIDDEN);
 
   _newchan_kb = lv_keyboard_create(_newchan_screen);
+  lv_obj_add_event_cb(_newchan_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ key
   lv_obj_add_event_cb(_newchan_kb, newchan_kb_event_cb, LV_EVENT_ALL, NULL);
   lv_obj_add_flag(_newchan_kb, LV_OBJ_FLAG_HIDDEN);
 }
@@ -5546,6 +5572,7 @@ void UITask::buildLoginPopup() {
   lv_obj_set_style_text_color(_login_auto_chk, lv_color_hex(FG_HEX), 0);
 
   _login_kb = lv_keyboard_create(_login_popup);
+  lv_obj_add_event_cb(_login_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ key
   lv_obj_add_event_cb(_login_kb, login_kb_event_cb, LV_EVENT_ALL, NULL);
   lv_obj_add_flag(_login_kb, LV_OBJ_FLAG_HIDDEN);
 }
@@ -6008,6 +6035,7 @@ void UITask::buildProfileScreen() {
   // (Share QR + self-adverts moved to the header kebab -- see profile_kebab_cb.)
 
   _profile_kb = lv_keyboard_create(_profile_screen);
+  lv_obj_add_event_cb(_profile_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ key
   lv_obj_add_event_cb(_profile_kb, profile_kb_event_cb, LV_EVENT_ALL, NULL);
   lv_obj_add_flag(_profile_kb, LV_OBJ_FLAG_HIDDEN);
 }
@@ -6360,6 +6388,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   // Shared on-screen keyboard for the settings textareas. Parented to the home
   // screen so it overlays the tabview; hidden until a field is focused.
   _set_kb = lv_keyboard_create(parent);
+  lv_obj_add_event_cb(_set_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ key
   lv_obj_add_event_cb(_set_kb, set_kb_event_cb, LV_EVENT_ALL, NULL);
   lv_obj_add_flag(_set_kb, LV_OBJ_FLAG_HIDDEN);
 
@@ -7814,6 +7843,7 @@ void UITask::buildPinSetPopup() {
   lv_obj_center(sl);
 
   _pinset_kb = lv_keyboard_create(_pinset_popup);
+  lv_obj_add_event_cb(_pinset_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ key
   lv_keyboard_set_mode(_pinset_kb, LV_KEYBOARD_MODE_NUMBER);
   lv_obj_add_event_cb(_pinset_kb, pinset_kb_event_cb, LV_EVENT_ALL, NULL);
   lv_obj_add_flag(_pinset_kb, LV_OBJ_FLAG_HIDDEN);
@@ -8202,6 +8232,7 @@ void UITask::buildImportKeyPopup() {
   lv_label_set_text(lv_label_create(imp), "Import");
 
   _impkey_kb = lv_keyboard_create(_impkey_popup);
+  lv_obj_add_event_cb(_impkey_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ key
   lv_keyboard_set_mode(_impkey_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
   lv_obj_add_event_cb(_impkey_kb, impkey_kb_event_cb, LV_EVENT_ALL, NULL);
   lv_obj_add_flag(_impkey_kb, LV_OBJ_FLAG_HIDDEN);
