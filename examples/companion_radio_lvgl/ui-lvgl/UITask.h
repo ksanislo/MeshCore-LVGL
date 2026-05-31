@@ -700,6 +700,9 @@ class UITask : public AbstractUITask {
   static void cinfo_key_cb(lv_event_t* e);     // contact hero key line -> full key popup
   static void share_sendto_cb(lv_event_t* e);
   static void share_zerohop_cb(lv_event_t* e);
+  void        showChannelShareMenu();          // channel Share submenu (send-to / QR)
+  static void chshare_sendto_cb(lv_event_t* e);
+  static void chshare_qr_cb(lv_event_t* e);
   static void cinfo_toast_timer_cb(lv_timer_t* t);
 
   // Path Editor sub-page

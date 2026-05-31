@@ -904,6 +904,22 @@ void UITask::clistPickSelect(const ContactInfo& pick) {
     }
   } else if (action == 2) {  // insert the picked contact's ref into compose
     _instance->insertContactRef(pick.id.pub_key, pick.type, pick.name);
+  } else if (action == 3) {  // send the current channel's meshcore:// link to the recipient
+    ChannelDetails ch;
+    if (mproxy::getChannel(_instance->_chat_channel_idx, ch) && ch.name[0]) {
+      static const uint8_t zeros[16] = {0};
+      int slen = (memcmp(&ch.channel.secret[16], zeros, 16) == 0) ? 16 : 32;
+      char hex[2 * 32 + 1]; mesh::Utils::toHex(hex, ch.channel.secret, slen);
+      char ename[3 * 32 + 1]; urlEncode(ch.name, ename, sizeof(ename));
+      char link[80 + sizeof(ename) + 2 * 32];
+      snprintf(link, sizeof(link), "meshcore://channel/add?name=%s&secret=%s", ename, hex);
+      const char* me = (_instance->_node_prefs && _instance->_node_prefs->node_name[0])
+                           ? _instance->_node_prefs->node_name : "Me";
+      char key[CHAT_PEER_NAME_MAX];
+      convKey(pick.id.pub_key, false, key, sizeof(key));
+      _instance->postSend(false, pick.id.pub_key, -1, key, me, link);
+      _instance->showToast("Channel shared");
+    }
   }
 }
 
@@ -1528,7 +1544,7 @@ void UITask::openContactPicker(int action) {
   _pick_list.lead = (action == 2) ? ContactListView::LEAD_SELF : ContactListView::LEAD_NONE;
   lv_textarea_set_text(_pick_search_ta, "");
   lv_obj_add_flag(_pick_kb, LV_OBJ_FLAG_HIDDEN);
-  lv_label_set_text(_pick_title, action == 1 ? "Send to..." : "Share contact");
+  lv_label_set_text(_pick_title, action == 2 ? "Share contact" : "Send to...");
   rebuildPicker();
   lv_obj_clear_flag(_pick_popup, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(_pick_popup);
@@ -5553,9 +5569,30 @@ void UITask::openShareChannelQR(int idx) {
 void UITask::kebab_chanshare_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
-  int idx = _instance->_chat_channel_idx;
   _instance->closeMenuPopup();
-  _instance->openShareChannelQR(idx);
+  // showChannelShareMenu rebuilds _menu_list (deleting this button); defer it.
+  lv_async_call([](void*) { if (_instance) _instance->showChannelShareMenu(); }, NULL);
+}
+
+// Channel Share submenu, same shape as the contact Share menu: send the channel's
+// meshcore:// link to a contact, or show its QR.
+void UITask::showChannelShareMenu() {
+  lv_obj_t* list = ensureMenuPopup();
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_UPLOAD, "Send to a contact"), chshare_sendto_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_IMAGE,  "Show QR code"),      chshare_qr_cb,     LV_EVENT_CLICKED, NULL);
+  showMenuPopup();
+}
+void UITask::chshare_sendto_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->closeMenuPopup();
+  _instance->openContactPicker(3);  // pick recipient -> send the current channel's link
+}
+void UITask::chshare_qr_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->closeMenuPopup();
+  _instance->openShareChannelQR(_instance->_chat_channel_idx);
 }
 
 void UITask::newchan_back_cb(lv_event_t* e) {
