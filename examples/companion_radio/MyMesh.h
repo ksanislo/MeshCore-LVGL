@@ -217,6 +217,8 @@ public:
   // <=15 chars). The backend treats them as opaque strings and persists to /mutes.
   bool   removeContactAndPersist(const uint8_t* pubkey);  // delete a contact (RAM + blob + /contacts3)
   bool   advertFlood();                                   // self-advert, flooded (advert() is zero-hop)
+  void   exportPrivateKey(uint8_t out[64]);               // copy our 64-byte private key out (UI export)
+  bool   importPrivateKey(const uint8_t prv[64]);         // adopt a new identity from a private key + persist
   void   loadMutes();                      // from /mutes at boot
   void   loadUnmutes();                    // from /unmutes at boot (explicit-unmute set)
   bool   isMuted(const char* key) const;   // explicitly muted

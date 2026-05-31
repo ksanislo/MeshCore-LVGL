@@ -2354,3 +2354,22 @@ bool MyMesh::advertFlood() {
   sendFlood(pkt);
   return true;
 }
+
+// Copy our 64-byte Ed25519 private key out (for the UI's export-key popup).
+void MyMesh::exportPrivateKey(uint8_t out[64]) {
+  self_id.writeTo(out, 64);
+}
+
+// Replace our identity with the given 64-byte private key: validate, persist, adopt
+// it live, and invalidate cached ECDH shared-secrets so contacts re-derive. The
+// caller reboots afterward for a clean re-init. Returns false on a bad/unsaved key.
+bool MyMesh::importPrivateKey(const uint8_t prv[64]) {
+  if (!mesh::LocalIdentity::validatePrivateKey(prv)) return false;
+  mesh::LocalIdentity identity;
+  identity.readFrom(prv, 64);                 // derives the public key from the private key
+  if (!_store->saveMainIdentity(identity)) return false;
+  self_id = identity;
+  resetContacts();
+  _store->loadContacts(this);                 // re-derive shared secrets against the new identity
+  return true;
+}

@@ -65,6 +65,7 @@ enum class CmdKind : uint8_t {
   RemoveContact,// delete a contact: pubkey
   RemoveChannel,// delete a channel: path = its 32-byte secret (identity)
   AdvertFlood,  // self-advert, flooded (Advert is zero-hop)
+  ImportKey,    // replace our identity: path = the new 64-byte private key; reboots on success
 };
 
 struct MeshCmd {
@@ -143,6 +144,7 @@ bool getChannel(int idx, ChannelDetails& out);
 void getStats(NodeStats& out);     // latest node/radio counters (display-only, lock-protected copy)
 bool getNameOverride(const uint8_t* pubkey, char* out, size_t cap);
 const NodePrefs* prefsSnap();      // current published prefs (UI seeds its working copy from this)
+bool exportPrivKey(uint8_t out[64]);   // copy our 64-byte private key out (UI key export)
 int  copyMutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);    // seed the UI's explicit-muted set at begin()
 int  copyUnmutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);  // seed the UI's explicit-unmuted set at begin()
 uint32_t rtcSeconds();             // live device clock (ESP32 internal RTC; safe cross-core)

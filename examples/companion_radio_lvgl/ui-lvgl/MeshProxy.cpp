@@ -321,6 +321,14 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
     case CmdKind::RemoveContact:
       mesh.removeContactAndPersist(cmd.pubkey);
       break;
+    case CmdKind::ImportKey:
+      // Adopt the new identity (cmd.path = 64-byte private key) and persist it, then
+      // reboot so everything re-inits cleanly against it. On a bad key, do nothing.
+      if (mesh.importPrivateKey(cmd.path)) {
+        delay(150);          // let the SD write settle before the reset
+        esp_restart();
+      }
+      break;
     case CmdKind::RemoveChannel: {
       ChannelDetails ch;
       for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
@@ -398,6 +406,12 @@ int copyUnmutedKeys(char out[][CHAT_PEER_NAME_MAX], int max) {
   if (n > max) n = max;
   for (int i = 0; i < n; i++) { strncpy(out[i], s_backend->unmuteKey(i), CHAT_PEER_NAME_MAX - 1); out[i][CHAT_PEER_NAME_MAX-1]=0; }
   return n;
+}
+// Copy our 64-byte private key out for the UI export popup (backend-thread read).
+bool exportPrivKey(uint8_t out[64]) {
+  if (!s_backend) return false;
+  s_backend->exportPrivateKey(out);
+  return true;
 }
 int  getNumContacts()       { const MeshSnapshot* s = readBuf(); return s ? s->contact_count : 0; }
 

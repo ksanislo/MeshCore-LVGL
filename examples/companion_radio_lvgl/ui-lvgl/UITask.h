@@ -369,6 +369,17 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _keypop_lbl;
   char            _keypop_hex[2 * PUB_KEY_SIZE + 1];
 
+  // Private-key export popup + import flow (owner profile kebab).
+  lv_obj_t*       _expkey_popup;
+  lv_obj_t*       _expkey_lbl;
+  char            _expkey_hex[2 * 64 + 1];   // 64-byte private key as hex
+  lv_obj_t*       _impkey_popup;
+  lv_obj_t*       _impkey_ta;
+  lv_obj_t*       _impkey_err;
+  lv_obj_t*       _impkey_kb;
+  lv_obj_t*       _impkey_confirm;
+  uint8_t         _impkey_bytes[64];         // parsed key, held between Import and confirm
+
   // Internal typed clipboard (no OS/LVGL clipboard on-device). `kind` lets a paste
   // target pull the relevant part (smart paste, Phase 3); for now everything pastes
   // _clip_text verbatim. A lone contact card copies as CLIP_CONTACT_REF (the whole
@@ -800,6 +811,23 @@ private:
   void        showKeyPopup(const char* hex);
   static void keypop_copy_cb(lv_event_t* e);
   static void keypop_close_cb(lv_event_t* e);
+  // Private-key export popup + import flow (owner profile kebab).
+  static void profile_exportkey_cb(lv_event_t* e);
+  static void profile_importkey_cb(lv_event_t* e);
+  void        showExportKey();
+  static void expkey_copy_cb(lv_event_t* e);
+  static void expkey_close_cb(lv_event_t* e);
+  void        buildImportKeyPopup();
+  void        openImportKey();
+  static void impkey_dismiss_cb(lv_event_t* e);
+  static void impkey_cancel_cb(lv_event_t* e);
+  static void impkey_paste_cb(lv_event_t* e);
+  static void impkey_ta_event_cb(lv_event_t* e);
+  static void impkey_kb_event_cb(lv_event_t* e);
+  static void impkey_import_cb(lv_event_t* e);
+  void        showImportConfirm();
+  static void impkey_confirm_cb(lv_event_t* e);
+  static void impkey_confirm_cancel_cb(lv_event_t* e);
   static void set_pos_ta_event_cb(lv_event_t* e);
   static void set_sharepos_cb(lv_event_t* e);
   static void sharepos_confirm_cb(lv_event_t* e);
@@ -921,6 +949,8 @@ public:
       _confirm_popup(NULL), _joinch_popup(NULL), _joinch_lbl(NULL),
       _info_popup(NULL), _info_title_lbl(NULL), _info_body_lbl(NULL),
       _keypop_popup(NULL), _keypop_lbl(NULL), _keypop_hex{},
+      _expkey_popup(NULL), _expkey_lbl(NULL), _expkey_hex{},
+      _impkey_popup(NULL), _impkey_ta(NULL), _impkey_err(NULL), _impkey_kb(NULL), _impkey_confirm(NULL), _impkey_bytes{},
       _qr_screen(NULL), _qr_code(NULL), _qr_name_lbl(NULL), _qr_key_lbl(NULL),
       _qr_return_screen(NULL),
       _newchan_screen(NULL), _newchan_name_ta(NULL), _newchan_key_ta(NULL),

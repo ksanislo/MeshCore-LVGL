@@ -8045,6 +8045,8 @@ void UITask::profile_kebab_cb(lv_event_t* e) {
   lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_WIFI, "Advert (zero-hop)"), profile_advert_zhop_cb, LV_EVENT_CLICKED, NULL);
   lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_WIFI, "Advert (flood)"),    profile_advert_flood_cb, LV_EVENT_CLICKED, NULL);
   lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_UPLOAD, "Share QR"),        profile_shareqr_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_DOWNLOAD, "Export private key"), profile_exportkey_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_KEYBOARD, "Import private key"), profile_importkey_cb, LV_EVENT_CLICKED, NULL);
   _instance->showMenuPopup();
 }
 void UITask::profile_advert_zhop_cb(lv_event_t* e) {
@@ -8065,6 +8067,248 @@ void UITask::profile_shareqr_cb(lv_event_t* e) {
   if (!_instance) return;
   _instance->closeMenuPopup();
   set_shareme_cb(e);
+}
+
+// ---- Private-key export / import (owner profile kebab) ----------------------
+// Export: show the 128-char hex private key in a copyable popup, with a clear
+// "keep this secret" warning. The key is read from the backend on demand.
+void UITask::profile_exportkey_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->closeMenuPopup();
+  _instance->showExportKey();
+}
+
+void UITask::showExportKey() {
+  uint8_t prv[64];
+  if (!mproxy::exportPrivKey(prv)) { showToast("Key unavailable"); return; }
+  mesh::Utils::toHex(_expkey_hex, prv, 64);   // 128 hex chars + NUL
+  if (!_expkey_popup) {
+    lv_obj_t* card = makeModalCard(&_expkey_popup, [](lv_event_t* ev) {
+      (void)ev;
+      if (_instance) lv_obj_add_flag(_instance->_expkey_popup, LV_OBJ_FLAG_HIDDEN);
+    });
+    lv_obj_t* title = lv_label_create(card);
+    lv_label_set_text(title, "Private key");
+    lv_obj_set_style_text_color(title, lv_color_hex(UI_ACCENT), 0);
+    lv_obj_set_style_text_font(title, fontHeading(), 0);
+
+    lv_obj_t* warn = lv_label_create(card);
+    lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(warn, LV_PCT(100));
+    lv_label_set_text(warn, "Keep this secret. Anyone with it can take over this node's identity.");
+    lv_obj_set_style_text_color(warn, lv_color_hex(UI_ERROR), 0);
+
+    _expkey_lbl = lv_label_create(card);
+    lv_label_set_long_mode(_expkey_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(_expkey_lbl, LV_PCT(100));
+    lv_obj_set_style_text_color(_expkey_lbl, lv_color_hex(UI_FG_STRONG), 0);
+    lv_obj_set_style_text_font(_expkey_lbl, &lv_font_montserrat_12, 0);
+
+    lv_obj_t* btnrow = lv_obj_create(card);
+    lv_obj_remove_style_all(btnrow);
+    lv_obj_set_width(btnrow, LV_PCT(100));
+    lv_obj_set_height(btnrow, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(btnrow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnrow, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(btnrow, 8, 0);
+    lv_obj_clear_flag(btnrow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t* closeb = lv_btn_create(btnrow);
+    lv_obj_add_event_cb(closeb, expkey_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(closeb), "Close");
+    lv_obj_t* copyb = lv_btn_create(btnrow);
+    lv_obj_set_style_bg_color(copyb, lv_color_hex(UI_PRIMARY), 0);
+    lv_obj_add_event_cb(copyb, expkey_copy_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(copyb), LV_SYMBOL_COPY " Copy");
+  }
+  lv_label_set_text(_expkey_lbl, _expkey_hex);
+  lv_obj_clear_flag(_expkey_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_expkey_popup);
+}
+
+void UITask::expkey_close_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance && _instance->_expkey_popup) lv_obj_add_flag(_instance->_expkey_popup, LV_OBJ_FLAG_HIDDEN);
+}
+void UITask::expkey_copy_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->copyToClipboard(_instance->_expkey_hex);
+  _instance->showToast("Private key copied");
+  if (_instance->_expkey_popup) lv_obj_add_flag(_instance->_expkey_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Import: paste a 128-char hex private key, then confirm. On confirm the backend
+// validates + persists it and reboots into the new identity.
+void UITask::profile_importkey_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->closeMenuPopup();
+  _instance->openImportKey();
+}
+
+void UITask::buildImportKeyPopup() {
+  if (_impkey_popup) return;
+  lv_obj_t* card = makeModalCard(&_impkey_popup, impkey_dismiss_cb);
+  lv_obj_align(card, LV_ALIGN_TOP_MID, 0, HEADER_H + 8);   // top -> room for the keyboard
+  lv_obj_add_flag(_impkey_popup, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t* title = lv_label_create(card);
+  lv_label_set_text(title, "Import private key");
+  lv_obj_set_style_text_color(title, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(title, fontHeading(), 0);
+
+  lv_obj_t* warn = lv_label_create(card);
+  lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(warn, LV_PCT(100));
+  lv_label_set_text(warn, "Paste a 128-char hex key. This replaces this node's identity and reboots.");
+  lv_obj_set_style_text_color(warn, lv_color_hex(DIM_HEX), 0);
+
+  _impkey_ta = makeSelTextarea(card);
+  lv_textarea_set_one_line(_impkey_ta, false);
+  lv_obj_set_width(_impkey_ta, LV_PCT(100));
+  lv_obj_set_height(_impkey_ta, 56);
+  lv_textarea_set_max_length(_impkey_ta, 160);   // tolerate spaces/colons; validated on import
+  lv_textarea_set_accepted_chars(_impkey_ta, "0123456789abcdefABCDEF :-");
+  lv_obj_add_event_cb(_impkey_ta, impkey_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  _impkey_err = lv_label_create(card);
+  lv_label_set_text(_impkey_err, "");
+  lv_obj_set_style_text_color(_impkey_err, lv_color_hex(UI_ERROR), 0);
+  lv_obj_add_flag(_impkey_err, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t* btns = lv_obj_create(card);
+  lv_obj_remove_style_all(btns);
+  lv_obj_set_width(btns, LV_PCT(100));
+  lv_obj_set_height(btns, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(btns, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t* pasteb = lv_btn_create(btns);
+  lv_obj_add_event_cb(pasteb, impkey_paste_cb, LV_EVENT_CLICKED, NULL);
+  lv_label_set_text(lv_label_create(pasteb), LV_SYMBOL_PASTE " Paste");
+  lv_obj_t* rgrp = lv_obj_create(btns);
+  lv_obj_remove_style_all(rgrp);
+  lv_obj_set_size(rgrp, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(rgrp, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(rgrp, 8, 0);
+  lv_obj_clear_flag(rgrp, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t* cancel = lv_btn_create(rgrp);
+  lv_obj_add_event_cb(cancel, impkey_cancel_cb, LV_EVENT_CLICKED, NULL);
+  lv_label_set_text(lv_label_create(cancel), "Cancel");
+  lv_obj_t* imp = lv_btn_create(rgrp);
+  lv_obj_set_style_bg_color(imp, lv_color_hex(UI_PRIMARY), 0);
+  lv_obj_add_event_cb(imp, impkey_import_cb, LV_EVENT_CLICKED, NULL);
+  lv_label_set_text(lv_label_create(imp), "Import");
+
+  _impkey_kb = lv_keyboard_create(_impkey_popup);
+  lv_keyboard_set_mode(_impkey_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+  lv_obj_add_event_cb(_impkey_kb, impkey_kb_event_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_impkey_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::openImportKey() {
+  buildImportKeyPopup();
+  lv_textarea_set_text(_impkey_ta, "");
+  lv_obj_add_flag(_impkey_err, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_impkey_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(_impkey_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_impkey_popup);
+}
+
+void UITask::impkey_dismiss_cb(lv_event_t* e) {
+  if (!_instance) return;
+  if (lv_event_get_target(e) != _instance->_impkey_popup) return;   // backdrop tap only
+  lv_obj_add_flag(_instance->_impkey_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_instance->_impkey_popup, LV_OBJ_FLAG_HIDDEN);
+}
+void UITask::impkey_cancel_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  lv_obj_add_flag(_instance->_impkey_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_instance->_impkey_popup, LV_OBJ_FLAG_HIDDEN);
+}
+void UITask::impkey_paste_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  if (_instance->_clip_kind != CLIP_EMPTY)
+    lv_textarea_set_text(_instance->_impkey_ta,
+                         _instance->pasteTextFor(FK_HEX));   // a copied key pastes as raw hex
+}
+void UITask::impkey_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    lv_keyboard_set_textarea(_instance->_impkey_kb, _instance->_impkey_ta);
+    lv_keyboard_set_mode(_instance->_impkey_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_impkey_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_impkey_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_impkey_kb);
+  }
+}
+void UITask::impkey_kb_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
+    lv_obj_add_flag(_instance->_impkey_kb, LV_OBJ_FLAG_HIDDEN);
+}
+// Validate the pasted hex -> 64 bytes; on success raise the confirm modal.
+void UITask::impkey_import_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  const char* txt = lv_textarea_get_text(_instance->_impkey_ta);
+  int n = hexToBytes(txt ? txt : "", _instance->_impkey_bytes, 64);
+  if (n != 64) {
+    lv_label_set_text(_instance->_impkey_err, "Need a 128-char (64-byte) hex key");
+    lv_obj_clear_flag(_instance->_impkey_err, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  lv_obj_add_flag(_instance->_impkey_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_instance->_impkey_popup, LV_OBJ_FLAG_HIDDEN);
+  _instance->showImportConfirm();
+}
+
+void UITask::showImportConfirm() {
+  if (!_impkey_confirm) {
+    lv_obj_t* card = makeModalCard(&_impkey_confirm, NULL);   // explicit buttons, no tap-dismiss
+    lv_obj_t* w = lv_label_create(card);
+    lv_label_set_long_mode(w, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(w, LV_PCT(100));
+    lv_obj_set_style_text_color(w, lv_color_hex(UI_FG_STRONG), 0);
+    lv_label_set_text(w, "Replace this node's identity with the imported key? The device will reboot. This can't be undone.");
+    lv_obj_t* btns = lv_obj_create(card);
+    lv_obj_remove_style_all(btns);
+    lv_obj_set_width(btns, LV_PCT(100));
+    lv_obj_set_height(btns, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_column(btns, 8, 0);
+    lv_obj_clear_flag(btns, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t* cancel = lv_btn_create(btns);
+    lv_obj_add_event_cb(cancel, impkey_confirm_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(cancel), "Cancel");
+    lv_obj_t* rep = lv_btn_create(btns);
+    lv_obj_set_style_bg_color(rep, lv_color_hex(UI_DANGER), 0);
+    lv_obj_add_event_cb(rep, impkey_confirm_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(rep), "Replace");
+  }
+  lv_obj_clear_flag(_impkey_confirm, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_impkey_confirm);
+}
+void UITask::impkey_confirm_cancel_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance && _instance->_impkey_confirm) lv_obj_add_flag(_instance->_impkey_confirm, LV_OBJ_FLAG_HIDDEN);
+}
+void UITask::impkey_confirm_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  if (_instance->_impkey_confirm) lv_obj_add_flag(_instance->_impkey_confirm, LV_OBJ_FLAG_HIDDEN);
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::ImportKey;
+  memcpy(c.path, _instance->_impkey_bytes, 64);
+  c.path_len = 64;
+  mproxy::postCommand(c);
+  _instance->showToast("Importing key - rebooting...");
 }
 
 void UITask::set_tz_ta_event_cb(lv_event_t* e) {
