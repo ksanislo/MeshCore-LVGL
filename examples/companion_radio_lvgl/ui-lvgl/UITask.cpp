@@ -4831,8 +4831,10 @@ void UITask::chat_kebab_cb(lv_event_t* e) {
                       s->_chat_is_channel ? kebab_chdetails_cb : kebab_details_cb, LV_EVENT_CLICKED, NULL);
   {
     lv_obj_t* sb = lv_list_add_btn(list, MC_SYMBOL_SEARCH, "Search");   // magnifier, not an eye
-    lv_obj_t* sicon = lv_obj_get_child(sb, 0);   // icon label -> the glyph lives in our icon font
-    if (sicon && lv_obj_check_type(sicon, &lv_label_class)) lv_obj_set_style_text_font(sicon, &meshcore_icons_16, 0);
+    // The list icon is an lv_img that draws symbol text with its own text font; the
+    // magnifier glyph lives in our icon font, so point the icon there (not a label).
+    lv_obj_t* sicon = lv_obj_get_child(sb, 0);
+    if (sicon) lv_obj_set_style_text_font(sicon, &meshcore_icons_16, 0);
     lv_obj_add_event_cb(sb, kebab_search_cb, LV_EVENT_CLICKED, NULL);
   }
   {
