@@ -336,6 +336,7 @@ class UITask : public AbstractUITask {
   // _clip_text verbatim. A lone contact card copies as CLIP_CONTACT_REF (the whole
   // "<hex:type:name>" token + parsed parts); any other selection is CLIP_PLAIN.
   enum ClipKind : uint8_t { CLIP_EMPTY, CLIP_PLAIN, CLIP_CONTACT_REF };
+  char            _crash_note[96];    // one-shot "crash report saved" toast, surfaced from loop()
   char            _clip_text[1024];   // longest copyable today is the ~150B msg body
   uint8_t         _clip_kind;
   uint8_t         _clip_pubkey[PUB_KEY_SIZE];   // valid when kind == CLIP_CONTACT_REF
@@ -359,6 +360,9 @@ class UITask : public AbstractUITask {
     lv_obj_t* h_end;      // up-triangle handle   (tip = selection end)
     lv_obj_t* catcher;    // transparent full-screen tap-catcher (dismiss on tap OUTSIDE the selection)
     lv_obj_t* menu;       // floating horizontal toolbar (Copy / Select All / ...), no dim
+    uint32_t  last_tap_ms;   // double-tap (word select) detection
+    lv_coord_t last_tap_x, last_tap_y;
+    lv_obj_t* last_tap_obj;
   };
   SelectionCtl    _sel;
 
@@ -565,6 +569,7 @@ class UITask : public AbstractUITask {
   void      refreshCinfoHero();         // hero avatar/title/key from current state
   struct ContactInfo* cinfoContact();   // mutable ptr, or NULL
   void      showToast(const char* text);
+  void      reportCrashIfAny();   // boot: if a coredump is stored, save a decodable report to SD/SPIFFS
   void      commitCinfoField(lv_obj_t* ta);
   // Shared top-layer popup + kebab overflow menu
   lv_obj_t* ensureMenuPopup();          // returns the (cleaned) list, popup hidden
@@ -625,11 +630,18 @@ private:
   void      copyToClipboard(const char* text);
   void      clipSet(uint8_t kind, const char* text, const uint8_t* pubkey,
                     const char* name, uint8_t type);
+  // Smart paste: a target field's semantic kind decides which part of a typed
+  // clipboard payload gets inserted (contact-ref -> hex field = key, name field =
+  // name, chat compose = whole <...> token; plain text -> verbatim everywhere).
+  enum FieldKind : uint8_t { FK_PLAIN, FK_NAME, FK_HEX, FK_CHAT_COMPOSE };
+  uint8_t      fieldKindOf(lv_obj_t* ta);
+  const char*  pasteTextFor(uint8_t field_kind);   // clipboard text adapted to the field
   // ----- Text-selection controller -----
   void      makeLabelSelectable(lv_obj_t* lbl);   // wire a chat-text label for selection
   void      makeCardSelectable(lv_obj_t* card);   // wire a contact card for atomic selection
   void      ensureSelHandles();                    // build the two triangle handles (once)
   void      beginLabelSel(lv_obj_t* lbl, lv_point_t abs_pt);
+  void      selectWordAt(lv_obj_t* lbl, lv_point_t abs_pt);   // double-tap word select
   void      beginCardSel(lv_obj_t* card);
   void      updateSelDrag(lv_point_t abs_pt);      // extend the dragged endpoint
   void      applyLabelSel();                        // push sel_lo/hi to the native highlight
@@ -643,6 +655,7 @@ private:
   static uint32_t labelCharAt(lv_obj_t* lbl, lv_point_t abs_pt);  // touch point -> char-id
   static void sel_event_cb(lv_event_t* e);          // long-press/drag/release on a target
   static void sel_handle_cb(lv_event_t* e);         // drag a handle to re-adjust an endpoint
+  static void sel_handle_draw_cb(lv_event_t* e);    // render a handle as a triangle
   static void sel_catcher_cb(lv_event_t* e);        // tap outside selection -> dismiss
   // Editable text fields: long-press -> toolbar (Cut/Copy/Paste/Select All).
   void      beginTextareaSel(lv_obj_t* ta);
@@ -833,6 +846,7 @@ public:
         _banner_key[0] = 0;
         _search_filter[0] = 0;
         _clip_text[0] = 0;
+        _crash_note[0] = 0;
         _clip_kind = CLIP_EMPTY;
         memset(&_sel, 0, sizeof(_sel));
         _contacts_filter[0] = 0;

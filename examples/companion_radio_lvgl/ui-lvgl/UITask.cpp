@@ -7,6 +7,9 @@
 #include <Utils.h>                      // mesh::Utils::toHex
 #include <esp_heap_caps.h>
 #include <esp_system.h>                 // esp_restart() for the Reboot button
+#include <esp_core_dump.h>              // boot-time crash report (coredump-to-flash is on)
+#include "SdCard.h"                     // SdSvc + the shared `sd` handle, to save crash reports
+#include <SPIFFS.h>                     // internal fallback for the crash report
 #include <ctype.h>                      // tolower (case-insensitive search)
 #include <strings.h>                    // strcasecmp (A-Z contact sort)
 
@@ -1823,9 +1826,10 @@ static void addMessageText(lv_obj_t* bubble, const char* text) {
   char clean[CHAT_MSG_TEXT_MAX + 8];
   sanitizeForFont(text, clean, sizeof(clean));
 
-  // Build recolor markup. Worst case: every char is '#' (doubles) plus per-mention
-  // color commands (~9 bytes each) -- 2x + slack is ample.
-  char markup[2 * (CHAT_MSG_TEXT_MAX + 8) + 64];
+  // Build recolor markup. Worst case mixes '#' doubling (2x) with per-mention color
+  // commands (~9 bytes) -- size for ~3x the sanitized body so a max-length,
+  // mention-heavy message never truncates.
+  char markup[3 * (CHAT_MSG_TEXT_MAX + 8) + 32];
   char* w = markup;
   char* end = markup + sizeof(markup);
   const char* p = clean;
@@ -1837,7 +1841,9 @@ static void addMessageText(lv_obj_t* bubble, const char* text) {
     if (!close) { appendEscaped(w, end, at, strlen(at)); break; }  // malformed -> literal
     // Mention: "#34D399 @name#". The closing '#' is always followed by plain text
     // (or end), so it never collides with a following color command.
-    w += snprintf(w, end - w, "#%06X @", (unsigned)MSG_MENTION);
+    int wrote = snprintf(w, end - w, "#%06X @", (unsigned)MSG_MENTION);
+    if (wrote < 0 || wrote >= end - w) break;          // out of room -> stop (never advance past end)
+    w += wrote;
     appendEscaped(w, end, at + 2, close - (at + 2));  // the username (escaped)
     if (w < end - 1) *w++ = '#';                      // close color region
     p = close + 1;
@@ -2591,6 +2597,59 @@ void UITask::openChat(const char* peer_name) {
   lv_scr_load(_chat_screen);
 }
 
+// If the previous boot ended in a panic, the IDF has already written a coredump to
+// the flash 'coredump' partition (coredump-to-flash is enabled in the Arduino
+// sdkconfig). Read its summary and save a decodable report to the SD card (or
+// internal SPIFFS if no card), then erase the image so we report it exactly once.
+// The PC + backtrace addresses are offline-decoded with xtensa-...-addr2line
+// against firmware.elf (match app_sha256 to be sure it's the right build).
+void UITask::reportCrashIfAny() {
+  if (esp_core_dump_image_check() != ESP_OK) return;   // no valid coredump stored -> normal boot
+
+  char rpt[900];
+  int n = 0;
+  n += snprintf(rpt + n, sizeof(rpt) - n, "MeshCore CrowPanel crash report\n");
+  n += snprintf(rpt + n, sizeof(rpt) - n,
+                "reset_reason=%d  (4=PANIC 5=INT_WDT 6=TASK_WDT 7=WDT 8=DEEPSLEEP 12=SDIO)\n",
+                (int)esp_reset_reason());
+
+  esp_core_dump_summary_t* s = (esp_core_dump_summary_t*)malloc(sizeof(esp_core_dump_summary_t));
+  if (s && esp_core_dump_get_summary(s) == ESP_OK) {
+    n += snprintf(rpt + n, sizeof(rpt) - n, "task=%.16s\n", s->exc_task);
+    n += snprintf(rpt + n, sizeof(rpt) - n, "PC=0x%08x  cause=0x%08x  vaddr=0x%08x\n",
+                  (unsigned)s->exc_pc, (unsigned)s->ex_info.exc_cause, (unsigned)s->ex_info.exc_vaddr);
+    n += snprintf(rpt + n, sizeof(rpt) - n, "backtrace%s:", s->exc_bt_info.corrupted ? " (corrupt)" : "");
+    for (uint32_t i = 0; i < s->exc_bt_info.depth && i < 16; i++)
+      n += snprintf(rpt + n, sizeof(rpt) - n, " 0x%08x", (unsigned)s->exc_bt_info.bt[i]);
+    n += snprintf(rpt + n, sizeof(rpt) - n, "\napp_sha256=");
+    for (size_t i = 0; i < sizeof(s->app_elf_sha256) && n < (int)sizeof(rpt) - 3; i++)
+      n += snprintf(rpt + n, sizeof(rpt) - n, "%02x", s->app_elf_sha256[i]);
+    n += snprintf(rpt + n, sizeof(rpt) - n, "\n");
+  } else {
+    n += snprintf(rpt + n, sizeof(rpt) - n, "(coredump present, summary unavailable)\n");
+  }
+  if (s) free(s);
+
+  // Prefer the SD card; fall back to internal SPIFFS.
+  bool wrote = false;
+  char where[40] = "";
+  if (SdSvc::ensureMounted()) {
+    SdSvc::Lock lk;
+    if (!sd.exists("/crash")) sd.mkdir("/crash");
+    snprintf(where, sizeof(where), "/crash/crash-%u.txt", (unsigned)mproxy::rtcSeconds());
+    FsFile f = sd.open(where, O_WRONLY | O_CREAT | O_TRUNC);
+    if (f) { f.write((const uint8_t*)rpt, n); f.close(); wrote = true; }
+  }
+  if (!wrote) {
+    File f = SPIFFS.open("/last_crash.txt", FILE_WRITE);
+    if (f) { f.write((const uint8_t*)rpt, n); f.close(); wrote = true; strcpy(where, "spiffs:/last_crash.txt"); }
+  }
+
+  esp_core_dump_image_erase();   // consume it so we don't re-report the same crash
+
+  if (wrote) snprintf(_crash_note, sizeof(_crash_note), LV_SYMBOL_WARNING " Crash report: %s", where);
+}
+
 void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs) {
   _sensors = sensors;
   // UI-owned working copy of prefs; edits push CMD_UpdatePrefs and the snapshot
@@ -2705,6 +2764,8 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _buzzer.begin();
   _buzzer.quiet(_node_prefs && _node_prefs->buzzer_quiet);
 #endif
+
+  reportCrashIfAny();   // if the last boot panicked, save a decodable report (SD or SPIFFS)
 
   _started = true;
   _last_tick_ms = millis();
@@ -3019,7 +3080,7 @@ void UITask::showBanner(const char* conv_key, const char* sender,
     lv_obj_set_style_text_font(lbl, fontBody(), 0);
     lv_label_set_text(lbl, line);
   } else {
-    addMessageText(_banner_body, text ? text : "");
+    addMessageText(_banner_body, text ? text : "");   // same recolor render as a chat bubble
   }
 
   lv_obj_clear_flag(_banner, LV_OBJ_FLAG_HIDDEN);
@@ -5696,12 +5757,39 @@ void UITask::copyToClipboard(const char* text) {
   clipSet(CLIP_PLAIN, text, nullptr, nullptr, 0);
 }
 
+// Semantic kind of a field, resolved by identity (no user_data juggling).
+uint8_t UITask::fieldKindOf(lv_obj_t* ta) {
+  if (ta == _chat_input) return FK_CHAT_COMPOSE;
+  if (ta == _cinfo_key_ta || ta == _newchan_key_ta) return FK_HEX;
+  if (ta == _cinfo_name_ta || ta == _set_name_ta || ta == _newchan_name_ta) return FK_NAME;
+  return FK_PLAIN;
+}
+
+// What to actually insert when pasting the current clipboard into a field of the
+// given kind (the smart-paste transform table).
+const char* UITask::pasteTextFor(uint8_t field_kind) {
+  if (_clip_kind == CLIP_CONTACT_REF) {
+    switch (field_kind) {
+      case FK_HEX: {
+        static char hex[2 * PUB_KEY_SIZE + 1];
+        mesh::Utils::toHex(hex, _clip_pubkey, PUB_KEY_SIZE);
+        return hex;                                    // just the 64-hex key
+      }
+      case FK_NAME:
+      case FK_PLAIN:        return _clip_name;          // just the contact name
+      case FK_CHAT_COMPOSE:
+      default:              return _clip_text;          // whole <hex:type:name> token (re-renders as a card)
+    }
+  }
+  return _clip_text;                                    // CLIP_PLAIN -> verbatim everywhere
+}
+
 void UITask::insert_paste_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
-  // (Phase 3 will route this through the smart-paste transform table by FieldKind.)
   if (_instance->_clip_kind != CLIP_EMPTY && _instance->_chat_input)
-    lv_textarea_add_text(_instance->_chat_input, _instance->_clip_text);
+    lv_textarea_add_text(_instance->_chat_input,
+                         _instance->pasteTextFor(_instance->fieldKindOf(_instance->_chat_input)));
   _instance->closeInsertPopup();
 }
 
@@ -5711,7 +5799,7 @@ void UITask::insert_paste_cb(lv_event_t* e) {
 // floating Copy / Select All menu. Textareas, smart paste, word-select, and
 // handle re-grab come in later phases.
 // =====================================================================
-static const lv_coord_t SEL_HANDLE_D = 12;   // grab-dot diameter (true triangles: polish)
+static const lv_coord_t SEL_HANDLE_D = 16;   // triangle handle size
 
 // Faithful replica of LVGL's recolor command state machine (misc/lv_txt.c
 // _lv_txt_is_cmd), so we can map a native label selection (char-id range over the
@@ -5772,17 +5860,34 @@ void UITask::ensureSelHandles() {
   if (_sel.h_start) return;
   for (int i = 0; i < 2; i++) {
     lv_obj_t* h = lv_obj_create(lv_layer_top());
-    lv_obj_remove_style_all(h);
+    lv_obj_remove_style_all(h);   // transparent: the triangle is custom-drawn
     lv_obj_set_size(h, SEL_HANDLE_D, SEL_HANDLE_D);
-    lv_obj_set_style_bg_color(h, lv_color_hex(UI_ACCENT), 0);
-    lv_obj_set_style_bg_opa(h, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(h, LV_RADIUS_CIRCLE, 0);
     lv_obj_add_flag(h, LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(h, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_ext_click_area(h, 14);   // fat touch target around the small dot
+    lv_obj_set_ext_click_area(h, 14);   // fat touch target around the small triangle
     lv_obj_add_event_cb(h, sel_handle_cb, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(h, sel_handle_draw_cb, LV_EVENT_DRAW_MAIN_END, NULL);
     if (i == 0) _sel.h_start = h; else _sel.h_end = h;
   }
+}
+
+// Draw a handle as a filled accent triangle: start = points DOWN (tip at the
+// selection start / caret line, body above); end = points UP (tip at the
+// selection end, body below).
+void UITask::sel_handle_draw_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* h = lv_event_get_target(e);
+  lv_draw_ctx_t* ctx = lv_event_get_draw_ctx(e);
+  lv_area_t a; lv_obj_get_coords(h, &a);
+  bool down = (h == _instance->_sel.h_start);
+  lv_coord_t cx = (a.x1 + a.x2) / 2;
+  lv_point_t pts[3];
+  if (down) { pts[0] = {a.x1, a.y1}; pts[1] = {a.x2, a.y1}; pts[2] = {cx, a.y2}; }
+  else      { pts[0] = {a.x1, a.y2}; pts[1] = {a.x2, a.y2}; pts[2] = {cx, a.y1}; }
+  lv_draw_rect_dsc_t dsc; lv_draw_rect_dsc_init(&dsc);
+  dsc.bg_color = lv_color_hex(UI_ACCENT);
+  dsc.bg_opa = LV_OPA_COVER;
+  lv_draw_polygon(ctx, &dsc, pts, 3);
 }
 
 void UITask::beginLabelSel(lv_obj_t* lbl, lv_point_t abs_pt) {
@@ -5799,6 +5904,46 @@ void UITask::beginLabelSel(lv_obj_t* lbl, lv_point_t abs_pt) {
   lv_obj_clear_flag(_sel.h_start, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(_sel.h_end, LV_OBJ_FLAG_HIDDEN);
   _sel.state = SS_MARKING;
+}
+
+// Word boundaries (in markup char-id space) around char-id `idx`: the maximal run
+// of visible non-whitespace codepoints containing it. Command chars and spaces
+// break words. Multibyte (emoji/CJK) count as word chars.
+static void labelWordAt(const char* markup, uint32_t idx, uint32_t* lo, uint32_t* hi) {
+  static bool word[640];
+  uint32_t n = 0;
+  uint8_t st = TCMD_WAIT;
+  const char* p = markup;
+  while (*p && n < 640) {
+    unsigned char c0 = (unsigned char)*p;
+    uint32_t step = (c0 >= 0xF0) ? 4 : (c0 >= 0xE0) ? 3 : (c0 >= 0xC0) ? 2 : 1;
+    bool cmd = selTxtIsCmd(st, (char)c0);
+    word[n++] = !cmd && (step > 1 || !isspace(c0));
+    p += step;
+  }
+  if (idx >= n || !word[idx]) { *lo = idx; *hi = idx; return; }   // off the end / on a space -> caret
+  uint32_t a = idx, b = idx;
+  while (a > 0 && word[a - 1]) a--;
+  while (b + 1 < n && word[b + 1]) b++;
+  *lo = a; *hi = b + 1;
+}
+
+void UITask::selectWordAt(lv_obj_t* lbl, lv_point_t abs_pt) {
+  endSelection();
+  _sel.kind = SEL_LABEL;
+  _sel.target = lbl;
+  _sel.whole_obj = false;
+  uint32_t idx = labelCharAt(lbl, abs_pt);
+  uint32_t lo, hi;
+  labelWordAt(lv_label_get_text(lbl), idx, &lo, &hi);
+  _sel.anchor = lo; _sel.sel_lo = lo; _sel.sel_hi = hi;
+  if (_chat_history) lv_obj_clear_flag(_chat_history, LV_OBJ_FLAG_SCROLLABLE);
+  applyLabelSel();
+  ensureSelHandles();
+  positionSelHandles();
+  lv_obj_clear_flag(_sel.h_start, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(_sel.h_end, LV_OBJ_FLAG_HIDDEN);
+  finishSel();   // show the toolbar straight away
 }
 
 void UITask::beginCardSel(lv_obj_t* card) {
@@ -5957,10 +6102,17 @@ void UITask::showSelMenu() {
   lv_coord_t mw = lv_obj_get_width(_sel.menu);
   lv_coord_t mh = lv_obj_get_height(_sel.menu);
   const lv_coord_t GAP = 6;
-  lv_coord_t y = anchor.y1 - mh - GAP;                      // prefer above the selection
-  if (y < HEADER_H + GAP) y = anchor.y2 + GAP;              // no room -> below
-  if (y + mh > _screen_h - GAP) y = _screen_h - mh - GAP;   // clamp on-screen
-  if (y < GAP) y = GAP;
+  const lv_coord_t HANDLE_CLR = (_sel.kind == SEL_TEXTAREA) ? 2 : SEL_HANDLE_D + 2;  // clear the handles
+  lv_coord_t y = anchor.y1 - mh - GAP - HANDLE_CLR;        // prefer above the selection (above its top handle)
+  if (_sel.kind == SEL_TEXTAREA) {
+    // A field usually has the keyboard up across the bottom: stay above the field,
+    // clamp under the header rather than dropping into the keyboard.
+    if (y < HEADER_H + GAP) y = HEADER_H + GAP;
+  } else {
+    if (y < HEADER_H + GAP) y = anchor.y2 + GAP + HANDLE_CLR;   // no room above -> below (under bottom handle)
+    if (y + mh > _screen_h - GAP) y = _screen_h - mh - GAP;     // clamp on-screen
+    if (y < HEADER_H + GAP) y = HEADER_H + GAP;
+  }
   lv_coord_t x = (anchor.x1 + anchor.x2) / 2 - mw / 2;      // centered on the selection
   if (x < GAP) x = GAP;
   if (x + mw > _screen_w - GAP) x = _screen_w - mw - GAP;
@@ -6063,6 +6215,23 @@ void UITask::sel_event_cb(lv_event_t* e) {
       if (_instance->_sel.state == SS_MARKING || _instance->_sel.state == SS_DRAGGING)
         _instance->finishSel();
       break;
+    case LV_EVENT_CLICKED: {
+      // Double-tap a text label -> select the word. (Single tap on a label does
+      // nothing; mention/card taps are handled by their own CLICKED cbs.)
+      if (!is_label || _instance->_sel.state != SS_IDLE) break;
+      lv_point_t p; lv_indev_get_point(lv_indev_get_act(), &p);
+      SelectionCtl& s = _instance->_sel;
+      uint32_t now = millis();
+      bool dbl = (s.last_tap_obj == target) && (now - s.last_tap_ms < 300) &&
+                 (LV_ABS(p.x - s.last_tap_x) < 20) && (LV_ABS(p.y - s.last_tap_y) < 20);
+      if (dbl) {
+        s.last_tap_obj = nullptr;
+        _instance->selectWordAt(target, p);
+      } else {
+        s.last_tap_obj = target; s.last_tap_ms = now; s.last_tap_x = p.x; s.last_tap_y = p.y;
+      }
+      break;
+    }
     default: break;
   }
 }
@@ -6124,8 +6293,7 @@ void UITask::selmenu_paste_cb(lv_event_t* e) {
       lv_textarea_set_cursor_pos(s.target, b);
       for (uint32_t i = 0; i < b - a; i++) lv_textarea_del_char(s.target);
     }
-    // (Phase 3 routes this through the smart-paste transform table by FieldKind.)
-    lv_textarea_add_text(s.target, _instance->_clip_text);
+    lv_textarea_add_text(s.target, _instance->pasteTextFor(_instance->fieldKindOf(s.target)));
   }
   _instance->endSelection();
 }
@@ -6799,6 +6967,8 @@ void UITask::loop() {
   // (new/sent msgs, delivery, telemetry) to the store/LVGL on this (UI) core.
   mproxy::beginUiRead();
   drainEvents();
+
+  if (_crash_note[0]) { showToast(_crash_note); _crash_note[0] = 0; }   // one-shot, from last boot's panic
 
   // Backlight idle-off (battery). Touch resets _last_input_ms in touchpad_read_cb,
   // which also wakes it. The radio/mesh keep running on core 0 the whole time.
