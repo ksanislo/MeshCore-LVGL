@@ -172,7 +172,10 @@ class UITask : public AbstractUITask {
   int             _dot_frame;
   uint32_t        _anim_ms;
 
-  // Contact Info page (+ Path Editor sub-page). Lazily built, reused.
+  // Contact Info page (+ Path Editor sub-page). Lazily built, reused. The same
+  // screen serves two modes: CINFO_VIEW (an existing contact) and CINFO_ADD
+  // (assembling a new contact from a typed/pasted/prefilled key).
+  enum { CINFO_VIEW = 0, CINFO_ADD = 1 };
   lv_obj_t*       _cinfo_screen;
   lv_obj_t*       _cinfo_body;          // scrollable form
   lv_obj_t*       _cinfo_title;
@@ -194,11 +197,33 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _cinfo_kb;
   lv_obj_t*       _cinfo_active_ta;     // textarea currently being edited
   uint8_t         _cinfo_pubkey[32];    // full key of the contact being viewed
-  // UI-owned working copy of the viewed contact (loaded from the snapshot at
-  // openContactInfo). The Contact-Info page reads/edits this copy for instant
-  // feedback; edits also push a CMD_* the backend applies to the real contact.
+  // Section wrappers, toggled by applyCinfoMode(): present when viewing an
+  // existing contact, hidden in add-mode (a not-yet-saved contact has none of
+  // these). Kept as members only so the mode switch can show/hide them.
+  lv_obj_t*       _cinfo_actions;       // Fav / Telem / Share row
+  lv_obj_t*       _cinfo_pos_field;
+  lv_obj_t*       _cinfo_type_field;
+  lv_obj_t*       _cinfo_lh_field;      // Last Heard
+  lv_obj_t*       _cinfo_tel_field;     // Telemetry
+  lv_obj_t*       _cinfo_hops_row;
+  lv_obj_t*       _cinfo_outpath_row;
+  // Add-mode extras (shown only when _cinfo_mode == CINFO_ADD): a header Save
+  // button, an editable Key field (manual entry; hidden when prefilled), and an
+  // inline error line. In view-mode the key lives in the hero (read-only popup).
+  lv_obj_t*       _cinfo_header_title;  // header-bar title ("Contact" / "New Contact")
+  lv_obj_t*       _cinfo_save_btn;
+  lv_obj_t*       _cinfo_key_field;     // makeField wrapper for the key textarea
+  lv_obj_t*       _cinfo_key_ta;
+  lv_obj_t*       _cinfo_err;
+  // UI-owned working copy of the viewed (or prospective) contact. In view-mode
+  // it's loaded from the snapshot at openContactInfo and edits push a CMD_*. In
+  // add-mode it's the prospective contact being assembled from the form, saved
+  // wholesale (AddContact) only when Save is pressed.
   ContactInfo     _cinfo_c;
   bool            _cinfo_valid;
+  uint8_t         _cinfo_mode;          // CINFO_VIEW (existing) or CINFO_ADD (new)
+  bool            _cinfo_addkey_locked; // add-mode: key is prefilled / read-only
+  bool            _cinfo_haskey;        // add-mode: _cinfo_c holds a valid key
   char            _cinfo_override[CHAT_PEER_NAME_MAX];  // local nickname (optimistic)
   lv_obj_t*       _cinfo_return_screen; // where back goes
 
@@ -306,9 +331,36 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _keypop_lbl;
   char            _keypop_hex[2 * PUB_KEY_SIZE + 1];
 
-  // Tiny internal clipboard (no OS/LVGL clipboard on-device). Copy fills it;
-  // the chat compose "+" menu can paste it.
-  char            _clipboard[160];
+  // Internal typed clipboard (no OS/LVGL clipboard on-device). `kind` lets a paste
+  // target pull the relevant part (smart paste, Phase 3); for now everything pastes
+  // _clip_text verbatim. A lone contact card copies as CLIP_CONTACT_REF (the whole
+  // "<hex:type:name>" token + parsed parts); any other selection is CLIP_PLAIN.
+  enum ClipKind : uint8_t { CLIP_EMPTY, CLIP_PLAIN, CLIP_CONTACT_REF };
+  char            _clip_text[1024];   // longest copyable today is the ~150B msg body
+  uint8_t         _clip_kind;
+  uint8_t         _clip_pubkey[PUB_KEY_SIZE];   // valid when kind == CLIP_CONTACT_REF
+  char            _clip_name[CHAT_PEER_NAME_MAX];
+  uint8_t         _clip_type;
+
+  // ----- Universal text-selection controller (long-press -> drag -> context menu).
+  // One instance drives selection on every chat-bubble text label and contact card
+  // (textareas + smart paste come in later phases). Targets are wired with
+  // sel_event_cb; the two triangle handles + the menu float on lv_layer_top().
+  enum SelKind  : uint8_t { SEL_NONE, SEL_LABEL, SEL_CARD, SEL_TEXTAREA };
+  enum SelState : uint8_t { SS_IDLE, SS_MARKING, SS_DRAGGING, SS_MENU };
+  struct SelectionCtl {
+    SelState  state;
+    SelKind   kind;
+    lv_obj_t* target;     // the lv_label or the card lv_obj being selected
+    uint32_t  anchor;     // fixed endpoint (char-id) during a drag
+    uint32_t  sel_lo, sel_hi;   // ordered selection range (char-id over markup)
+    bool      whole_obj;  // card selected atomically
+    lv_obj_t* h_start;    // down-triangle handle (tip = selection start / caret line)
+    lv_obj_t* h_end;      // up-triangle handle   (tip = selection end)
+    lv_obj_t* catcher;    // transparent full-screen tap-catcher (dismiss on tap OUTSIDE the selection)
+    lv_obj_t* menu;       // floating horizontal toolbar (Copy / Select All / ...), no dim
+  };
+  SelectionCtl    _sel;
 
   // Share-as-QR screen (name + truncated key band, QR below). Lazily built.
   lv_obj_t*       _qr_screen;
@@ -324,22 +376,8 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _newchan_err;
   lv_obj_t*       _newchan_kb;
 
-  // Unified add/import-contact screen: blank from "+ New Contact", or prefilled
-  // (key locked) when adding an unknown contact from a DM/channel contact ref.
-  lv_obj_t*       _newcon_screen;
-  lv_obj_t*       _newcon_name_ta;
-  lv_obj_t*       _newcon_key_ta;
-  lv_obj_t*       _newcon_err;
-  lv_obj_t*       _newcon_kb;
-  lv_obj_t*       _newcon_return_screen;
-  uint8_t         _newcon_pubkey[PUB_KEY_SIZE];        // set when prefilled
-  uint8_t         _newcon_type;
-  char            _newcon_advname[CHAT_PEER_NAME_MAX]; // advertised/linked name (override baseline)
-  bool            _newcon_prefilled;                   // key is fixed (read-only) when true
-  lv_obj_t*       _newcon_hero_av;                      // live hero preview (like a contact page)
-  lv_obj_t*       _newcon_hero_avl;
-  lv_obj_t*       _newcon_hero_nm;
-  lv_obj_t*       _newcon_hero_key;
+  // (Adding a contact is not a separate screen: it's the Contact Info screen in
+  // CINFO_ADD mode -- see openNewContact / openNewContactPrefilled.)
 
   // Node-info / status screen (read-only, periodically refreshed). Lazily built.
   lv_obj_t*       _nodeinfo_screen;
@@ -523,6 +561,8 @@ class UITask : public AbstractUITask {
   static void profile_back_cb(lv_event_t* e);
   static void profile_kb_event_cb(lv_event_t* e);
   void      populateContactInfo();
+  void      applyCinfoMode();           // show/hide widgets for view vs add mode
+  void      refreshCinfoHero();         // hero avatar/title/key from current state
   struct ContactInfo* cinfoContact();   // mutable ptr, or NULL
   void      showToast(const char* text);
   void      commitCinfoField(lv_obj_t* ta);
@@ -546,6 +586,7 @@ class UITask : public AbstractUITask {
   static void cinfo_editpath_cb(lv_event_t* e);
   static void cinfo_ta_event_cb(lv_event_t* e);
   static void cinfo_kb_event_cb(lv_event_t* e);
+  static void cinfo_save_cb(lv_event_t* e);    // add-mode header Save button
   static void cinfo_name_clicked_cb(lv_event_t* e);
   static void cinfo_key_cb(lv_event_t* e);     // contact hero key line -> full key popup
   static void share_sendto_cb(lv_event_t* e);
@@ -573,6 +614,8 @@ class UITask : public AbstractUITask {
   static void set_kb_event_cb(lv_event_t* e);
 public:
   static void ta_done_cb(lv_event_t* e);   // one-line field: Enter commits + drops keyboard
+  static lv_obj_t* makeSelTextarea(lv_obj_t* parent);  // textarea + selection wiring (all field sites)
+  static void ta_longpress_cb(lv_event_t* e);          // long-press a field -> Cut/Copy/Paste toolbar
 private:
   static void set_radio_apply_cb(lv_event_t* e);
   static void set_pathmode_cb(lv_event_t* e);
@@ -580,6 +623,34 @@ private:
   static void set_rot_cb(lv_event_t* e);
   static void set_screen_cb(lv_event_t* e);
   void      copyToClipboard(const char* text);
+  void      clipSet(uint8_t kind, const char* text, const uint8_t* pubkey,
+                    const char* name, uint8_t type);
+  // ----- Text-selection controller -----
+  void      makeLabelSelectable(lv_obj_t* lbl);   // wire a chat-text label for selection
+  void      makeCardSelectable(lv_obj_t* card);   // wire a contact card for atomic selection
+  void      ensureSelHandles();                    // build the two triangle handles (once)
+  void      beginLabelSel(lv_obj_t* lbl, lv_point_t abs_pt);
+  void      beginCardSel(lv_obj_t* card);
+  void      updateSelDrag(lv_point_t abs_pt);      // extend the dragged endpoint
+  void      applyLabelSel();                        // push sel_lo/hi to the native highlight
+  void      positionSelHandles();
+  void      finishSel();                            // freeze + show the context menu
+  void      endSelection();                         // clear everything, back to idle
+  void      showSelMenu();                          // floating horizontal toolbar over the selection
+  void      selAnchorRect(lv_area_t* out);          // screen bbox of the current selection
+  bool      selPointInside(lv_point_t p);           // is a touch point within the selection?
+  void      copySelection();
+  static uint32_t labelCharAt(lv_obj_t* lbl, lv_point_t abs_pt);  // touch point -> char-id
+  static void sel_event_cb(lv_event_t* e);          // long-press/drag/release on a target
+  static void sel_handle_cb(lv_event_t* e);         // drag a handle to re-adjust an endpoint
+  static void sel_catcher_cb(lv_event_t* e);        // tap outside selection -> dismiss
+  // Editable text fields: long-press -> toolbar (Cut/Copy/Paste/Select All).
+  void      beginTextareaSel(lv_obj_t* ta);
+  bool      taSelRange(lv_obj_t* ta, uint32_t* s, uint32_t* e);  // current native selection range
+  static void selmenu_cut_cb(lv_event_t* e);
+  static void selmenu_paste_cb(lv_event_t* e);
+  static void selmenu_copy_cb(lv_event_t* e);
+  static void selmenu_selectall_cb(lv_event_t* e);
   void      applyPreset(int idx);
   static void radio_preset_cb(lv_event_t* e);
   static void radio_preset_pick_cb(lv_event_t* e);
@@ -649,18 +720,12 @@ private:
   void      buildNewChannelScreen();
   void      openNewChannel();
   bool      createChannelFromForm();
-  void      buildNewContactScreen();
-  void      openNewContact(lv_obj_t* return_screen);   // blank manual entry
+  // Adding a contact reuses the Contact Info screen in CINFO_ADD mode.
+  void      openNewContact(lv_obj_t* return_screen);   // blank manual entry (typed/pasted hex key)
   void      openNewContactPrefilled(const uint8_t* pubkey, uint8_t type, const char* advname,
                                      lv_obj_t* return_screen);   // from a contact ref (key locked)
-  bool      saveContactFromForm();
-  bool      resolveNewContact(uint8_t* pk, uint8_t& type, char* advname, size_t cap);  // prefill or parse
-  void      refreshNewContactHero();   // live hero preview from the current form
-  static void newcon_key_cb(lv_event_t* e);   // hero key tap -> full key popup
-  static void newcon_back_cb(lv_event_t* e);
-  static void newcon_save_cb(lv_event_t* e);
-  static void newcon_ta_event_cb(lv_event_t* e);
-  static void newcon_kb_event_cb(lv_event_t* e);
+  bool      saveContactFromForm();     // add-mode: AddContact (+ SetNameOvr) from the form
+  bool      resolveContactKey();       // add-mode: parse the bare-hex key field into _cinfo_c
   void      openShareChannelQR(int idx);        // channel -> meshcore://channel/add QR
   static void kebab_chanshare_cb(lv_event_t* e); // channel chat kebab "Share"
 
@@ -723,6 +788,11 @@ public:
       _cinfo_lat_ta(NULL), _cinfo_lon_ta(NULL), _cinfo_type_lbl(NULL),
       _cinfo_lastheard(NULL), _cinfo_telem(NULL), _cinfo_hops(NULL), _cinfo_hops_x(NULL),
       _cinfo_outpath(NULL), _cinfo_kb(NULL), _cinfo_active_ta(NULL),
+      _cinfo_actions(NULL), _cinfo_pos_field(NULL), _cinfo_type_field(NULL),
+      _cinfo_lh_field(NULL), _cinfo_tel_field(NULL), _cinfo_hops_row(NULL), _cinfo_outpath_row(NULL),
+      _cinfo_header_title(NULL), _cinfo_save_btn(NULL), _cinfo_key_field(NULL),
+      _cinfo_key_ta(NULL), _cinfo_err(NULL),
+      _cinfo_mode(CINFO_VIEW), _cinfo_addkey_locked(false), _cinfo_haskey(false),
       _cinfo_return_screen(NULL),
       _menu_popup(NULL), _menu_list(NULL), _toast(NULL), _path_return_screen(NULL),
       _path_screen(NULL), _path_size_dd(NULL), _path_ta(NULL), _path_kb(NULL), _path_err(NULL),
@@ -750,10 +820,6 @@ public:
       _qr_return_screen(NULL),
       _newchan_screen(NULL), _newchan_name_ta(NULL), _newchan_key_ta(NULL),
       _newchan_err(NULL), _newchan_kb(NULL),
-      _newcon_screen(NULL), _newcon_name_ta(NULL), _newcon_key_ta(NULL),
-      _newcon_err(NULL), _newcon_kb(NULL), _newcon_return_screen(NULL),
-      _newcon_pubkey{}, _newcon_type(0), _newcon_advname{}, _newcon_prefilled(false),
-      _newcon_hero_av(NULL), _newcon_hero_avl(NULL), _newcon_hero_nm(NULL), _newcon_hero_key(NULL),
       _nodeinfo_screen(NULL), _nodeinfo_lbl(NULL), _nodeinfo_timer(NULL),
       _login_popup(NULL), _login_card(NULL), _login_title(NULL), _login_pw_ta(NULL),
       _login_save_chk(NULL), _login_auto_chk(NULL), _login_kb(NULL),
@@ -766,7 +832,9 @@ public:
         _chat_key[0] = 0;
         _banner_key[0] = 0;
         _search_filter[0] = 0;
-        _clipboard[0] = 0;
+        _clip_text[0] = 0;
+        _clip_kind = CLIP_EMPTY;
+        memset(&_sel, 0, sizeof(_sel));
         _contacts_filter[0] = 0;
         _pick_filter[0] = 0;
         _telem_text[0] = 0;

@@ -166,6 +166,18 @@ static void sb_drag_cb(lv_event_t* e) {
   lv_obj_scroll_to_y(content, (lv_coord_t)((int32_t)total * rel / max_y), LV_ANIM_OFF);
   // scroll_to_y emits LV_EVENT_SCROLL -> sb_update repositions the thumb.
 }
+// Every editable field is created through this so it uniformly supports text
+// selection (native drag-select) + a long-press Cut/Copy/Paste toolbar. Replaces
+// the bare lv_textarea_create() at all field sites. (The fn-pointer indirection
+// keeps this body out of that global rename.)
+lv_obj_t* UITask::makeSelTextarea(lv_obj_t* parent) {
+  lv_obj_t* (*mk)(lv_obj_t*) = lv_textarea_create;
+  lv_obj_t* ta = mk(parent);
+  lv_textarea_set_text_selection(ta, true);
+  lv_obj_add_event_cb(ta, UITask::ta_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
+  return ta;
+}
+
 static lv_obj_t* attachScrollHandle(lv_obj_t* content) {
   lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_OFF);   // hide the draw-only native bar
   lv_obj_t* thumb = lv_obj_create(lv_obj_get_parent(content));
@@ -385,7 +397,7 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_set_flex_flow(cctl, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(cctl, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-  _contacts_search_ta = lv_textarea_create(cctl);
+  _contacts_search_ta = makeSelTextarea(cctl);
   lv_textarea_set_one_line(_contacts_search_ta, true); lv_obj_add_event_cb(_contacts_search_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_placeholder_text(_contacts_search_ta, LV_SYMBOL_EYE_OPEN " Search");
   lv_obj_set_flex_grow(_contacts_search_ta, 1);
@@ -1273,7 +1285,7 @@ void UITask::showInsertMenu() {
   lv_obj_t* b2 = lv_list_add_btn(_insert_list, LV_SYMBOL_UPLOAD, "Share Contact");
   styleMenuBtn(b2);
   lv_obj_add_event_cb(b2, insert_share_cb, LV_EVENT_CLICKED, NULL);
-  if (_clipboard[0]) {  // only when something has been copied
+  if (_clip_kind != CLIP_EMPTY) {  // only when something has been copied
     lv_obj_t* b3 = lv_list_add_btn(_insert_list, LV_SYMBOL_PASTE, "Paste");
     styleMenuBtn(b3);
     lv_obj_add_event_cb(b3, insert_paste_cb, LV_EVENT_CLICKED, NULL);
@@ -1330,7 +1342,7 @@ void UITask::buildContactPickerScreen() {
   lv_obj_clear_flag(srow, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(srow, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(srow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  _pick_search_ta = lv_textarea_create(srow);
+  _pick_search_ta = makeSelTextarea(srow);
   lv_textarea_set_one_line(_pick_search_ta, true); lv_obj_add_event_cb(_pick_search_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_placeholder_text(_pick_search_ta, LV_SYMBOL_EYE_OPEN " Search");
   lv_obj_set_flex_grow(_pick_search_ta, 1);
@@ -1667,6 +1679,7 @@ void UITask::resendMessage(const ChatMessage* m) {
 
 void UITask::chat_resend_cb(lv_event_t* e) {
   if (!_instance) return;
+  if (_instance->_sel.state != SS_IDLE) return;   // a long-press started a text selection
   const ChatMessage* m = (const ChatMessage*)lv_obj_get_user_data(lv_event_get_target(e));
   if (m) _instance->resendMessage(m);
 }
@@ -1786,42 +1799,58 @@ static const lv_font_t* fontHeading() { return withEmoji(&lv_font_montserrat_16)
 static const lv_font_t* fontBody()    { return withEmoji(&lv_font_montserrat_14); }
 static const lv_font_t* fontCaption() { return withEmoji(&lv_font_montserrat_12); }
 
+// Message text is a recolor lv_label (NOT a spangroup) so it supports native text
+// selection (LV_LABEL_TEXT_SELECTION) + per-letter hit-testing for the universal
+// copy/paste feature. Recolor markup: plain text uses the label's default color
+// (FG_TEXT); a @[name] mention is wrapped in "#34D399 @name#". Because '#' is the
+// recolor command char, every LITERAL '#' in the body is escaped to "##" (LVGL
+// renders that as one '#'). The visible/"logical" text therefore differs from the
+// rendered markup string -- selection slices the markup back to logical text in
+// labelSelToLogical() (defined with the selection controller).
+static const uint32_t MSG_FG_TEXT = 0xF3F4F6;
+static const uint32_t MSG_MENTION  = 0x34D399;  // emerald-400; reads on gray + blue bubbles
+
+// Append [s,len) to the markup writer, escaping '#' -> '##'. `w` advances; never
+// overruns `end` (leaves room for a trailing NUL).
+static void appendEscaped(char*& w, char* end, const char* s, size_t len) {
+  for (size_t i = 0; i < len && w < end - 2; i++) {
+    if (s[i] == '#') { *w++ = '#'; *w++ = '#'; }
+    else             { *w++ = s[i]; }
+  }
+}
+
 static void addMessageText(lv_obj_t* bubble, const char* text) {
-  static const uint32_t FG_TEXT = 0xF3F4F6;
-  static const uint32_t MENTION = 0x34D399;  // emerald-400; reads on gray + blue bubbles
-
-  lv_obj_t* sg = lv_spangroup_create(bubble);
-  lv_obj_set_width(sg, LV_PCT(100));
-  lv_obj_set_style_text_font(sg, msgFont(), 0);   // emoji/unicode-capable
-  lv_spangroup_set_mode(sg, LV_SPAN_MODE_BREAK);  // wrap on width
-
-  auto addSpan = [&](const char* s, size_t len, uint32_t color, bool mention) {
-    if (len == 0) return;
-    char buf[CHAT_MSG_TEXT_MAX + 2];
-    size_t off = 0;
-    if (mention) buf[off++] = '@';
-    if (len > sizeof(buf) - 2 - off) len = sizeof(buf) - 2 - off;
-    memcpy(buf + off, s, len);
-    buf[off + len] = 0;
-    lv_span_t* span = lv_spangroup_new_span(sg);
-    lv_span_set_text(span, buf);
-    lv_style_set_text_color(&span->style, lv_color_hex(color));
-    lv_style_set_text_font(&span->style, msgFont());  // emoji/unicode in every span (incl. mentions)
-  };
-
   char clean[CHAT_MSG_TEXT_MAX + 8];
   sanitizeForFont(text, clean, sizeof(clean));
 
+  // Build recolor markup. Worst case: every char is '#' (doubles) plus per-mention
+  // color commands (~9 bytes each) -- 2x + slack is ample.
+  char markup[2 * (CHAT_MSG_TEXT_MAX + 8) + 64];
+  char* w = markup;
+  char* end = markup + sizeof(markup);
   const char* p = clean;
-  while (*p) {
+  while (*p && w < end - 16) {
     const char* at = strstr(p, "@[");
-    if (!at) { addSpan(p, strlen(p), FG_TEXT, false); break; }
-    addSpan(p, at - p, FG_TEXT, false);          // plain run before mention
+    if (!at) { appendEscaped(w, end, p, strlen(p)); break; }
+    appendEscaped(w, end, p, at - p);                 // plain run before mention
     const char* close = strchr(at + 2, ']');
-    if (!close) { addSpan(at, strlen(at), FG_TEXT, false); break; }  // malformed
-    addSpan(at + 2, close - (at + 2), MENTION, true);  // "@" + username, highlighted
+    if (!close) { appendEscaped(w, end, at, strlen(at)); break; }  // malformed -> literal
+    // Mention: "#34D399 @name#". The closing '#' is always followed by plain text
+    // (or end), so it never collides with a following color command.
+    w += snprintf(w, end - w, "#%06X @", (unsigned)MSG_MENTION);
+    appendEscaped(w, end, at + 2, close - (at + 2));  // the username (escaped)
+    if (w < end - 1) *w++ = '#';                      // close color region
     p = close + 1;
   }
+  *w = 0;
+
+  lv_obj_t* lbl = lv_label_create(bubble);
+  lv_obj_set_width(lbl, LV_PCT(100));
+  lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+  lv_label_set_recolor(lbl, true);
+  lv_obj_set_style_text_font(lbl, msgFont(), 0);            // emoji/unicode-capable
+  lv_obj_set_style_text_color(lbl, lv_color_hex(MSG_FG_TEXT), 0);  // default (non-recolored) color
+  lv_label_set_text(lbl, markup);
 }
 
 // Resolved @mention targets, stashed on a bubble's user_data so a tap can open
@@ -1894,6 +1923,7 @@ void UITask::mention_pick_cb(lv_event_t* e) {
 
 void UITask::mention_bubble_cb(lv_event_t* e) {
   if (!_instance) return;
+  if (_instance->_sel.state != SS_IDLE) return;   // a long-press started a text selection
   MentionTargets* t = (MentionTargets*)lv_obj_get_user_data(lv_event_get_target(e));
   if (!t || t->count == 0) return;
   if (t->count == 1) {
@@ -2046,6 +2076,7 @@ void UITask::buildContactCard(lv_obj_t* parent, const ChatMessage* m,
     lv_obj_add_event_cb(card, card_free_cb, LV_EVENT_DELETE, NULL);
   }
   lv_obj_add_event_cb(card, contact_card_cb, LV_EVENT_CLICKED, NULL);
+  makeCardSelectable(card);   // long-press selects the whole card (atomic)
 
   // Branded row: avatar circle on the left, name over "<pub..key>" on the right --
   // same layout/styling as the contacts list rows and hero cards.
@@ -2134,6 +2165,7 @@ void UITask::renderRichBody(lv_obj_t* bubble, const ChatMessage* m) {
 // prefilled with key locked (unknown), per the card's stashed target.
 void UITask::contact_card_cb(lv_event_t* e) {
   if (!_instance) return;
+  if (_instance->_sel.state != SS_IDLE) return;   // a long-press selected the card instead
   const CardTarget* t = (const CardTarget*)lv_obj_get_user_data(lv_event_get_current_target(e));
   if (!t) return;
   if (mproxy::lookupContactByPubKey(t->pubkey, PUB_KEY_SIZE))
@@ -2263,6 +2295,16 @@ void UITask::rebuildChatHistory() {
         lv_obj_add_event_cb(bubble, chat_resend_cb, LV_EVENT_CLICKED, NULL);
       } else {
         attachMentions(bubble, m->text);
+      }
+    }
+
+    // Make every text run in the bubble selectable (cards are wired in
+    // buildContactCard). Long-press a label -> drag-select -> Copy.
+    {
+      uint32_t nch = lv_obj_get_child_cnt(bubble);
+      for (uint32_t ci = 0; ci < nch; ci++) {
+        lv_obj_t* ch = lv_obj_get_child(bubble, ci);
+        if (lv_obj_check_type(ch, &lv_label_class)) makeLabelSelectable(ch);
       }
     }
 
@@ -2435,7 +2477,7 @@ void UITask::openChat(const char* peer_name) {
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_add_flag(_chat_search_bar, LV_OBJ_FLAG_HIDDEN);
 
-    _chat_search_ta = lv_textarea_create(_chat_search_bar);
+    _chat_search_ta = makeSelTextarea(_chat_search_bar);
     lv_textarea_set_one_line(_chat_search_ta, true); lv_obj_add_event_cb(_chat_search_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
     lv_textarea_set_placeholder_text(_chat_search_ta, "Search messages");
     lv_obj_set_flex_grow(_chat_search_ta, 1);
@@ -2483,7 +2525,7 @@ void UITask::openChat(const char* peer_name) {
     lv_label_set_text(plus_lbl, LV_SYMBOL_PLUS);
     lv_obj_center(plus_lbl);
 
-    _chat_input = lv_textarea_create(_chat_compose);
+    _chat_input = makeSelTextarea(_chat_compose);
     lv_textarea_set_one_line(_chat_input, true); lv_obj_add_event_cb(_chat_input, UITask::ta_done_cb, LV_EVENT_READY, NULL);
     lv_textarea_set_placeholder_text(_chat_input, "Message");
     lv_obj_set_flex_grow(_chat_input, 1);
@@ -3163,8 +3205,14 @@ void UITask::buildContactInfoScreen() {
   styleAsDarkScreen(_cinfo_screen);
   lv_obj_set_style_pad_all(_cinfo_screen, 0, 0);
 
-  // fixed top bar
-  makeHeaderBar(_cinfo_screen, "Contact", cinfo_back_cb);
+  // fixed top bar (+ an add-mode Save button, hidden when viewing an existing contact)
+  lv_obj_t* bar = makeHeaderBar(_cinfo_screen, "Contact", cinfo_back_cb);
+  _cinfo_header_title = lv_obj_get_child(bar, 1);   // [0]=back btn, [1]=title label
+  _cinfo_save_btn = lv_btn_create(bar);   // flexes to the right of the grown title
+  lv_obj_add_event_cb(_cinfo_save_btn, cinfo_save_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* svl = lv_label_create(_cinfo_save_btn);
+  lv_label_set_text(svl, LV_SYMBOL_OK " Save");
+  lv_obj_add_flag(_cinfo_save_btn, LV_OBJ_FLAG_HIDDEN);
 
   // scrollable body
   _cinfo_body = lv_obj_create(_cinfo_screen);
@@ -3185,8 +3233,9 @@ void UITask::buildContactInfoScreen() {
   makeHeroCard(_cinfo_body, &_cinfo_avatar, &_cinfo_avatar_lbl, &_cinfo_title,
                &_cinfo_key, cinfo_key_cb);
 
-  // action row
+  // action row (Fav / Telem / Share -- view-mode only)
   lv_obj_t* actions = lv_obj_create(_cinfo_body);
+  _cinfo_actions = actions;
   makePassive(actions);
   lv_obj_set_width(actions, LV_PCT(100));
   lv_obj_set_height(actions, LV_SIZE_CONTENT);
@@ -3240,14 +3289,28 @@ void UITask::buildContactInfoScreen() {
   lv_label_set_text(_cinfo_realname, "");
   lv_obj_set_style_text_color(_cinfo_realname, lv_color_hex(DIM_HEX), 0);
   lv_obj_set_style_text_font(_cinfo_realname, fontCaption(), 0);
-  _cinfo_name_ta = lv_textarea_create(fn);
+  _cinfo_name_ta = makeSelTextarea(fn);
   lv_textarea_set_one_line(_cinfo_name_ta, true); lv_obj_add_event_cb(_cinfo_name_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_width(_cinfo_name_ta, LV_PCT(100));
   lv_obj_add_event_cb(_cinfo_name_ta, cinfo_ta_event_cb, LV_EVENT_ALL, NULL);
 
-  // (Public key lives in the hero card now -- tap it for the full key + copy.)
+  // Public key: when VIEWING an existing contact it lives in the hero (tap for the
+  // full key + copy), so this field stays hidden. When ADDING, we show the whole
+  // key in its own box -- typed, pasted (long-press menu), or prefilled+locked.
+  _cinfo_key_field = makeField(_cinfo_body, "Public Key (hex)");
+  _cinfo_key_ta = makeSelTextarea(_cinfo_key_field);
+  lv_textarea_set_one_line(_cinfo_key_ta, true);
+  lv_obj_add_event_cb(_cinfo_key_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+  lv_obj_set_width(_cinfo_key_ta, LV_PCT(100));
+  lv_obj_add_event_cb(_cinfo_key_ta, cinfo_ta_event_cb, LV_EVENT_ALL, NULL);
+  _cinfo_err = lv_label_create(_cinfo_key_field);
+  lv_label_set_text(_cinfo_err, "");
+  lv_obj_set_style_text_color(_cinfo_err, lv_color_hex(UI_ERROR), 0);
+  lv_obj_add_flag(_cinfo_err, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_cinfo_key_field, LV_OBJ_FLAG_HIDDEN);   // view-mode default
 
   lv_obj_t* fp = makeField(_cinfo_body, "Position (lat, lon)");
+  _cinfo_pos_field = fp;
   lv_obj_t* prow = lv_obj_create(fp);
   makePassive(prow);
   lv_obj_set_width(prow, LV_PCT(100));
@@ -3258,24 +3321,27 @@ void UITask::buildContactInfoScreen() {
   lv_obj_set_style_pad_column(prow, 6, 0);
   lv_obj_clear_flag(prow, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(prow, LV_FLEX_FLOW_ROW);
-  _cinfo_lat_ta = lv_textarea_create(prow);
+  _cinfo_lat_ta = makeSelTextarea(prow);
   lv_textarea_set_one_line(_cinfo_lat_ta, true); lv_obj_add_event_cb(_cinfo_lat_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_flex_grow(_cinfo_lat_ta, 1);
   lv_obj_add_event_cb(_cinfo_lat_ta, cinfo_ta_event_cb, LV_EVENT_ALL, NULL);
-  _cinfo_lon_ta = lv_textarea_create(prow);
+  _cinfo_lon_ta = makeSelTextarea(prow);
   lv_textarea_set_one_line(_cinfo_lon_ta, true); lv_obj_add_event_cb(_cinfo_lon_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_flex_grow(_cinfo_lon_ta, 1);
   lv_obj_add_event_cb(_cinfo_lon_ta, cinfo_ta_event_cb, LV_EVENT_ALL, NULL);
 
   lv_obj_t* ft = makeField(_cinfo_body, "Contact Type");
+  _cinfo_type_field = ft;
   _cinfo_type_lbl = lv_label_create(ft);  // read-only: type comes from their advert
   lv_obj_set_style_text_color(_cinfo_type_lbl, lv_color_hex(FG_HEX), 0);
 
   lv_obj_t* flh = makeField(_cinfo_body, "Last Heard");
+  _cinfo_lh_field = flh;
   _cinfo_lastheard = lv_label_create(flh);
   lv_obj_set_style_text_color(_cinfo_lastheard, lv_color_hex(FG_HEX), 0);
 
   lv_obj_t* ftel = makeField(_cinfo_body, "Telemetry");
+  _cinfo_tel_field = ftel;
   _cinfo_telem = lv_label_create(ftel);
   lv_label_set_long_mode(_cinfo_telem, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(_cinfo_telem, LV_PCT(100));
@@ -3284,6 +3350,7 @@ void UITask::buildContactInfoScreen() {
 
   // path: hops row
   lv_obj_t* hrow = lv_obj_create(_cinfo_body);
+  _cinfo_hops_row = hrow;
   lv_obj_set_width(hrow, LV_PCT(100));
   lv_obj_set_height(hrow, LV_SIZE_CONTENT);
   lv_obj_set_style_bg_opa(hrow, LV_OPA_TRANSP, 0);
@@ -3301,6 +3368,7 @@ void UITask::buildContactInfoScreen() {
 
   // path: out path row
   lv_obj_t* orow = lv_obj_create(_cinfo_body);
+  _cinfo_outpath_row = orow;
   lv_obj_set_width(orow, LV_PCT(100));
   lv_obj_set_height(orow, LV_SIZE_CONTENT);
   lv_obj_set_style_bg_opa(orow, LV_OPA_TRANSP, 0);
@@ -3324,43 +3392,91 @@ void UITask::buildContactInfoScreen() {
   lv_obj_add_flag(_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
 }
 
+// Show/hide widgets for the active mode. View = an existing contact: all the
+// read-only/edit sections, no Save (edits commit live). Add = a new contact:
+// just the hero preview + Name + the full Key box + Save; the sections a
+// not-yet-saved contact can't have (actions, position, type, last-heard,
+// telemetry, path) are hidden.
+void UITask::applyCinfoMode() {
+  bool add = (_cinfo_mode == CINFO_ADD);
+  if (_cinfo_header_title) lv_label_set_text(_cinfo_header_title, add ? "New Contact" : "Contact");
+  auto show = [](lv_obj_t* o, bool on) {
+    if (!o) return;
+    if (on) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+    else    lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+  };
+  show(_cinfo_save_btn,     add);
+  show(_cinfo_key_field,    add);
+  show(_cinfo_actions,      !add);
+  show(_cinfo_pos_field,    !add);
+  show(_cinfo_type_field,   !add);
+  show(_cinfo_lh_field,     !add);
+  show(_cinfo_tel_field,    !add);
+  show(_cinfo_hops_row,     !add);
+  show(_cinfo_outpath_row,  !add);
+  if (add && _cinfo_err) lv_obj_add_flag(_cinfo_err, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Refresh the hero (avatar + name + truncated key line) from current state. Used
+// on open and, in add-mode, live as the Name / Key fields are edited.
+void UITask::refreshCinfoHero() {
+  ContactInfo* c = &_cinfo_c;
+  // Resolve the name to display in the hero.
+  char shownbuf[CHAT_PEER_NAME_MAX + 4];
+  const char* shown;
+  if (_cinfo_mode == CINFO_ADD) {
+    if (!_cinfo_addkey_locked) resolveContactKey();   // refresh _cinfo_c key/haskey from the box
+    const char* typed = _cinfo_name_ta ? lv_textarea_get_text(_cinfo_name_ta) : "";
+    shown = (typed && typed[0]) ? typed : (c->name[0] ? c->name : "New contact");
+  } else {
+    shown = _cinfo_override[0] ? _cinfo_override : (c->name[0] ? c->name : "(unnamed)");
+  }
+  sanitizeForFont(shown, shownbuf, sizeof(shownbuf));
+  lv_label_set_text(_cinfo_title, shownbuf);
+  if (_cinfo_avatar) brandAvatar(_cinfo_avatar, _cinfo_avatar_lbl, shownbuf, c->type);
+
+  // Key line: truncated <aaaaaa...bbbbbb> + copy when we have a key, else a prompt.
+  if (_cinfo_mode == CINFO_ADD && !_cinfo_haskey) {
+    lv_label_set_text(_cinfo_key, "(enter a key)");
+  } else {
+    char hex[2 * PUB_KEY_SIZE + 1];
+    mesh::Utils::toHex(hex, c->id.pub_key, PUB_KEY_SIZE);
+    char ktrunc[32];
+    snprintf(ktrunc, sizeof(ktrunc), "<%.6s...%.6s>  " LV_SYMBOL_COPY, hex, hex + 2 * PUB_KEY_SIZE - 6);
+    lv_label_set_text(_cinfo_key, ktrunc);
+  }
+}
+
 void UITask::populateContactInfo() {
   ContactInfo* c = cinfoContact();
   if (!c) { lv_scr_load(_cinfo_return_screen ? _cinfo_return_screen : _home_screen); return; }
 
+  // Hero (avatar + name + truncated key) is shared with add-mode and live edits.
+  refreshCinfoHero();
+
   bool overridden = _cinfo_override[0];
   const char* shown = overridden ? _cinfo_override : c->name;
-  char nm[CHAT_PEER_NAME_MAX + 4];
-  sanitizeForFont(shown[0] ? shown : "(unnamed)", nm, sizeof(nm));
-  lv_label_set_text(_cinfo_title, nm);
-  if (_cinfo_avatar) {
-    if (c->type == ADV_TYPE_CHAT || c->type == 0) {
-      char g[8]; firstGrapheme(nm, g, sizeof(g));
-      lv_label_set_text(_cinfo_avatar_lbl, g[0] ? g : "?");
-      lv_obj_set_style_bg_color(_cinfo_avatar, lv_color_hex(nameColor(shown)), 0);
-    } else {
-      lv_label_set_text(_cinfo_avatar_lbl, contactSymbol(c->type));
-      lv_obj_set_style_bg_color(_cinfo_avatar, lv_color_hex(UI_AVATAR_NEUT), 0);
+  // The Name field + "(advert name)" hint are view-mode edits of the local
+  // nickname override. In add-mode the opener seeds the field and we don't
+  // clobber what the user is typing.
+  if (_cinfo_mode != CINFO_ADD) {
+    lv_textarea_set_text(_cinfo_name_ta, shown);
+    if (_cinfo_realname) {
+      if (overridden) {
+        char rc[CHAT_PEER_NAME_MAX + 4], rn[CHAT_PEER_NAME_MAX + 8];
+        sanitizeForFont(c->name, rc, sizeof(rc));
+        snprintf(rn, sizeof(rn), "(%s)", rc);
+        lv_label_set_text(_cinfo_realname, rn);
+      } else {
+        lv_label_set_text(_cinfo_realname, "");
+      }
     }
-  }
-  lv_textarea_set_text(_cinfo_name_ta, shown);
-  if (_cinfo_realname) {
-    if (overridden) {
-      char rc[CHAT_PEER_NAME_MAX + 4], rn[CHAT_PEER_NAME_MAX + 8];
-      sanitizeForFont(c->name, rc, sizeof(rc));
-      snprintf(rn, sizeof(rn), "(%s)", rc);
-      lv_label_set_text(_cinfo_realname, rn);
-    } else {
-      lv_label_set_text(_cinfo_realname, "");
-    }
+  } else if (_cinfo_realname) {
+    lv_label_set_text(_cinfo_realname, "");
   }
 
-  char hex[2 * PUB_KEY_SIZE + 1];
-  mesh::Utils::toHex(hex, c->id.pub_key, PUB_KEY_SIZE);
-  char ktrunc[32];
-  snprintf(ktrunc, sizeof(ktrunc), "<%.6s...%.6s>  " LV_SYMBOL_COPY, hex, hex + 2 * PUB_KEY_SIZE - 6);
-  lv_label_set_text(_cinfo_key, ktrunc);   // tap opens the full key + copy popup
-
+  // The rest is view-mode detail (fav/position/type/last-heard/telemetry/path);
+  // those widgets are hidden in add-mode, so the values below are harmless.
   bool fav = (c->flags & CONTACT_FLAG_FAVOURITE) != 0;
   lv_label_set_text(_cinfo_fav_lbl, fav ? LV_SYMBOL_OK " Favorited" : "Favorite");
   lv_obj_set_style_text_color(_cinfo_fav_lbl, lv_color_hex(fav ? FAV_HEX : 0xF3F4F6), 0);
@@ -3434,14 +3550,21 @@ void UITask::openContactInfo(const uint8_t* pubkey, lv_obj_t* return_screen) {
   mproxy::getNameOverride(pubkey, _cinfo_override, sizeof(_cinfo_override));
   _cinfo_return_screen = return_screen;
   buildContactInfoScreen();
+  _cinfo_mode = CINFO_VIEW;
+  _cinfo_addkey_locked = false;
+  _cinfo_haskey = true;          // viewing -> key is real
   _cinfo_active_ta = NULL;
   lv_obj_add_flag(_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
+  applyCinfoMode();
   populateContactInfo();
   lv_obj_scroll_to_y(_cinfo_body, 0, LV_ANIM_OFF);
   lv_scr_load(_cinfo_screen);
 }
 
 void UITask::commitCinfoField(lv_obj_t* ta) {
+  // Add-mode: nothing is posted live; field edits just refresh the hero preview.
+  // The contact is created wholesale (AddContact) only when Save is pressed.
+  if (_cinfo_mode == CINFO_ADD) { refreshCinfoHero(); return; }
   ContactInfo* c = cinfoContact();
   if (!c || !ta) return;
   if (ta == _cinfo_name_ta) {
@@ -3519,6 +3642,8 @@ void UITask::cinfo_editpath_cb(lv_event_t* e) {
 void UITask::cinfo_ta_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_obj_t* ta = lv_event_get_target(e);
+  // A prefilled key is read-only -> don't raise a keyboard for it.
+  if (ta == _instance->_cinfo_key_ta && _instance->_cinfo_addkey_locked) return;
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     _instance->_cinfo_active_ta = ta;
@@ -3529,6 +3654,9 @@ void UITask::cinfo_ta_event_cb(lv_event_t* e) {
     lv_obj_align(_instance->_cinfo_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_cinfo_kb);
     _instance->raiseFieldForKb(_instance->_cinfo_body, _instance->_cinfo_kb, ta);
+  } else if (code == LV_EVENT_VALUE_CHANGED) {
+    // Add-mode: live hero preview as the Name / Key are typed or pasted.
+    if (_instance->_cinfo_mode == CINFO_ADD) _instance->refreshCinfoHero();
   } else if (code == LV_EVENT_DEFOCUSED) {
     _instance->commitCinfoField(ta);
   }
@@ -3609,10 +3737,12 @@ void UITask::showKeyPopup(const char* hex) {
   lv_obj_move_foreground(_keypop_popup);
 }
 
-// Contact hero key line -> full key popup (key from the contact being viewed).
+// Contact hero key line -> full key popup (key from the contact being viewed, or
+// the prospective contact in add-mode once a valid key has been entered).
 void UITask::cinfo_key_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
+  if (_instance->_cinfo_mode == CINFO_ADD && !_instance->_cinfo_haskey) return;
   ContactInfo* c = _instance->cinfoContact();
   if (!c) return;
   char hex[2 * PUB_KEY_SIZE + 1];
@@ -3945,7 +4075,7 @@ void UITask::buildPathEditorScreen() {
   lv_obj_set_width(_path_size_dd, LV_PCT(100));
 
   lv_obj_t* fp = makeField(body, "Path (comma hex, e.g. aa,bb,cc)");
-  _path_ta = lv_textarea_create(fp);
+  _path_ta = makeSelTextarea(fp);
   lv_textarea_set_one_line(_path_ta, true); lv_obj_add_event_cb(_path_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_width(_path_ta, LV_PCT(100));
   lv_obj_add_event_cb(_path_ta, path_ta_event_cb, LV_EVENT_ALL, NULL);
@@ -4119,13 +4249,13 @@ void UITask::buildNewChannelScreen() {
   lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
 
   lv_obj_t* fn = makeField(body, "Name");
-  _newchan_name_ta = lv_textarea_create(fn);
+  _newchan_name_ta = makeSelTextarea(fn);
   lv_textarea_set_one_line(_newchan_name_ta, true); lv_obj_add_event_cb(_newchan_name_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_width(_newchan_name_ta, LV_PCT(100));
   lv_obj_add_event_cb(_newchan_name_ta, newchan_ta_event_cb, LV_EVENT_ALL, NULL);
 
   lv_obj_t* fk = makeField(body, "Key (hex) or paste meshcore:// link");
-  _newchan_key_ta = lv_textarea_create(fk);
+  _newchan_key_ta = makeSelTextarea(fk);
   lv_textarea_set_one_line(_newchan_key_ta, true); lv_obj_add_event_cb(_newchan_key_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_width(_newchan_key_ta, LV_PCT(100));
   lv_obj_add_event_cb(_newchan_key_ta, newchan_ta_event_cb, LV_EVENT_ALL, NULL);
@@ -4265,161 +4395,93 @@ void UITask::newchan_kb_event_cb(lv_event_t* e) {
   }
 }
 
-// ----- Unified add/import-contact screen (mirrors New Channel) ----------------
-// Resolve the contact key/type/advertised-name from the form: the locked prefill,
-// or parse the key field (raw hex, or a "meshcore://contact/add?public_key=..&
-// name=..&type=.." link). Returns false if no full public key is available yet.
-bool UITask::resolveNewContact(uint8_t* pk, uint8_t& type, char* advname, size_t cap) {
-  advname[0] = 0;
-  type = ADV_TYPE_CHAT;
-  if (_newcon_prefilled) {
-    memcpy(pk, _newcon_pubkey, PUB_KEY_SIZE);
-    type = _newcon_type;
-    strncpy(advname, _newcon_advname, cap - 1); advname[cap - 1] = 0;
-    return true;
-  }
-  const char* keyIn = lv_textarea_get_text(_newcon_key_ta);
-  char hexbuf[2 * PUB_KEY_SIZE + 1] = "";
-  if (keyIn && strstr(keyIn, "contact/add")) {
-    char pkp[2 * PUB_KEY_SIZE + 4], nm[80], typ[8];
-    if (uriParam(keyIn, "public_key", pkp, sizeof(pkp))) snprintf(hexbuf, sizeof(hexbuf), "%s", pkp);
-    if (uriParam(keyIn, "name", nm, sizeof(nm)))         urlDecodeInto(nm, advname, cap);
-    if (uriParam(keyIn, "type", typ, sizeof(typ)))       type = (uint8_t)atoi(typ);
-  } else {
-    snprintf(hexbuf, sizeof(hexbuf), "%s", keyIn ? keyIn : "");
-  }
-  return hexToBytes(hexbuf, pk, PUB_KEY_SIZE) == PUB_KEY_SIZE;
-}
-
-// Live hero preview from the current form -- same branded hero card a built contact
-// shows. Updates as the name/key fields change.
-void UITask::refreshNewContactHero() {
-  if (!_newcon_hero_nm) return;
-  uint8_t pk[PUB_KEY_SIZE], type; char advname[CHAT_PEER_NAME_MAX];
-  bool haveKey = resolveNewContact(pk, type, advname, sizeof(advname));
-  const char* typed = lv_textarea_get_text(_newcon_name_ta);
-  const char* shown = (typed && typed[0]) ? typed : (advname[0] ? advname : "New contact");
-  char clean[CHAT_PEER_NAME_MAX + 4];
-  sanitizeForFont(shown, clean, sizeof(clean));
-  lv_label_set_text(_newcon_hero_nm, clean);
-  brandAvatar(_newcon_hero_av, _newcon_hero_avl, clean, type);
-  if (haveKey) {
-    char hex[2 * PUB_KEY_SIZE + 1]; mesh::Utils::toHex(hex, pk, PUB_KEY_SIZE);
-    char trunc[24]; snprintf(trunc, sizeof(trunc), "<%.6s...%.6s>", hex, hex + 2 * PUB_KEY_SIZE - 6);
-    lv_label_set_text(_newcon_hero_key, trunc);
-  } else {
-    lv_label_set_text(_newcon_hero_key, "(enter a key)");
-  }
-}
-
-void UITask::newcon_key_cb(lv_event_t* e) {
-  (void)e;
-  if (!_instance) return;
-  uint8_t pk[PUB_KEY_SIZE], type; char advname[CHAT_PEER_NAME_MAX];
-  if (!_instance->resolveNewContact(pk, type, advname, sizeof(advname))) return;
-  char hex[2 * PUB_KEY_SIZE + 1]; mesh::Utils::toHex(hex, pk, PUB_KEY_SIZE);
-  _instance->showKeyPopup(hex);
-}
-
-void UITask::buildNewContactScreen() {
-  if (_newcon_screen) return;
-  _newcon_screen = lv_obj_create(NULL);
-  styleAsDarkScreen(_newcon_screen);
-  lv_obj_set_style_pad_all(_newcon_screen, 0, 0);
-
-  lv_obj_t* bar = makeHeaderBar(_newcon_screen, "New Contact", newcon_back_cb);
-  lv_obj_t* save = lv_btn_create(bar);   // flexes to the right of the grown title
-  lv_obj_add_event_cb(save, newcon_save_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* svl = lv_label_create(save);
-  lv_label_set_text(svl, LV_SYMBOL_OK " Save");
-
-  lv_obj_t* body = lv_obj_create(_newcon_screen);
-  lv_obj_add_event_cb(body, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
-  lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
-  lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
-  lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(body, 0, 0);
-  lv_obj_set_style_pad_all(body, 12, 0);
-  lv_obj_set_style_pad_row(body, 8, 0);
-  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
-
-  // Live hero preview at the top -- same branded card a built contact shows.
-  makeHeroCard(body, &_newcon_hero_av, &_newcon_hero_avl, &_newcon_hero_nm, &_newcon_hero_key, newcon_key_cb);
-
-  lv_obj_t* fn = makeField(body, "Name");
-  _newcon_name_ta = lv_textarea_create(fn);
-  lv_textarea_set_one_line(_newcon_name_ta, true); lv_obj_add_event_cb(_newcon_name_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
-  lv_obj_set_width(_newcon_name_ta, LV_PCT(100));
-  lv_obj_add_event_cb(_newcon_name_ta, newcon_ta_event_cb, LV_EVENT_ALL, NULL);
-
-  lv_obj_t* fk = makeField(body, "Key (hex) or paste meshcore:// link");
-  _newcon_key_ta = lv_textarea_create(fk);
-  lv_textarea_set_one_line(_newcon_key_ta, true); lv_obj_add_event_cb(_newcon_key_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
-  lv_obj_set_width(_newcon_key_ta, LV_PCT(100));
-  lv_obj_add_event_cb(_newcon_key_ta, newcon_ta_event_cb, LV_EVENT_ALL, NULL);
-
-  _newcon_err = lv_label_create(body);
-  lv_label_set_text(_newcon_err, "");
-  lv_obj_set_style_text_color(_newcon_err, lv_color_hex(UI_ERROR), 0);
-  lv_obj_add_flag(_newcon_err, LV_OBJ_FLAG_HIDDEN);
-
-  _newcon_kb = lv_keyboard_create(_newcon_screen);
-  lv_obj_add_event_cb(_newcon_kb, newcon_kb_event_cb, LV_EVENT_ALL, NULL);
-  lv_obj_add_flag(_newcon_kb, LV_OBJ_FLAG_HIDDEN);
+// ----- Add a contact: the Contact Info screen in CINFO_ADD mode ----------------
+// "Adding a contact" is not its own screen -- it's buildContactInfoScreen() driven
+// in CINFO_ADD mode, so the hero, Name field, key popup, keyboard, and styling are
+// the exact same widgets a viewed contact uses (UX stays consistent, no fork).
+//
+// The Key field is bare hex only (typed, pasted via long-press, or prefilled and
+// locked). meshcore:// links are decoded by the chat-display layer into a contact
+// ref before they ever reach here. resolveContactKey() parses the box into the
+// prospective contact (_cinfo_c) and reports whether we now hold a full key.
+bool UITask::resolveContactKey() {
+  if (_cinfo_addkey_locked) { _cinfo_haskey = true; return true; }   // prefilled key already in _cinfo_c
+  const char* keyIn = _cinfo_key_ta ? lv_textarea_get_text(_cinfo_key_ta) : "";
+  uint8_t pk[PUB_KEY_SIZE];
+  bool ok = (hexToBytes(keyIn ? keyIn : "", pk, PUB_KEY_SIZE) == PUB_KEY_SIZE);
+  if (ok) memcpy(_cinfo_c.id.pub_key, pk, PUB_KEY_SIZE);
+  _cinfo_haskey = ok;
+  return ok;
 }
 
 void UITask::openNewContact(lv_obj_t* return_screen) {
-  buildNewContactScreen();
-  _newcon_return_screen = return_screen;
-  _newcon_prefilled = false;
-  _newcon_advname[0] = 0;
-  memset(_newcon_pubkey, 0, PUB_KEY_SIZE);
-  _newcon_type = ADV_TYPE_CHAT;
-  lv_textarea_set_text(_newcon_name_ta, "");
-  lv_textarea_set_text(_newcon_key_ta, "");
-  lv_obj_add_flag(_newcon_err, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(_newcon_kb, LV_OBJ_FLAG_HIDDEN);
-  refreshNewContactHero();
-  lv_scr_load(_newcon_screen);
+  buildContactInfoScreen();
+  _cinfo_return_screen = return_screen;
+  _cinfo_mode = CINFO_ADD;
+  _cinfo_addkey_locked = false;
+  _cinfo_haskey = false;
+  _cinfo_valid = true;                    // _cinfo_c is the working prospective contact
+  _cinfo_c = ContactInfo();
+  _cinfo_c.type = ADV_TYPE_CHAT;
+  _cinfo_c.out_path_len = OUT_PATH_UNKNOWN;
+  _cinfo_override[0] = 0;
+  memset(_cinfo_pubkey, 0, PUB_KEY_SIZE);
+  _cinfo_active_ta = NULL;
+  lv_textarea_set_text(_cinfo_name_ta, "");
+  lv_textarea_set_text(_cinfo_key_ta, "");
+  lv_obj_add_flag(_cinfo_err, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
+  applyCinfoMode();
+  populateContactInfo();
+  lv_obj_scroll_to_y(_cinfo_body, 0, LV_ANIM_OFF);
+  lv_scr_load(_cinfo_screen);
 }
 
 void UITask::openNewContactPrefilled(const uint8_t* pubkey, uint8_t type, const char* advname,
                                      lv_obj_t* return_screen) {
-  buildNewContactScreen();
-  _newcon_return_screen = return_screen;
-  _newcon_prefilled = true;
-  memcpy(_newcon_pubkey, pubkey, PUB_KEY_SIZE);
-  _newcon_type = type;
-  strncpy(_newcon_advname, advname ? advname : "", sizeof(_newcon_advname) - 1);
-  _newcon_advname[sizeof(_newcon_advname) - 1] = 0;
-  lv_textarea_set_text(_newcon_name_ta, _newcon_advname);   // editable display name
+  buildContactInfoScreen();
+  _cinfo_return_screen = return_screen;
+  _cinfo_mode = CINFO_ADD;
+  _cinfo_addkey_locked = true;            // key came from a contact ref -> read-only
+  _cinfo_haskey = true;
+  _cinfo_valid = true;
+  _cinfo_c = ContactInfo();
+  memcpy(_cinfo_c.id.pub_key, pubkey, PUB_KEY_SIZE);
+  memcpy(_cinfo_pubkey, pubkey, PUB_KEY_SIZE);
+  _cinfo_c.type = type;
+  _cinfo_c.out_path_len = OUT_PATH_UNKNOWN;
+  strncpy(_cinfo_c.name, advname ? advname : "", sizeof(_cinfo_c.name) - 1);
+  _cinfo_c.name[sizeof(_cinfo_c.name) - 1] = 0;
+  _cinfo_override[0] = 0;
+  _cinfo_active_ta = NULL;
+  lv_textarea_set_text(_cinfo_name_ta, _cinfo_c.name);   // editable display name
   char hex[2 * PUB_KEY_SIZE + 1];
   mesh::Utils::toHex(hex, pubkey, PUB_KEY_SIZE);
-  char trunc[24];
-  snprintf(trunc, sizeof(trunc), "<%.6s...%.6s>", hex, hex + 2 * PUB_KEY_SIZE - 6);
-  lv_textarea_set_text(_newcon_key_ta, trunc);   // read-only (no keyboard raised for it)
-  lv_obj_add_flag(_newcon_err, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(_newcon_kb, LV_OBJ_FLAG_HIDDEN);
-  refreshNewContactHero();
-  lv_scr_load(_newcon_screen);
+  lv_textarea_set_text(_cinfo_key_ta, hex);              // whole key, shown but read-only
+  lv_obj_add_flag(_cinfo_err, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
+  applyCinfoMode();
+  populateContactInfo();
+  lv_obj_scroll_to_y(_cinfo_body, 0, LV_ANIM_OFF);
+  lv_scr_load(_cinfo_screen);
 }
 
+// Add-mode Save: build the contact from the form and post AddContact (+ a
+// SetNameOvr when the typed name differs from the advertised/linked baseline).
 bool UITask::saveContactFromForm() {
-  auto fail = [this](const char* m){ lv_label_set_text(_newcon_err, m); lv_obj_clear_flag(_newcon_err, LV_OBJ_FLAG_HIDDEN); };
-  uint8_t pk[PUB_KEY_SIZE]; uint8_t type;
-  char advname[CHAT_PEER_NAME_MAX];
-  if (!resolveNewContact(pk, type, advname, sizeof(advname))) { fail("Key must be 64 hex chars"); return false; }
+  auto fail = [this](const char* m){ lv_label_set_text(_cinfo_err, m); lv_obj_clear_flag(_cinfo_err, LV_OBJ_FLAG_HIDDEN); };
+  if (!resolveContactKey()) { fail("Key must be 64 hex chars"); return false; }
 
-  const char* typed = lv_textarea_get_text(_newcon_name_ta);
+  const char* advname = _cinfo_c.name;     // advertised/linked baseline (prefill); "" for manual entry
+  const char* typed = lv_textarea_get_text(_cinfo_name_ta);
   const char* base = advname[0] ? advname : typed;   // advertised name is the stored contact name
   if (!base || !base[0]) { fail("Enter a name"); return false; }
 
   mproxy::MeshCmd cmd{};
   cmd.kind = mproxy::CmdKind::AddContact;
   ContactInfo& c = cmd.contact;
-  memcpy(c.id.pub_key, pk, PUB_KEY_SIZE);
-  c.type = type;
+  memcpy(c.id.pub_key, _cinfo_c.id.pub_key, PUB_KEY_SIZE);
+  c.type = _cinfo_c.type;
   strncpy(c.name, base, sizeof(c.name) - 1);
   c.out_path_len = OUT_PATH_UNKNOWN;
   c.lastmod = mproxy::rtcSeconds();
@@ -4430,7 +4492,7 @@ bool UITask::saveContactFromForm() {
   if (advname[0] && typed && typed[0] && strcmp(typed, advname) != 0) {
     mproxy::MeshCmd ov{};
     ov.kind = mproxy::CmdKind::SetNameOvr;
-    memcpy(ov.pubkey, pk, PUB_KEY_SIZE);
+    memcpy(ov.pubkey, _cinfo_c.id.pub_key, PUB_KEY_SIZE);
     strncpy(ov.name, typed, sizeof(ov.name) - 1);
     mproxy::postCommand(ov);
   }
@@ -4438,46 +4500,12 @@ bool UITask::saveContactFromForm() {
   return true;   // appears in the list once the backend republishes the snapshot
 }
 
-void UITask::newcon_back_cb(lv_event_t* e) {
-  (void)e;
-  if (!_instance) return;
-  lv_obj_add_flag(_instance->_newcon_kb, LV_OBJ_FLAG_HIDDEN);
-  lv_scr_load(_instance->_newcon_return_screen ? _instance->_newcon_return_screen : _instance->_home_screen);
-}
-
-void UITask::newcon_save_cb(lv_event_t* e) {
+void UITask::cinfo_save_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   if (_instance->saveContactFromForm()) {
-    lv_obj_add_flag(_instance->_newcon_kb, LV_OBJ_FLAG_HIDDEN);
-    lv_scr_load(_instance->_newcon_return_screen ? _instance->_newcon_return_screen : _instance->_home_screen);
-  }
-}
-
-void UITask::newcon_ta_event_cb(lv_event_t* e) {
-  if (!_instance) return;
-  lv_obj_t* ta = lv_event_get_target(e);
-  // The key field is read-only when prefilled -> don't raise its keyboard.
-  if (ta == _instance->_newcon_key_ta && _instance->_newcon_prefilled) return;
-  lv_event_code_t code = lv_event_get_code(e);
-  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
-    lv_keyboard_set_textarea(_instance->_newcon_kb, ta);
-    lv_keyboard_set_mode(_instance->_newcon_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_newcon_kb, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_align(_instance->_newcon_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_move_foreground(_instance->_newcon_kb);
-    _instance->raiseFieldForKb(lv_obj_get_parent(lv_obj_get_parent(ta)), _instance->_newcon_kb, ta);
-  } else if (code == LV_EVENT_VALUE_CHANGED) {
-    _instance->refreshNewContactHero();   // live preview as the name/key are typed
-  }
-}
-
-void UITask::newcon_kb_event_cb(lv_event_t* e) {
-  if (!_instance) return;
-  lv_event_code_t code = lv_event_get_code(e);
-  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
-    lv_obj_add_flag(_instance->_newcon_kb, LV_OBJ_FLAG_HIDDEN);
-    _instance->resetKbScroll();
+    lv_obj_add_flag(_instance->_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_scr_load(_instance->_cinfo_return_screen ? _instance->_cinfo_return_screen : _instance->_home_screen);
   }
 }
 
@@ -4538,7 +4566,7 @@ void UITask::buildLoginPopup() {
   lv_obj_set_flex_flow(prow, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(prow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-  _login_pw_ta = lv_textarea_create(prow);
+  _login_pw_ta = makeSelTextarea(prow);
   lv_textarea_set_one_line(_login_pw_ta, true); lv_obj_add_event_cb(_login_pw_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_flex_grow(_login_pw_ta, 1);
   lv_obj_add_event_cb(_login_pw_ta, login_ta_event_cb, LV_EVENT_ALL, NULL);
@@ -4795,7 +4823,7 @@ static lv_obj_t* makeDropdownField(lv_obj_t* body, const char* cap, const char* 
 // caption + a 100%-wide numeric textarea wired to the radio-edit handler.
 static lv_obj_t* makeNumberField(lv_obj_t* body, const char* cap, lv_event_cb_t cb) {
   lv_obj_t* f = makeField(body, cap);
-  lv_obj_t* ta = lv_textarea_create(f);
+  lv_obj_t* ta = UITask::makeSelTextarea(f);
   lv_textarea_set_one_line(ta, true); lv_obj_add_event_cb(ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_accepted_chars(ta, "0123456789.-");
   lv_obj_set_width(ta, LV_PCT(100));
@@ -4986,7 +5014,7 @@ void UITask::buildProfileScreen() {
   addSettingsSection(_profile_body, "Public Info");
 
   lv_obj_t* fn = makeField(_profile_body, "Name");
-  _set_name_ta = lv_textarea_create(fn);
+  _set_name_ta = makeSelTextarea(fn);
   lv_textarea_set_one_line(_set_name_ta, true); lv_obj_add_event_cb(_set_name_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_width(_set_name_ta, LV_PCT(100));
   lv_obj_add_event_cb(_set_name_ta, set_name_ta_event_cb, LV_EVENT_ALL, NULL);
@@ -5003,12 +5031,12 @@ void UITask::buildProfileScreen() {
   lv_obj_set_style_pad_column(prow, 6, 0);
   lv_obj_clear_flag(prow, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(prow, LV_FLEX_FLOW_ROW);
-  _set_lat_ta = lv_textarea_create(prow);
+  _set_lat_ta = makeSelTextarea(prow);
   lv_textarea_set_one_line(_set_lat_ta, true); lv_obj_add_event_cb(_set_lat_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_accepted_chars(_set_lat_ta, "0123456789.-");
   lv_obj_set_flex_grow(_set_lat_ta, 1);
   lv_obj_add_event_cb(_set_lat_ta, set_pos_ta_event_cb, LV_EVENT_ALL, NULL);
-  _set_lon_ta = lv_textarea_create(prow);
+  _set_lon_ta = makeSelTextarea(prow);
   lv_textarea_set_one_line(_set_lon_ta, true); lv_obj_add_event_cb(_set_lon_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_accepted_chars(_set_lon_ta, "0123456789.-");
   lv_obj_set_flex_grow(_set_lon_ta, 1);
@@ -5651,18 +5679,481 @@ void UITask::set_screen_cb(lv_event_t* e) {
   pushPrefs();
 }
 
+void UITask::clipSet(uint8_t kind, const char* text, const uint8_t* pubkey,
+                     const char* name, uint8_t type) {
+  if (!text) text = "";
+  strncpy(_clip_text, text, sizeof(_clip_text) - 1);
+  _clip_text[sizeof(_clip_text) - 1] = 0;
+  _clip_kind = kind;
+  if (pubkey) memcpy(_clip_pubkey, pubkey, PUB_KEY_SIZE);
+  else        memset(_clip_pubkey, 0, PUB_KEY_SIZE);
+  if (name) { strncpy(_clip_name, name, sizeof(_clip_name) - 1); _clip_name[sizeof(_clip_name) - 1] = 0; }
+  else      _clip_name[0] = 0;
+  _clip_type = type;
+}
+
 void UITask::copyToClipboard(const char* text) {
-  if (!text) return;
-  strncpy(_clipboard, text, sizeof(_clipboard) - 1);
-  _clipboard[sizeof(_clipboard) - 1] = 0;
+  clipSet(CLIP_PLAIN, text, nullptr, nullptr, 0);
 }
 
 void UITask::insert_paste_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
-  if (_instance->_clipboard[0] && _instance->_chat_input)
-    lv_textarea_add_text(_instance->_chat_input, _instance->_clipboard);
+  // (Phase 3 will route this through the smart-paste transform table by FieldKind.)
+  if (_instance->_clip_kind != CLIP_EMPTY && _instance->_chat_input)
+    lv_textarea_add_text(_instance->_chat_input, _instance->_clip_text);
   _instance->closeInsertPopup();
+}
+
+// =====================================================================
+// Universal text selection -- Phase 1: read-only chat bubbles (recolor text
+// labels + atomic contact cards). Long-press -> drag to widen -> release shows a
+// floating Copy / Select All menu. Textareas, smart paste, word-select, and
+// handle re-grab come in later phases.
+// =====================================================================
+static const lv_coord_t SEL_HANDLE_D = 12;   // grab-dot diameter (true triangles: polish)
+
+// Faithful replica of LVGL's recolor command state machine (misc/lv_txt.c
+// _lv_txt_is_cmd), so we can map a native label selection (char-id range over the
+// recolor MARKUP) back to the visible/logical text for copy.
+namespace { enum { TCMD_WAIT, TCMD_PAR, TCMD_IN }; }
+static bool selTxtIsCmd(uint8_t& st, char c) {
+  bool ret = false;
+  if (c == '#') {
+    if (st == TCMD_WAIT)      { st = TCMD_PAR; ret = true; }
+    else if (st == TCMD_PAR)  { st = TCMD_WAIT; }            // "##" -> escaped literal '#'
+    else if (st == TCMD_IN)   { st = TCMD_WAIT; ret = true; }
+  }
+  if (st == TCMD_PAR) { if (c == ' ') st = TCMD_IN; ret = true; }
+  return ret;
+}
+
+// Extract the visible substring for selection char-id range [lo,hi): walk the
+// markup one codepoint at a time (matching get_letter_on's char-id space), skip
+// recolor command chars, and collapse the escaped "##" to one '#'.
+static void labelSelToLogical(const char* markup, uint32_t lo, uint32_t hi, char* out, size_t cap) {
+  uint8_t st = TCMD_WAIT;
+  uint32_t cid = 0;
+  size_t o = 0;
+  const char* p = markup;
+  while (*p) {
+    unsigned char c0 = (unsigned char)*p;
+    uint32_t step = (c0 >= 0xF0) ? 4 : (c0 >= 0xE0) ? 3 : (c0 >= 0xC0) ? 2 : 1;
+    bool cmd = selTxtIsCmd(st, (char)c0);
+    if (!cmd && cid >= lo && cid < hi)
+      for (uint32_t k = 0; k < step && p[k] && o + 1 < cap; k++) out[o++] = p[k];
+    cid++;
+    p += step;
+  }
+  if (cap) out[o < cap ? o : cap - 1] = 0;
+}
+
+uint32_t UITask::labelCharAt(lv_obj_t* lbl, lv_point_t abs_pt) {
+  lv_area_t a; lv_obj_get_coords(lbl, &a);
+  lv_point_t rel = { (lv_coord_t)(abs_pt.x - a.x1), (lv_coord_t)(abs_pt.y - a.y1) };
+  return lv_label_get_letter_on(lbl, &rel);
+}
+
+void UITask::makeLabelSelectable(lv_obj_t* lbl) {
+  // Clickable so it receives press/long-press; EVENT_BUBBLE so a normal tap still
+  // reaches the bubble's mention/resend handler (selection long-press does not, and
+  // those handlers bail while a selection is active).
+  lv_obj_add_flag(lbl, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_set_style_bg_color(lbl, lv_color_hex(UI_ACCENT), LV_PART_SELECTED);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(UI_BG), LV_PART_SELECTED);
+  lv_obj_add_event_cb(lbl, sel_event_cb, LV_EVENT_ALL, NULL);
+}
+
+void UITask::makeCardSelectable(lv_obj_t* card) {
+  lv_obj_add_event_cb(card, sel_event_cb, LV_EVENT_ALL, NULL);
+}
+
+void UITask::ensureSelHandles() {
+  if (_sel.h_start) return;
+  for (int i = 0; i < 2; i++) {
+    lv_obj_t* h = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(h);
+    lv_obj_set_size(h, SEL_HANDLE_D, SEL_HANDLE_D);
+    lv_obj_set_style_bg_color(h, lv_color_hex(UI_ACCENT), 0);
+    lv_obj_set_style_bg_opa(h, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(h, LV_RADIUS_CIRCLE, 0);
+    lv_obj_add_flag(h, LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(h, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_ext_click_area(h, 14);   // fat touch target around the small dot
+    lv_obj_add_event_cb(h, sel_handle_cb, LV_EVENT_ALL, NULL);
+    if (i == 0) _sel.h_start = h; else _sel.h_end = h;
+  }
+}
+
+void UITask::beginLabelSel(lv_obj_t* lbl, lv_point_t abs_pt) {
+  endSelection();
+  _sel.kind = SEL_LABEL;
+  _sel.target = lbl;
+  _sel.whole_obj = false;
+  uint32_t idx = labelCharAt(lbl, abs_pt);
+  _sel.anchor = idx; _sel.sel_lo = idx; _sel.sel_hi = idx;
+  if (_chat_history) lv_obj_clear_flag(_chat_history, LV_OBJ_FLAG_SCROLLABLE);  // drag selects, not scrolls
+  applyLabelSel();
+  ensureSelHandles();
+  positionSelHandles();
+  lv_obj_clear_flag(_sel.h_start, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(_sel.h_end, LV_OBJ_FLAG_HIDDEN);
+  _sel.state = SS_MARKING;
+}
+
+void UITask::beginCardSel(lv_obj_t* card) {
+  endSelection();
+  _sel.kind = SEL_CARD;
+  _sel.target = card;
+  _sel.whole_obj = true;
+  lv_obj_set_style_border_color(card, lv_color_hex(UI_ACCENT), 0);  // selected look
+  lv_obj_set_style_border_width(card, 2, 0);
+  if (_chat_history) lv_obj_clear_flag(_chat_history, LV_OBJ_FLAG_SCROLLABLE);
+  ensureSelHandles();
+  positionSelHandles();
+  lv_obj_clear_flag(_sel.h_start, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(_sel.h_end, LV_OBJ_FLAG_HIDDEN);
+  _sel.state = SS_MARKING;
+}
+
+void UITask::updateSelDrag(lv_point_t abs_pt) {
+  if (_sel.kind != SEL_LABEL || !_sel.target) return;
+  uint32_t idx = labelCharAt(_sel.target, abs_pt);
+  uint32_t lo = idx < _sel.anchor ? idx : _sel.anchor;
+  uint32_t hi = idx < _sel.anchor ? _sel.anchor : idx;
+  if (lo == _sel.sel_lo && hi == _sel.sel_hi) return;   // cheap: only redraw on change
+  _sel.sel_lo = lo; _sel.sel_hi = hi;
+  applyLabelSel();
+  positionSelHandles();
+  _sel.state = SS_DRAGGING;
+}
+
+void UITask::applyLabelSel() {
+  if (_sel.kind != SEL_LABEL || !_sel.target) return;
+  if (_sel.sel_lo == _sel.sel_hi) {
+    lv_label_set_text_sel_start(_sel.target, LV_LABEL_TEXT_SELECTION_OFF);
+    lv_label_set_text_sel_end(_sel.target, LV_LABEL_TEXT_SELECTION_OFF);
+  } else {
+    lv_label_set_text_sel_start(_sel.target, _sel.sel_lo);
+    lv_label_set_text_sel_end(_sel.target, _sel.sel_hi);
+  }
+}
+
+void UITask::positionSelHandles() {
+  if (!_sel.h_start || !_sel.target) return;
+  if (_sel.kind == SEL_LABEL) {
+    lv_area_t a; lv_obj_get_coords(_sel.target, &a);
+    const lv_font_t* font = lv_obj_get_style_text_font(_sel.target, LV_PART_MAIN);
+    lv_coord_t lh = lv_font_get_line_height(font);
+    lv_point_t ps, pe;
+    lv_label_get_letter_pos(_sel.target, _sel.sel_lo, &ps);
+    lv_label_get_letter_pos(_sel.target, _sel.sel_hi, &pe);
+    lv_obj_set_pos(_sel.h_start, a.x1 + ps.x - SEL_HANDLE_D / 2, a.y1 + ps.y - SEL_HANDLE_D);  // above start
+    lv_obj_set_pos(_sel.h_end,   a.x1 + pe.x - SEL_HANDLE_D / 2, a.y1 + pe.y + lh);            // below end
+  } else {  // whole card: dots at the corners
+    lv_area_t a; lv_obj_get_coords(_sel.target, &a);
+    lv_obj_set_pos(_sel.h_start, a.x1 - SEL_HANDLE_D / 2, a.y1 - SEL_HANDLE_D / 2);
+    lv_obj_set_pos(_sel.h_end,   a.x2 - SEL_HANDLE_D / 2, a.y2 - SEL_HANDLE_D / 2);
+  }
+}
+
+// Screen-space bounding box of the current selection (the highlighted text span,
+// or the whole card). Used to anchor the toolbar and to test taps for dismissal.
+void UITask::selAnchorRect(lv_area_t* out) {
+  if (!_sel.target) { lv_area_set(out, 0, 0, 0, 0); return; }
+  if (_sel.kind == SEL_LABEL) {
+    lv_area_t a; lv_obj_get_coords(_sel.target, &a);
+    const lv_font_t* font = lv_obj_get_style_text_font(_sel.target, LV_PART_MAIN);
+    lv_coord_t lh = lv_font_get_line_height(font);
+    lv_point_t ps, pe;
+    lv_label_get_letter_pos(_sel.target, _sel.sel_lo, &ps);
+    lv_label_get_letter_pos(_sel.target, _sel.sel_hi, &pe);
+    // Span may wrap across lines; use the union of both endpoints' rows. x spans
+    // the whole label width when multi-line so the bbox covers the selection.
+    bool multiline = (pe.y > ps.y);
+    out->x1 = multiline ? a.x1 : a.x1 + LV_MIN(ps.x, pe.x);
+    out->x2 = multiline ? a.x2 : a.x1 + LV_MAX(ps.x, pe.x);
+    out->y1 = a.y1 + ps.y;
+    out->y2 = a.y1 + pe.y + lh;
+  } else {
+    lv_obj_get_coords(_sel.target, out);
+  }
+}
+
+bool UITask::selPointInside(lv_point_t p) {
+  if (!_sel.target) return false;
+  lv_area_t r; selAnchorRect(&r);
+  return p.x >= r.x1 && p.x <= r.x2 && p.y >= r.y1 && p.y <= r.y2;
+}
+
+void UITask::finishSel() {
+  if (!_sel.target) { endSelection(); return; }
+  _sel.state = SS_MENU;
+  showSelMenu();
+}
+
+// Floating horizontal toolbar of icon buttons (Copy / Select All; Cut/Paste come
+// with textareas in Phase 2). No screen dim: a transparent full-screen catcher
+// behind the bar dismisses the selection only when a tap lands OUTSIDE it, so the
+// selection stays live and adjustable (drag the handles) while the bar is up.
+void UITask::showSelMenu() {
+  if (!_sel.catcher) {
+    _sel.catcher = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(_sel.catcher);
+    lv_obj_set_size(_sel.catcher, _screen_w, _screen_h);
+    lv_obj_set_pos(_sel.catcher, 0, 0);
+    lv_obj_add_flag(_sel.catcher, LV_OBJ_FLAG_CLICKABLE);   // transparent, no dim
+    lv_obj_clear_flag(_sel.catcher, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(_sel.catcher, sel_catcher_cb, LV_EVENT_CLICKED, NULL);
+
+    _sel.menu = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(_sel.menu);
+    lv_obj_set_size(_sel.menu, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(_sel.menu, lv_color_hex(UI_SURFACE), 0);
+    lv_obj_set_style_bg_opa(_sel.menu, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(_sel.menu, lv_color_hex(UI_BORDER), 0);
+    lv_obj_set_style_border_width(_sel.menu, 1, 0);
+    lv_obj_set_style_radius(_sel.menu, 8, 0);
+    lv_obj_set_style_pad_all(_sel.menu, 2, 0);
+    lv_obj_set_style_pad_column(_sel.menu, 2, 0);
+    lv_obj_set_flex_flow(_sel.menu, LV_FLEX_FLOW_ROW);
+    lv_obj_clear_flag(_sel.menu, LV_OBJ_FLAG_SCROLLABLE);
+  }
+  lv_obj_clean(_sel.menu);
+  auto addBtn = [&](const char* sym, lv_event_cb_t cb) {
+    lv_obj_t* b = lv_btn_create(_sel.menu);
+    lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_set_style_pad_hor(b, 12, 0);
+    lv_obj_set_style_pad_ver(b, 8, 0);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* l = lv_label_create(b);
+    lv_label_set_text(l, sym);
+    lv_obj_set_style_text_color(l, lv_color_hex(UI_FG_BRIGHT), 0);
+    lv_obj_center(l);
+  };
+  if (_sel.kind == SEL_TEXTAREA) {
+    uint32_t s, en;
+    bool has = taSelRange(_sel.target, &s, &en);
+    if (has) { addBtn(LV_SYMBOL_CUT, selmenu_cut_cb); addBtn(LV_SYMBOL_COPY, selmenu_copy_cb); }
+    if (_clip_kind != CLIP_EMPTY) addBtn(LV_SYMBOL_PASTE, selmenu_paste_cb);
+    addBtn(LV_SYMBOL_LIST, selmenu_selectall_cb);
+  } else {
+    bool has_sel = (_sel.kind == SEL_CARD) || (_sel.sel_hi > _sel.sel_lo);
+    if (has_sel) addBtn(LV_SYMBOL_COPY, selmenu_copy_cb);
+    if (_sel.kind == SEL_LABEL) addBtn(LV_SYMBOL_LIST, selmenu_selectall_cb);
+  }
+
+  // z-order: catcher (bottom) < handles < toolbar (top)
+  lv_obj_clear_flag(_sel.catcher, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_sel.catcher);
+  if (_sel.h_start) lv_obj_move_foreground(_sel.h_start);
+  if (_sel.h_end)   lv_obj_move_foreground(_sel.h_end);
+  lv_obj_clear_flag(_sel.menu, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_sel.menu);
+
+  lv_area_t anchor; selAnchorRect(&anchor);
+  lv_obj_update_layout(_sel.menu);
+  lv_coord_t mw = lv_obj_get_width(_sel.menu);
+  lv_coord_t mh = lv_obj_get_height(_sel.menu);
+  const lv_coord_t GAP = 6;
+  lv_coord_t y = anchor.y1 - mh - GAP;                      // prefer above the selection
+  if (y < HEADER_H + GAP) y = anchor.y2 + GAP;              // no room -> below
+  if (y + mh > _screen_h - GAP) y = _screen_h - mh - GAP;   // clamp on-screen
+  if (y < GAP) y = GAP;
+  lv_coord_t x = (anchor.x1 + anchor.x2) / 2 - mw / 2;      // centered on the selection
+  if (x < GAP) x = GAP;
+  if (x + mw > _screen_w - GAP) x = _screen_w - mw - GAP;
+  lv_obj_set_pos(_sel.menu, x, y);
+}
+
+void UITask::copySelection() {
+  if (_sel.kind == SEL_CARD && _sel.target) {
+    const CardTarget* t = (const CardTarget*)lv_obj_get_user_data(_sel.target);
+    if (t) {
+      char hex[2 * PUB_KEY_SIZE + 1]; mesh::Utils::toHex(hex, t->pubkey, PUB_KEY_SIZE);
+      char ref[2 * PUB_KEY_SIZE + 48];
+      snprintf(ref, sizeof(ref), "<%s:%u:%s>", hex, (unsigned)t->type, t->name);
+      clipSet(CLIP_CONTACT_REF, ref, t->pubkey, t->name, t->type);
+      showToast("Contact copied");
+    }
+  } else if (_sel.kind == SEL_LABEL && _sel.target && _sel.sel_hi > _sel.sel_lo) {
+    char out[1024];
+    labelSelToLogical(lv_label_get_text(_sel.target), _sel.sel_lo, _sel.sel_hi, out, sizeof(out));
+    clipSet(CLIP_PLAIN, out, nullptr, nullptr, 0);
+    showToast("Copied");
+  } else if (_sel.kind == SEL_TEXTAREA && _sel.target) {
+    uint32_t s, en;
+    if (taSelRange(_sel.target, &s, &en)) {
+      const char* txt = lv_textarea_get_text(_sel.target);   // plain (no recolor) -> char-id == codepoint
+      char out[1024];
+      uint32_t cid = 0; size_t o = 0; const char* p = txt;
+      while (*p && o + 4 < sizeof(out)) {
+        unsigned char c0 = (unsigned char)*p;
+        uint32_t step = (c0 >= 0xF0) ? 4 : (c0 >= 0xE0) ? 3 : (c0 >= 0xC0) ? 2 : 1;
+        if (cid >= s && cid < en) for (uint32_t k = 0; k < step && p[k]; k++) out[o++] = p[k];
+        cid++; p += step;
+      }
+      out[o] = 0;
+      clipSet(CLIP_PLAIN, out, nullptr, nullptr, 0);
+      showToast("Copied");
+    }
+  }
+}
+
+bool UITask::taSelRange(lv_obj_t* ta, uint32_t* s, uint32_t* e) {
+  lv_obj_t* lbl = lv_textarea_get_label(ta);
+  if (!lbl) return false;
+  uint32_t a = lv_label_get_text_selection_start(lbl);
+  uint32_t b = lv_label_get_text_selection_end(lbl);
+  if (a == LV_LABEL_TEXT_SELECTION_OFF || b == LV_LABEL_TEXT_SELECTION_OFF || a == b) return false;
+  if (a > b) { uint32_t t = a; a = b; b = t; }
+  *s = a; *e = b;
+  return true;
+}
+
+void UITask::beginTextareaSel(lv_obj_t* ta) {
+  endSelection();
+  _sel.kind = SEL_TEXTAREA;
+  _sel.target = ta;
+  _sel.state = SS_MENU;
+  showSelMenu();
+}
+
+void UITask::endSelection() {
+  if (_sel.kind == SEL_LABEL && _sel.target) {
+    lv_label_set_text_sel_start(_sel.target, LV_LABEL_TEXT_SELECTION_OFF);
+    lv_label_set_text_sel_end(_sel.target, LV_LABEL_TEXT_SELECTION_OFF);
+  } else if (_sel.kind == SEL_CARD && _sel.target) {
+    lv_obj_set_style_border_color(_sel.target, lv_color_hex(UI_BORDER), 0);  // restore card default
+    lv_obj_set_style_border_width(_sel.target, 1, 0);
+  }
+  if (_sel.h_start) lv_obj_add_flag(_sel.h_start, LV_OBJ_FLAG_HIDDEN);
+  if (_sel.h_end)   lv_obj_add_flag(_sel.h_end, LV_OBJ_FLAG_HIDDEN);
+  if (_sel.menu)    lv_obj_add_flag(_sel.menu, LV_OBJ_FLAG_HIDDEN);
+  if (_sel.catcher) lv_obj_add_flag(_sel.catcher, LV_OBJ_FLAG_HIDDEN);
+  if (_chat_history) lv_obj_add_flag(_chat_history, LV_OBJ_FLAG_SCROLLABLE);  // re-enable scroll
+  _sel.state = SS_IDLE;
+  _sel.kind = SEL_NONE;
+  _sel.target = nullptr;
+  _sel.whole_obj = false;
+  _sel.sel_lo = _sel.sel_hi = _sel.anchor = 0;
+}
+
+void UITask::sel_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* target = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  bool is_label = lv_obj_check_type(target, &lv_label_class);
+  switch (code) {
+    case LV_EVENT_LONG_PRESSED: {
+      lv_point_t p; lv_indev_get_point(lv_indev_get_act(), &p);
+      if (is_label) _instance->beginLabelSel(target, p);
+      else          _instance->beginCardSel(target);
+      break;
+    }
+    case LV_EVENT_PRESSING:
+      if ((_instance->_sel.state == SS_MARKING || _instance->_sel.state == SS_DRAGGING) &&
+          _instance->_sel.kind == SEL_LABEL && target == _instance->_sel.target) {
+        lv_point_t p; lv_indev_get_point(lv_indev_get_act(), &p);
+        _instance->updateSelDrag(p);
+      }
+      break;
+    case LV_EVENT_RELEASED:
+      if (_instance->_sel.state == SS_MARKING || _instance->_sel.state == SS_DRAGGING)
+        _instance->finishSel();
+      break;
+    default: break;
+  }
+}
+
+// Drag a handle to re-adjust that endpoint while the toolbar stays up. The handle
+// being dragged moves its endpoint; the opposite endpoint is the fixed anchor.
+void UITask::sel_handle_cb(lv_event_t* e) {
+  if (!_instance) return;
+  SelectionCtl& s = _instance->_sel;
+  if (s.kind != SEL_LABEL || !s.target) return;
+  lv_obj_t* h = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_PRESSED) {
+    s.anchor = (h == s.h_start) ? s.sel_hi : s.sel_lo;   // grab: opposite end is fixed
+  } else if (code == LV_EVENT_PRESSING) {
+    lv_point_t p; lv_indev_get_point(lv_indev_get_act(), &p);
+    _instance->updateSelDrag(p);   // re-hit-test against the label; reorders lo/hi vs anchor
+  } else if (code == LV_EVENT_RELEASED) {
+    _instance->showSelMenu();      // re-anchor the toolbar over the new selection
+  }
+}
+
+// Tap on the transparent catcher: dismiss the selection only if the tap landed
+// OUTSIDE the selection (taps inside keep it live so the user can keep adjusting).
+void UITask::sel_catcher_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  lv_point_t p; lv_indev_get_point(lv_indev_get_act(), &p);
+  if (!_instance->selPointInside(p)) _instance->endSelection();
+}
+
+void UITask::ta_longpress_cb(lv_event_t* e) {
+  if (!_instance) return;
+  _instance->beginTextareaSel(lv_event_get_target(e));
+}
+
+void UITask::selmenu_cut_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  SelectionCtl& s = _instance->_sel;
+  if (s.kind != SEL_TEXTAREA || !s.target) { _instance->endSelection(); return; }
+  _instance->copySelection();              // fill clipboard from the selection
+  uint32_t a, b;
+  if (_instance->taSelRange(s.target, &a, &b)) {
+    lv_textarea_set_cursor_pos(s.target, b);
+    for (uint32_t i = 0; i < b - a; i++) lv_textarea_del_char(s.target);
+  }
+  _instance->endSelection();
+}
+
+void UITask::selmenu_paste_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  SelectionCtl& s = _instance->_sel;
+  if (s.kind != SEL_TEXTAREA || !s.target) { _instance->endSelection(); return; }
+  if (_instance->_clip_kind != CLIP_EMPTY) {
+    uint32_t a, b;
+    if (_instance->taSelRange(s.target, &a, &b)) {     // paste replaces the selection
+      lv_textarea_set_cursor_pos(s.target, b);
+      for (uint32_t i = 0; i < b - a; i++) lv_textarea_del_char(s.target);
+    }
+    // (Phase 3 routes this through the smart-paste transform table by FieldKind.)
+    lv_textarea_add_text(s.target, _instance->_clip_text);
+  }
+  _instance->endSelection();
+}
+
+void UITask::selmenu_copy_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->copySelection();
+  _instance->endSelection();
+}
+
+void UITask::selmenu_selectall_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  SelectionCtl& s = _instance->_sel;
+  if (s.kind == SEL_TEXTAREA && s.target) {
+    lv_obj_t* lbl = lv_textarea_get_label(s.target);
+    uint32_t n = _lv_txt_get_encoded_length(lv_textarea_get_text(s.target));
+    if (lbl && n > 0) { lv_label_set_text_sel_start(lbl, 0); lv_label_set_text_sel_end(lbl, n); }
+    _instance->showSelMenu();   // now offers Cut/Copy
+    return;
+  }
+  if (s.kind != SEL_LABEL || !s.target) return;
+  uint32_t n = _lv_txt_get_encoded_length(lv_label_get_text(s.target));
+  s.anchor = 0; s.sel_lo = 0; s.sel_hi = n;
+  _instance->applyLabelSel();
+  _instance->positionSelHandles();
+  _instance->showSelMenu();   // re-anchor toolbar over the now-full selection
 }
 
 void UITask::commitPosition() {
@@ -5847,7 +6338,7 @@ void UITask::buildPinSetPopup() {
   lv_obj_set_style_text_font(title, fontHeading(), 0);
 
   lv_obj_t* f1 = makeField(card, "PIN");
-  _pinset_ta1 = lv_textarea_create(f1);
+  _pinset_ta1 = makeSelTextarea(f1);
   lv_textarea_set_one_line(_pinset_ta1, true); lv_obj_add_event_cb(_pinset_ta1, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_max_length(_pinset_ta1, 6);
   lv_textarea_set_accepted_chars(_pinset_ta1, "0123456789");
@@ -5856,7 +6347,7 @@ void UITask::buildPinSetPopup() {
   attachInlineEye(_pinset_ta1);
 
   lv_obj_t* f2 = makeField(card, "Confirm PIN");
-  _pinset_ta2 = lv_textarea_create(f2);
+  _pinset_ta2 = makeSelTextarea(f2);
   lv_textarea_set_one_line(_pinset_ta2, true); lv_obj_add_event_cb(_pinset_ta2, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_max_length(_pinset_ta2, 6);
   lv_textarea_set_accepted_chars(_pinset_ta2, "0123456789");
@@ -5988,7 +6479,7 @@ void UITask::buildLockScreen() {
   lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  _lock_pin_ta = lv_textarea_create(row);
+  _lock_pin_ta = makeSelTextarea(row);
   lv_textarea_set_one_line(_lock_pin_ta, true); lv_obj_add_event_cb(_lock_pin_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_textarea_set_max_length(_lock_pin_ta, 6);
   lv_textarea_set_accepted_chars(_lock_pin_ta, "0123456789");
