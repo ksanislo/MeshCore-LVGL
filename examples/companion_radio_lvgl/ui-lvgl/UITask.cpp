@@ -685,6 +685,8 @@ void UITask::fillContactRow(ContactRow& w, const ContactInfo& c) {
   sanitizeForFont(dn[0] ? dn : "(unnamed)", clean, sizeof(clean));
   lv_label_set_text(w.name, clean);
 
+  lv_obj_set_style_border_width(w.avatar, 0, 0);   // clear any New-Contact ring (slot reuse)
+  lv_obj_set_style_text_color(w.avatar_lbl, lv_color_hex(0xFFFFFF), 0);   // letter back to white
   bool is_chat = (c.type == ADV_TYPE_CHAT || c.type == 0);
   if (is_chat) {
     char g[8]; firstGrapheme(clean, g, sizeof(g));
@@ -759,11 +761,17 @@ void UITask::fillLeadRow(ContactListView& lv, ContactRow& w) {
   lv_obj_add_flag(w.dot, LV_OBJ_FLAG_HIDDEN);   // no unread marker on the lead row
   if (lv.lead == ContactListView::LEAD_NEW) {
     lv_label_set_text(w.avatar_lbl, LV_SYMBOL_PLUS);
-    lv_obj_set_style_bg_color(w.avatar, lv_color_hex(UI_PRIMARY), 0);
+    // Hollow off-white ring (bg-colored fill) -> an empty slot waiting to be filled.
+    lv_obj_set_style_bg_color(w.avatar, lv_color_hex(BG_HEX), 0);
+    lv_obj_set_style_border_color(w.avatar, lv_color_hex(FG_HEX), 0);
+    lv_obj_set_style_border_width(w.avatar, 2, 0);
+    lv_obj_set_style_text_color(w.avatar_lbl, lv_color_hex(FG_HEX), 0);
     lv_label_set_text(w.name, "New Contact");
     lv_obj_set_style_text_color(w.name, lv_color_hex(UI_ACCENT), 0);
     lv_label_set_text(w.seen, "");
   } else {  // LEAD_SELF: our own identity, like a contact card
+    lv_obj_set_style_border_width(w.avatar, 0, 0);   // clear the New-Contact ring (slot reuse)
+    lv_obj_set_style_text_color(w.avatar_lbl, lv_color_hex(0xFFFFFF), 0);   // letter back to white
     const char* who = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "(unnamed)";
     char clean[CHAT_PEER_NAME_MAX + 4];
     sanitizeForFont(who, clean, sizeof(clean));
@@ -1094,15 +1102,47 @@ void UITask::rebuildChannelsList() {
   if (!_channels_list) return;
   lv_obj_clean(_channels_list);
 
-  // "+ New channel" entry at the top -> create/join dialog.
+  // "+ New channel" entry: a hollow white circle ring (an empty channel waiting to be
+  // created), matching the New Contact placeholder. Same row layout as the channel
+  // rows below, so the two pages read consistently. (Channels are circles overall;
+  // the per-channel hexagon brand would be too busy at this size for a placeholder.)
   {
-    lv_obj_t* addb = lv_list_add_btn(_channels_list, LV_SYMBOL_PLUS, "New channel");
-    lv_obj_set_style_bg_color(addb, lv_color_hex(BG_HEX), 0);
-    lv_obj_set_style_text_color(addb, lv_color_hex(UI_ACCENT), 0);
-    lv_obj_set_style_border_color(addb, lv_color_hex(0x374151), 0);
-    lv_obj_set_style_border_side(addb, LV_BORDER_SIDE_BOTTOM, 0);
-    lv_obj_set_style_border_width(addb, 1, 0);
-    lv_obj_add_event_cb(addb, newchan_open_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* row = lv_obj_create(_channels_list);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), UI_CONTACT_ROW_H);
+    lv_obj_set_style_bg_color(row, lv_color_hex(BG_HEX), 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(row, lv_color_hex(UI_BORDER), 0);
+    lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_pad_left(row, 8, 0);
+    lv_obj_set_style_pad_right(row, 8, 0);
+    lv_obj_set_style_pad_column(row, 10, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_event_cb(row, newchan_open_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* av = lv_obj_create(row);
+    lv_obj_remove_style_all(av);
+    lv_obj_set_size(av, UI_AVATAR_D, UI_AVATAR_D);
+    lv_obj_set_style_bg_color(av, lv_color_hex(BG_HEX), 0);          // hollow (matches the row)
+    lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_color(av, lv_color_hex(FG_HEX), 0);      // off-white circle ring (theme tint)
+    lv_obj_set_style_border_width(av, 2, 0);
+    lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t* avl = lv_label_create(av);
+    lv_obj_center(avl);
+    lv_obj_set_style_text_color(avl, lv_color_hex(FG_HEX), 0);
+    lv_obj_set_style_text_font(avl, fontHeading(), 0);
+    lv_label_set_text(avl, LV_SYMBOL_PLUS);
+
+    lv_obj_t* nm = lv_label_create(row);
+    lv_obj_set_flex_grow(nm, 1);
+    lv_obj_set_style_text_font(nm, fontBody(), 0);
+    lv_obj_set_style_text_color(nm, lv_color_hex(UI_ACCENT), 0);
+    lv_label_set_text(nm, "New channel");
   }
 
   // getChannel() returns true for any in-range slot incl. empty ones, so skip
@@ -2709,14 +2749,21 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_set_flex_align(_chat_compose, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    // Insert (+) button: circular, opens a menu to insert contact refs.
+    // Insert (+) button: a hollow white ring (filled with the chat-window bg, not the
+    // lighter compose-bar bg) so it matches the New Contact / New channel placeholders.
     lv_obj_t* plus = lv_btn_create(_chat_compose);
     lv_obj_set_size(plus, COMPOSE_H - 14, COMPOSE_H - 14);
     lv_obj_set_style_radius(plus, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_pad_all(plus, 0, 0);
+    lv_obj_set_style_bg_color(plus, lv_color_hex(BG_HEX), 0);        // chat-window bg fill
+    lv_obj_set_style_bg_opa(plus, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(plus, lv_color_hex(FG_HEX), 0);    // greyish off-white ring (selected-tab tint)
+    lv_obj_set_style_border_width(plus, 2, 0);
+    lv_obj_set_style_shadow_width(plus, 0, 0);                       // drop the default button shadow
     lv_obj_add_event_cb(plus, chat_plus_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t* plus_lbl = lv_label_create(plus);
     lv_label_set_text(plus_lbl, LV_SYMBOL_PLUS);
+    lv_obj_set_style_text_color(plus_lbl, lv_color_hex(FG_HEX), 0);  // greyish off-white +
     lv_obj_center(plus_lbl);
 
     _chat_input = makeSelTextarea(_chat_compose);
