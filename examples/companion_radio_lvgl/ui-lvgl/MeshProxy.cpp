@@ -232,6 +232,23 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
       }
       break;
     }
+    case CmdKind::RenameChannel: {
+      // Find the channel by its secret (the identity; the name is just a local
+      // label) and re-store it with the new name. setChannel re-derives the
+      // (unchanged) hash from the secret.
+      ChannelDetails ch;
+      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+        if (!mesh.getChannel(i, ch) || ch.name[0] == 0) continue;
+        if (memcmp(ch.channel.secret, cmd.path, sizeof(ch.channel.secret)) == 0) {
+          strncpy(ch.name, cmd.name, sizeof(ch.name) - 1);
+          ch.name[sizeof(ch.name) - 1] = 0;
+          mesh.setChannel(i, ch);
+          mesh.saveChannels();
+          break;
+        }
+      }
+      break;
+    }
     case CmdKind::ServerLogin: {
       ContactInfo* c = mesh.lookupContactByPubKey(cmd.pubkey, LOOKUP_PREFIX);
       if (c) {

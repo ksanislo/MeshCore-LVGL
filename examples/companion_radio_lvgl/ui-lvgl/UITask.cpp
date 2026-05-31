@@ -1087,6 +1087,9 @@ void UITask::channel_clicked_cb(lv_event_t* e) {
   }
 }
 
+static void hexAvatarDrawCb(lv_event_t* e);                                 // (defined below)
+static void brandChannelAvatar(lv_obj_t* hex, lv_obj_t* lbl, const char* cname);
+
 void UITask::rebuildChannelsList() {
   if (!_channels_list) return;
   lv_obj_clean(_channels_list);
@@ -1104,6 +1107,8 @@ void UITask::rebuildChannelsList() {
 
   // getChannel() returns true for any in-range slot incl. empty ones, so skip
   // slots with no name. The Public channel is added on every boot (MyMesh).
+  // Rows match the contacts list: a name-colored hexagon avatar + the shared red
+  // unread chevron + the name. (Few channels, so plain rows -- no recycler.)
   for (int idx = 0; idx < MAX_GROUP_CHANNELS; idx++) {
     ChannelDetails ch;
     if (!mproxy::getChannel(idx, ch) || ch.name[0] == 0) continue;
@@ -1113,16 +1118,48 @@ void UITask::rebuildChannelsList() {
     bool unread = isUnread(ckey);
     char cname[CHAT_PEER_NAME_MAX + 4];
     sanitizeForFont(ch.name, cname, sizeof(cname));
-    char label[56];
-    snprintf(label, sizeof(label), "%s# %s", unread ? LV_SYMBOL_BELL " " : "", cname);
-    lv_obj_t* btn = lv_list_add_btn(_channels_list, NULL, label);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(BG_HEX), 0);
-    lv_obj_set_style_text_color(btn, lv_color_hex(unread ? UI_UNREAD : FG_HEX), 0);
-    lv_obj_set_style_border_color(btn, lv_color_hex(0x374151), 0);
-    lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, 0);
-    lv_obj_set_style_border_width(btn, 1, 0);
-    lv_obj_set_user_data(btn, (void*)(intptr_t)idx);
-    lv_obj_add_event_cb(btn, channel_clicked_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* row = lv_obj_create(_channels_list);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), UI_CONTACT_ROW_H);
+    lv_obj_set_style_bg_color(row, lv_color_hex(BG_HEX), 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(row, lv_color_hex(UI_BORDER), 0);
+    lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_pad_left(row, 8, 0);
+    lv_obj_set_style_pad_right(row, 8, 0);
+    lv_obj_set_style_pad_column(row, 10, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_user_data(row, (void*)(intptr_t)idx);
+    lv_obj_add_event_cb(row, channel_clicked_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* av = lv_obj_create(row);
+    lv_obj_remove_style_all(av);
+    lv_obj_set_size(av, UI_AVATAR_D, UI_AVATAR_D);
+    lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(av, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);
+    lv_obj_t* dot = lv_img_create(av);   // shared unread chevron (created before the letter)
+    lv_img_set_src(dot, &s_mark_img);
+    lv_obj_add_flag(dot, LV_OBJ_FLAG_FLOATING);
+    lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_align(dot, LV_ALIGN_LEFT_MID, 0, 0);
+    if (!unread) lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t* avl = lv_label_create(av);
+    lv_obj_center(avl);
+    lv_obj_set_style_text_color(avl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(avl, fontHeading(), 0);
+    brandChannelAvatar(av, avl, ch.name);   // name-colored hexagon
+
+    lv_obj_t* nm = lv_label_create(row);
+    lv_obj_set_flex_grow(nm, 1);
+    lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(nm, fontBody(), 0);
+    lv_obj_set_style_text_color(nm, lv_color_hex(unread ? UI_UNREAD : FG_HEX), 0);
+    lv_label_set_text(nm, cname);
     // (long-press intentionally left unbound -- reserved for a future context menu)
   }
 }
@@ -1823,6 +1860,23 @@ static void deriveHashtagPsk(const char* name, uint8_t psk[16]) {
   mesh::Utils::sha256(psk, 16, (const uint8_t*)buf, (int)strlen(buf));
 }
 
+// Key for a "Public channel" by name: the well-known legacy PSK for "Public"
+// (case-insensitive, so re-adding it rejoins the real Public channel), else the
+// #hashtag derivation so anyone can join by name.
+static void derivePublicChannelKey(const char* name, uint8_t psk[16]) {
+  if (strcasecmp(name ? name : "", "public") == 0) {
+    static const uint8_t PUBLIC_PSK[16] = {   // base64 izOH6cXN6mrJ5e26oRXNcg==
+      0x8b, 0x33, 0x87, 0xe9, 0xc5, 0xcd, 0xea, 0x6a,
+      0xc9, 0xe5, 0xed, 0xba, 0xa1, 0x15, 0xcd, 0x72 };
+    memcpy(psk, PUBLIC_PSK, 16);
+  } else {
+    deriveHashtagPsk(name, psk);
+  }
+}
+
+// Is `name` (case-insensitive) the well-known Public channel?
+static bool isPublicName(const char* name) { return strcasecmp(name ? name : "", "public") == 0; }
+
 // A '#hashtag' is a '#' at a word boundary (start, or preceded by a non-alnum)
 // followed by >=1 tag char [A-Za-z0-9_-]. Returns the '#' and sets *name_end to
 // the char past the tag; nullptr if none from `p` onward. `base` = string start.
@@ -2095,15 +2149,26 @@ struct CardTarget { uint8_t pubkey[PUB_KEY_SIZE]; uint8_t type; char name[CHAT_P
 // avatar obj is flagged USER_1 + made bg-transparent; this draw hook fills a
 // flat-top hexagon in the obj's bg_color. Attach once at the avatar's creation
 // (heroes, chat header, banner, channel rows); harmless on circle (contact) avatars.
-static void drawHexAt(lv_draw_ctx_t* ctx, lv_coord_t cx, lv_coord_t cy, lv_coord_t r, lv_color_t color) {
-  lv_coord_t hy = (lv_coord_t)((int32_t)r * 866 / 1000);   // r*sin(60)
-  lv_point_t pts[6] = {                                    // flat-top hexagon
-    { (lv_coord_t)(cx + r),     cy },
-    { (lv_coord_t)(cx + r / 2), (lv_coord_t)(cy - hy) },
-    { (lv_coord_t)(cx - r / 2), (lv_coord_t)(cy - hy) },
-    { (lv_coord_t)(cx - r),     cy },
-    { (lv_coord_t)(cx - r / 2), (lv_coord_t)(cy + hy) },
-    { (lv_coord_t)(cx + r / 2), (lv_coord_t)(cy + hy) },
+// Flat-top hexagon filling the box [x1,x2] x [y1,y2] EXACTLY -- defined by the box
+// corners (like the circle background), so it fills + centers identically to the
+// contact circle with no separate center math to drift.
+// A TRUE regular flat-top hexagon sized to the box WIDTH (so it's as wide as the
+// contact circle). A regular hexagon is sqrt(3)/2 (~0.866) as tall as it is wide,
+// so it's centered vertically in the box -- forcing it to fill the square would
+// stretch it (the squashed look). Top edge = side = R; diagonal side = R too.
+static void drawHexBox(lv_draw_ctx_t* ctx, lv_coord_t x1, lv_coord_t y1,
+                       lv_coord_t x2, lv_coord_t y2, lv_color_t color) {
+  lv_coord_t cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+  float R = (x2 - x1) / 2.0f;                       // circumradius = half the box width
+  lv_coord_t ex = (lv_coord_t)lroundf(R / 2.0f);    // half the top/bottom edge (R*cos60)
+  lv_coord_t ey = (lv_coord_t)lroundf(R * 0.8660254f);  // half the height    (R*sin60)
+  lv_point_t pts[6] = {
+    { x2,                    cy },                   // right point
+    { (lv_coord_t)(cx + ex), (lv_coord_t)(cy - ey) },
+    { (lv_coord_t)(cx - ex), (lv_coord_t)(cy - ey) },
+    { x1,                    cy },                   // left point
+    { (lv_coord_t)(cx - ex), (lv_coord_t)(cy + ey) },
+    { (lv_coord_t)(cx + ex), (lv_coord_t)(cy + ey) },
   };
   lv_draw_rect_dsc_t d; lv_draw_rect_dsc_init(&d);
   d.bg_color = color; d.bg_opa = LV_OPA_COVER;
@@ -2113,13 +2178,10 @@ static void drawHexAt(lv_draw_ctx_t* ctx, lv_coord_t cx, lv_coord_t cy, lv_coord
 static void hexAvatarDrawCb(lv_event_t* e) {
   lv_obj_t* o = lv_event_get_target(e);
   if (!lv_obj_has_flag(o, LV_OBJ_FLAG_USER_1)) return;   // only in hexagon (channel) mode
-  lv_area_t a; lv_obj_get_coords(o, &a);
-  lv_coord_t w = a.x2 - a.x1 + 1, h = a.y2 - a.y1 + 1;
-  lv_coord_t cx = a.x1 + w / 2, cy = a.y1 + h / 2;        // match LVGL's label centering (x1 + w/2)
-  lv_coord_t r = LV_MIN(w, h) / 2;
+  lv_area_t a; lv_obj_get_coords(o, &a);                 // exact object box (== where the circle bg fills)
   lv_draw_ctx_t* ctx = lv_event_get_draw_ctx(e);
-  drawHexAt(ctx, cx, cy, r, lv_color_hex(UI_BG));                              // 1px outline ring
-  drawHexAt(ctx, cx, cy, r - 1, lv_obj_get_style_bg_color(o, LV_PART_MAIN));   // channel-color fill
+  drawHexBox(ctx, a.x1, a.y1, a.x2, a.y2, lv_color_hex(UI_BG));                                  // 1px outline
+  drawHexBox(ctx, a.x1 + 1, a.y1 + 1, a.x2 - 1, a.y2 - 1, lv_obj_get_style_bg_color(o, LV_PART_MAIN)); // fill
 }
 
 // Brand a CONTACT avatar: a name-colored circle (chat) or neutral type-glyph
@@ -2839,6 +2901,8 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _indev_drv.read_cb = touchpad_read_cb;
   lv_indev_drv_register(&_indev_drv);
 
+  if (_node_prefs) g_avatar_palette_mode = _node_prefs->avatar_palette ? 1 : 0;  // seed avatar scheme BEFORE any list renders
+
   _splash_screen = buildSplashScreen();
   _home_screen   = buildHomeScreen();
   rebuildContactsList();
@@ -2851,7 +2915,6 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 
   ensureBanner();   // pre-build so the first notification frame stays light
   _muted_count = mproxy::copyMutedKeys(_muted_keys, MUTE_MAX);   // seed mutes from the backend
-  if (_node_prefs) g_avatar_palette_mode = _node_prefs->avatar_palette ? 1 : 0;  // seed avatar scheme
 
 #ifdef PIN_BUZZER
   // Notification chimes. quiet() honors the persisted buzzer_quiet; the genericBuzzer
@@ -4139,9 +4202,8 @@ void UITask::chat_kebab_cb(lv_event_t* e) {
   if (!_instance) return;
   UITask* s = _instance;
   lv_obj_t* list = s->ensureMenuPopup();
-  if (!s->_chat_is_channel) {
-    lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_LIST, "Details"), kebab_details_cb, LV_EVENT_CLICKED, NULL);
-  }
+  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_LIST, "Details"),
+                      s->_chat_is_channel ? kebab_chdetails_cb : kebab_details_cb, LV_EVENT_CLICKED, NULL);
   lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_EYE_OPEN, "Search"), kebab_search_cb, LV_EVENT_CLICKED, NULL);
   {
     bool m = s->isMuted(s->_chat_key);
@@ -4425,6 +4487,146 @@ static bool uriParam(const char* uri, const char* key, char* out, size_t cap) {
   return true;
 }
 
+// ===== Channel Details page (hexagon hero + editable name + key) =========
+void UITask::buildChannelInfoScreen() {
+  if (_chinfo_screen) return;
+  _chinfo_screen = lv_obj_create(NULL);
+  styleAsDarkScreen(_chinfo_screen);
+  lv_obj_set_style_pad_all(_chinfo_screen, 0, 0);
+  makeHeaderBar(_chinfo_screen, "Channel", chinfo_back_cb);
+
+  _chinfo_body = lv_obj_create(_chinfo_screen);
+  lv_obj_add_event_cb(_chinfo_body, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_set_size(_chinfo_body, _screen_w, _screen_h - HEADER_H);
+  lv_obj_align(_chinfo_body, LV_ALIGN_TOP_MID, 0, HEADER_H);
+  lv_obj_set_style_bg_color(_chinfo_body, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(_chinfo_body, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(_chinfo_body, 0, 0);
+  lv_obj_set_style_pad_all(_chinfo_body, 12, 0);
+  lv_obj_set_style_pad_row(_chinfo_body, 8, 0);
+  lv_obj_set_flex_flow(_chinfo_body, LV_FLEX_FLOW_COLUMN);
+
+  makeHeroCard(_chinfo_body, &_chinfo_avatar, &_chinfo_avatar_lbl, &_chinfo_title, &_chinfo_key, chinfo_key_cb);
+
+  lv_obj_t* fn = makeField(_chinfo_body, "Name");
+  _chinfo_name_ta = makeSelTextarea(fn);
+  lv_textarea_set_one_line(_chinfo_name_ta, true);
+  lv_obj_add_event_cb(_chinfo_name_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+  lv_obj_set_width(_chinfo_name_ta, LV_PCT(100));
+  lv_obj_add_event_cb(_chinfo_name_ta, chinfo_ta_event_cb, LV_EVENT_ALL, NULL);
+
+  _chinfo_kb = lv_keyboard_create(_chinfo_screen);
+  lv_obj_add_event_cb(_chinfo_kb, chinfo_kb_event_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_chinfo_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::populateChannelInfo() {
+  char nm[CHAT_PEER_NAME_MAX + 4];
+  sanitizeForFont(_chinfo_name[0] ? _chinfo_name : "(unnamed)", nm, sizeof(nm));
+  lv_label_set_text(_chinfo_title, nm);
+  brandChannelAvatar(_chinfo_avatar, _chinfo_avatar_lbl, _chinfo_name);
+  lv_textarea_set_text(_chinfo_name_ta, _chinfo_name);
+  if (_chinfo_is_hashtag) lv_obj_add_state(_chinfo_name_ta, LV_STATE_DISABLED);   // #tag: name fixed
+  else                    lv_obj_clear_state(_chinfo_name_ta, LV_STATE_DISABLED);
+  static const uint8_t zeros[16] = {0};
+  int slen = (memcmp(&_chinfo_secret[16], zeros, 16) == 0) ? 16 : 32;   // 128- vs 256-bit
+  char hex[2 * 32 + 1]; mesh::Utils::toHex(hex, _chinfo_secret, slen);
+  char ktrunc[40];
+  snprintf(ktrunc, sizeof(ktrunc), "<%.6s...%.6s>  " LV_SYMBOL_COPY, hex, hex + 2 * slen - 6);
+  lv_label_set_text(_chinfo_key, ktrunc);
+}
+
+void UITask::openChannelInfo(int channel_idx, lv_obj_t* return_screen) {
+  ChannelDetails ch;
+  if (!mproxy::getChannel(channel_idx, ch) || ch.name[0] == 0) return;
+  buildChannelInfoScreen();
+  memcpy(_chinfo_secret, ch.channel.secret, sizeof(_chinfo_secret));
+  strncpy(_chinfo_name, ch.name, sizeof(_chinfo_name) - 1);
+  _chinfo_name[sizeof(_chinfo_name) - 1] = 0;
+  // A #hashtag channel's secret == SHA256("#"+name)[0:16]; its name IS the key, so
+  // renaming is blocked (matches the phone app). Public etc. (independent PSK) rename freely.
+  {
+    const char* nm = _chinfo_name; while (*nm == '#' || *nm == ' ') nm++;
+    uint8_t psk[16]; deriveHashtagPsk(nm, psk);
+    static const uint8_t z[16] = {0};
+    _chinfo_is_hashtag = (memcmp(psk, _chinfo_secret, 16) == 0 && memcmp(_chinfo_secret + 16, z, 16) == 0);
+  }
+  _chinfo_return_screen = return_screen;
+  _chinfo_active_ta = NULL;
+  lv_obj_add_flag(_chinfo_kb, LV_OBJ_FLAG_HIDDEN);
+  populateChannelInfo();
+  lv_obj_scroll_to_y(_chinfo_body, 0, LV_ANIM_OFF);
+  lv_scr_load(_chinfo_screen);
+}
+
+void UITask::commitChannelName() {
+  if (_chinfo_is_hashtag) return;   // #tag channel: name is the key, rename blocked
+  const char* entered = lv_textarea_get_text(_chinfo_name_ta);
+  if (!entered || !entered[0]) { lv_textarea_set_text(_chinfo_name_ta, _chinfo_name); return; }  // no blank names
+  if (strcmp(entered, _chinfo_name) == 0) return;                                                // unchanged
+  strncpy(_chinfo_name, entered, sizeof(_chinfo_name) - 1);                                      // optimistic
+  _chinfo_name[sizeof(_chinfo_name) - 1] = 0;
+  mproxy::MeshCmd cmd{};
+  cmd.kind = mproxy::CmdKind::RenameChannel;
+  memcpy(cmd.path, _chinfo_secret, sizeof(_chinfo_secret));   // identity = secret
+  cmd.path_len = sizeof(_chinfo_secret);
+  strncpy(cmd.name, _chinfo_name, sizeof(cmd.name) - 1);
+  mproxy::postCommand(cmd);
+  populateChannelInfo();   // refresh title + hexagon (name-seeded color may change)
+}
+
+void UITask::chinfo_back_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  if (_instance->_chinfo_active_ta) { _instance->commitChannelName(); _instance->_chinfo_active_ta = NULL; }
+  lv_obj_add_flag(_instance->_chinfo_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_scr_load(_instance->_chinfo_return_screen ? _instance->_chinfo_return_screen : _instance->_home_screen);
+}
+
+void UITask::chinfo_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  if (_instance->_chinfo_is_hashtag) return;   // #tag channel name is read-only -> no keyboard
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    _instance->_chinfo_active_ta = ta;
+    lv_keyboard_set_textarea(_instance->_chinfo_kb, ta);
+    lv_keyboard_set_mode(_instance->_chinfo_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_chinfo_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_chinfo_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_chinfo_kb);
+    _instance->raiseFieldForKb(_instance->_chinfo_body, _instance->_chinfo_kb, ta);
+  } else if (code == LV_EVENT_DEFOCUSED) {
+    _instance->commitChannelName();
+  }
+}
+
+void UITask::chinfo_kb_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+    if (_instance->_chinfo_active_ta) { _instance->commitChannelName(); _instance->_chinfo_active_ta = NULL; }
+    lv_obj_add_flag(_instance->_chinfo_kb, LV_OBJ_FLAG_HIDDEN);
+    _instance->resetKbScroll();
+  }
+}
+
+void UITask::chinfo_key_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  static const uint8_t zeros[16] = {0};
+  int slen = (memcmp(&_instance->_chinfo_secret[16], zeros, 16) == 0) ? 16 : 32;
+  char hex[2 * 32 + 1]; mesh::Utils::toHex(hex, _instance->_chinfo_secret, slen);
+  _instance->showKeyPopup(hex);
+}
+
+void UITask::kebab_chdetails_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->closeMenuPopup();
+  _instance->openChannelInfo(_instance->_chat_channel_idx, _instance->_chat_screen);
+}
+
 void UITask::buildNewChannelScreen() {
   if (_newchan_screen) return;
   _newchan_screen = lv_obj_create(NULL);
@@ -4448,14 +4650,24 @@ void UITask::buildNewChannelScreen() {
   lv_obj_set_style_pad_row(body, 8, 0);
   lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
 
+  // Live hexagon hero (branded like a built channel) -- updates as the name is typed.
+  makeHeroCard(body, &_newchan_hero_av, &_newchan_hero_avl, &_newchan_hero_nm, &_newchan_hero_key, newchan_key_cb);
+
   lv_obj_t* fn = makeField(body, "Name");
   _newchan_name_ta = makeSelTextarea(fn);
   lv_textarea_set_one_line(_newchan_name_ta, true); lv_obj_add_event_cb(_newchan_name_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_width(_newchan_name_ta, LV_PCT(100));
   lv_obj_add_event_cb(_newchan_name_ta, newchan_ta_event_cb, LV_EVENT_ALL, NULL);
 
-  lv_obj_t* fk = makeField(body, "Key (hex) or paste meshcore:// link");
-  _newchan_key_ta = makeSelTextarea(fk);
+  // "Public channel": derive the key from the name (anyone can join by name) instead
+  // of pasting a secret. Auto-checks when the name is "Public".
+  _newchan_public_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_newchan_public_chk, "Public channel (key from name)");
+  lv_obj_set_style_text_color(_newchan_public_chk, lv_color_hex(UI_FG), 0);
+  lv_obj_add_event_cb(_newchan_public_chk, newchan_public_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  _newchan_key_field = makeField(body, "Key (hex) or paste meshcore:// link");
+  _newchan_key_ta = makeSelTextarea(_newchan_key_field);
   lv_textarea_set_one_line(_newchan_key_ta, true); lv_obj_add_event_cb(_newchan_key_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
   lv_obj_set_width(_newchan_key_ta, LV_PCT(100));
   lv_obj_add_event_cb(_newchan_key_ta, newchan_ta_event_cb, LV_EVENT_ALL, NULL);
@@ -4474,35 +4686,110 @@ void UITask::openNewChannel() {
   buildNewChannelScreen();
   lv_textarea_set_text(_newchan_name_ta, "");
   lv_textarea_set_text(_newchan_key_ta, "");
+  if (_newchan_public_chk) lv_obj_clear_state(_newchan_public_chk, LV_STATE_CHECKED);
+  lv_obj_clear_state(_newchan_key_ta, LV_STATE_DISABLED);
   lv_obj_add_flag(_newchan_err, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(_newchan_kb, LV_OBJ_FLAG_HIDDEN);
+  refreshNewChannelHero();
   lv_scr_load(_newchan_screen);
 }
 
+// Live hexagon hero + "Public channel" key handling. Auto-checks Public for the
+// name "Public"; when public, derives the key from the name and shows it read-only.
+void UITask::refreshNewChannelHero() {
+  if (!_newchan_hero_nm) return;
+  const char* name = lv_textarea_get_text(_newchan_name_ta);
+  bool pub = _newchan_public_chk && lv_obj_has_state(_newchan_public_chk, LV_STATE_CHECKED);
+
+  char keyhex[2 * 32 + 1] = "";
+  if (pub) {
+    if (name && name[0]) { uint8_t psk[16]; derivePublicChannelKey(name, psk); mesh::Utils::toHex(keyhex, psk, 16); }
+    lv_textarea_set_text(_newchan_key_ta, keyhex);            // derived, shown read-only
+    lv_obj_add_state(_newchan_key_ta, LV_STATE_DISABLED);
+  } else {
+    lv_obj_clear_state(_newchan_key_ta, LV_STATE_DISABLED);
+    const char* k = lv_textarea_get_text(_newchan_key_ta);
+    uint8_t sec[32]; int len = hexToBytes(k ? k : "", sec, sizeof(sec));
+    if (len == 16 || len == 32) mesh::Utils::toHex(keyhex, sec, len);
+  }
+
+  const char* shown = (name && name[0]) ? name : "New channel";
+  char clean[CHAT_PEER_NAME_MAX + 4]; sanitizeForFont(shown, clean, sizeof(clean));
+  lv_label_set_text(_newchan_hero_nm, clean);
+  brandChannelAvatar(_newchan_hero_av, _newchan_hero_avl, shown);
+  if (keyhex[0]) {
+    int kl = (int)strlen(keyhex);
+    char trunc[24]; snprintf(trunc, sizeof(trunc), "<%.6s...%.6s>", keyhex, keyhex + kl - 6);
+    lv_label_set_text(_newchan_hero_key, trunc);
+  } else {
+    lv_label_set_text(_newchan_hero_key, pub ? "(enter a name)" : "(enter a key)");
+  }
+}
+
+void UITask::newchan_public_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->refreshNewChannelHero();
+}
+
+void UITask::newchan_key_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  const char* name = lv_textarea_get_text(_instance->_newchan_name_ta);
+  bool pub = _instance->_newchan_public_chk && lv_obj_has_state(_instance->_newchan_public_chk, LV_STATE_CHECKED);
+  char keyhex[2 * 32 + 1] = "";
+  if (pub) { if (name && name[0]) { uint8_t psk[16]; derivePublicChannelKey(name, psk); mesh::Utils::toHex(keyhex, psk, 16); } }
+  else {
+    const char* k = lv_textarea_get_text(_instance->_newchan_key_ta);
+    uint8_t sec[32]; int len = hexToBytes(k ? k : "", sec, sizeof(sec));
+    if (len == 16 || len == 32) mesh::Utils::toHex(keyhex, sec, len);
+  }
+  if (keyhex[0]) _instance->showKeyPopup(keyhex);
+}
+
 bool UITask::createChannelFromForm() {
-  const char* nameIn = lv_textarea_get_text(_newchan_name_ta);
-  const char* keyIn  = lv_textarea_get_text(_newchan_key_ta);
   auto fail = [this](const char* m){
     lv_label_set_text(_newchan_err, m);
     lv_obj_clear_flag(_newchan_err, LV_OBJ_FLAG_HIDDEN);
   };
 
-  // The key field also accepts a pasted "meshcore://channel/add?name=..&secret=hex"
-  // link (the phone app's Share Channel format): pull name+secret out of it.
-  char name[32]; char keyhex[80];
-  snprintf(name, sizeof(name), "%s", nameIn ? nameIn : "");
-  snprintf(keyhex, sizeof(keyhex), "%s", keyIn ? keyIn : "");
-  if (keyIn && strstr(keyIn, "channel/add")) {
-    char sec[80], nm[64];
-    if (uriParam(keyIn, "secret", sec, sizeof(sec))) snprintf(keyhex, sizeof(keyhex), "%s", sec);
-    if ((!name[0]) && uriParam(keyIn, "name", nm, sizeof(nm))) urlDecodeInto(nm, name, sizeof(name));
+  char name[32];
+  snprintf(name, sizeof(name), "%s", lv_textarea_get_text(_newchan_name_ta));
+  uint8_t secret[32] = {0};
+  int len = 0;
+  // "Public" is always the well-known public channel even if Save was hit before the
+  // name field defocused (which is what normally auto-checks the box).
+  bool pub = (_newchan_public_chk && lv_obj_has_state(_newchan_public_chk, LV_STATE_CHECKED))
+             || isPublicName(name);
+
+  if (pub) {
+    // Key derived from the name (Public -> legacy PSK, else SHA256("#"+name)).
+    if (!name[0]) { fail("Enter a channel name"); return false; }
+    uint8_t psk[16]; derivePublicChannelKey(name, psk);
+    memcpy(secret, psk, 16); len = 16;
+  } else {
+    // The key field also accepts a pasted "meshcore://channel/add?name=..&secret=hex"
+    // link (the phone app's Share Channel format): pull name+secret out of it.
+    const char* keyIn = lv_textarea_get_text(_newchan_key_ta);
+    char keyhex[80];
+    snprintf(keyhex, sizeof(keyhex), "%s", keyIn ? keyIn : "");
+    if (keyIn && strstr(keyIn, "channel/add")) {
+      char sec[80], nm[64];
+      if (uriParam(keyIn, "secret", sec, sizeof(sec))) snprintf(keyhex, sizeof(keyhex), "%s", sec);
+      if ((!name[0]) && uriParam(keyIn, "name", nm, sizeof(nm))) urlDecodeInto(nm, name, sizeof(name));
+    }
+    if (!name[0])   { fail("Enter a channel name"); return false; }
+    if (!keyhex[0]) { fail("Enter a hex key");      return false; }
+    len = hexToBytes(keyhex, secret, sizeof(secret));
+    if (len != 16 && len != 32) { fail("Key must be hex (32 or 64 chars)"); return false; }
   }
 
-  if (!name[0])   { fail("Enter a channel name"); return false; }
-  if (!keyhex[0]) { fail("Enter a hex key");      return false; }
-  uint8_t secret[32];
-  int len = hexToBytes(keyhex, secret, sizeof(secret));
-  if (len != 16 && len != 32) { fail("Key must be hex (32 or 64 chars)"); return false; }
+  // Reject a duplicate: a channel with this secret is already added (matches the
+  // phone app -- includes re-adding "Public" or a #tag you already have).
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    ChannelDetails ch;
+    if (!mproxy::getChannel(i, ch) || ch.name[0] == 0) continue;
+    if (memcmp(ch.channel.secret, secret, len) == 0) { fail("Channel already added"); return false; }
+  }
 
   mproxy::MeshCmd cmd{};
   cmd.kind = mproxy::CmdKind::AddChannel;
@@ -4575,8 +4862,21 @@ void UITask::newchan_save_cb(lv_event_t* e) {
 void UITask::newchan_ta_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_event_code_t code = lv_event_get_code(e);
+  lv_obj_t* ta = lv_event_get_target(e);
+  if (code == LV_EVENT_VALUE_CHANGED) { _instance->refreshNewChannelHero(); return; }   // live preview only
+  if (code == LV_EVENT_DEFOCUSED) {
+    // Only when focus LEAVES the name field: auto-check Public for the name "Public"
+    // (so mid-typing "publicity" doesn't transiently trip it).
+    if (ta == _instance->_newchan_name_ta && isPublicName(lv_textarea_get_text(ta)) &&
+        _instance->_newchan_public_chk && !lv_obj_has_state(_instance->_newchan_public_chk, LV_STATE_CHECKED)) {
+      lv_obj_add_state(_instance->_newchan_public_chk, LV_STATE_CHECKED);
+      _instance->refreshNewChannelHero();
+    }
+    return;
+  }
+  // The key field is read-only while "Public channel" derives it -> no keyboard.
+  if (ta == _instance->_newchan_key_ta && lv_obj_has_state(ta, LV_STATE_DISABLED)) return;
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
-    lv_obj_t* ta = lv_event_get_target(e);
     lv_keyboard_set_textarea(_instance->_newchan_kb, ta);
     lv_keyboard_set_mode(_instance->_newchan_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_obj_clear_flag(_instance->_newchan_kb, LV_OBJ_FLAG_HIDDEN);

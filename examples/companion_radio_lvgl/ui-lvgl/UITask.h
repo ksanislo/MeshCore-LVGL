@@ -228,6 +228,22 @@ class UITask : public AbstractUITask {
   char            _cinfo_override[CHAT_PEER_NAME_MAX];  // local nickname (optimistic)
   lv_obj_t*       _cinfo_return_screen; // where back goes
 
+  // Channel Details page (hexagon hero + editable name + key). Reuses the shared
+  // hero/field widgets; the channel is identified by its 32-byte secret.
+  lv_obj_t*       _chinfo_screen;
+  lv_obj_t*       _chinfo_body;
+  lv_obj_t*       _chinfo_avatar;
+  lv_obj_t*       _chinfo_avatar_lbl;
+  lv_obj_t*       _chinfo_title;
+  lv_obj_t*       _chinfo_key;
+  lv_obj_t*       _chinfo_name_ta;
+  lv_obj_t*       _chinfo_kb;
+  lv_obj_t*       _chinfo_active_ta;
+  uint8_t         _chinfo_secret[32];   // channel identity (preserved across rename)
+  char            _chinfo_name[32];     // current name (optimistic)
+  bool            _chinfo_is_hashtag;   // #tag channel: key is derived from the name -> rename is blocked
+  lv_obj_t*       _chinfo_return_screen;
+
   // Latest telemetry readings, stashed for the Contact Info page (one contact's
   // worth -- the most recent response). GPS is applied to the contact position.
   uint8_t         _telem_pubkey[6];
@@ -382,8 +398,14 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _newchan_screen;
   lv_obj_t*       _newchan_name_ta;
   lv_obj_t*       _newchan_key_ta;
+  lv_obj_t*       _newchan_key_field;   // wrapper, disabled when "Public channel" derives the key
+  lv_obj_t*       _newchan_public_chk;  // "Public channel": derive the key from the name
   lv_obj_t*       _newchan_err;
   lv_obj_t*       _newchan_kb;
+  lv_obj_t*       _newchan_hero_av;     // live hexagon preview
+  lv_obj_t*       _newchan_hero_avl;
+  lv_obj_t*       _newchan_hero_nm;
+  lv_obj_t*       _newchan_hero_key;
 
   // (Adding a contact is not a separate screen: it's the Contact Info screen in
   // CINFO_ADD mode -- see openNewContact / openNewContactPrefilled.)
@@ -573,6 +595,15 @@ class UITask : public AbstractUITask {
   void      openProfile(lv_obj_t* return_screen = NULL);
   static void profile_back_cb(lv_event_t* e);
   static void profile_kb_event_cb(lv_event_t* e);
+  // Channel Details page (kebab -> Details on a channel chat) + rename.
+  void      buildChannelInfoScreen();
+  void      openChannelInfo(int channel_idx, lv_obj_t* return_screen);
+  void      populateChannelInfo();
+  void      commitChannelName();        // rename: post RenameChannel if the name changed
+  static void chinfo_back_cb(lv_event_t* e);
+  static void chinfo_ta_event_cb(lv_event_t* e);
+  static void chinfo_kb_event_cb(lv_event_t* e);
+  static void chinfo_key_cb(lv_event_t* e);   // hero key -> full secret popup
   void      populateContactInfo();
   void      applyCinfoMode();           // show/hide widgets for view vs add mode
   void      refreshCinfoHero();         // hero avatar/title/key from current state
@@ -587,6 +618,7 @@ class UITask : public AbstractUITask {
   void      showShareMenu();            // uses _cinfo_pubkey as the target
   static void chat_kebab_cb(lv_event_t* e);
   static void kebab_details_cb(lv_event_t* e);
+  static void kebab_chdetails_cb(lv_event_t* e);   // channel chat kebab "Details"
   static void kebab_search_cb(lv_event_t* e);
   static void kebab_share_cb(lv_event_t* e);
   static void kebab_setpath_cb(lv_event_t* e);
@@ -742,6 +774,9 @@ private:
   void      buildNewChannelScreen();
   void      openNewChannel();
   bool      createChannelFromForm();
+  void      refreshNewChannelHero();    // live hexagon preview + derived-key prefill
+  static void newchan_public_cb(lv_event_t* e);  // "Public channel" checkbox toggled
+  static void newchan_key_cb(lv_event_t* e);     // hero key tap -> full key popup
   // Adding a contact reuses the Contact Info screen in CINFO_ADD mode.
   void      openNewContact(lv_obj_t* return_screen);   // blank manual entry (typed/pasted hex key)
   void      openNewContactPrefilled(const uint8_t* pubkey, uint8_t type, const char* advname,
@@ -814,6 +849,9 @@ public:
       _cinfo_lh_field(NULL), _cinfo_tel_field(NULL), _cinfo_hops_row(NULL), _cinfo_outpath_row(NULL),
       _cinfo_header_title(NULL), _cinfo_save_btn(NULL), _cinfo_key_field(NULL),
       _cinfo_key_ta(NULL), _cinfo_err(NULL),
+      _chinfo_screen(NULL), _chinfo_body(NULL), _chinfo_avatar(NULL), _chinfo_avatar_lbl(NULL),
+      _chinfo_title(NULL), _chinfo_key(NULL), _chinfo_name_ta(NULL), _chinfo_kb(NULL),
+      _chinfo_active_ta(NULL), _chinfo_return_screen(NULL),
       _cinfo_mode(CINFO_VIEW), _cinfo_addkey_locked(false), _cinfo_haskey(false),
       _cinfo_return_screen(NULL),
       _menu_popup(NULL), _menu_list(NULL), _toast(NULL), _path_return_screen(NULL),
@@ -841,7 +879,8 @@ public:
       _qr_screen(NULL), _qr_code(NULL), _qr_name_lbl(NULL), _qr_key_lbl(NULL),
       _qr_return_screen(NULL),
       _newchan_screen(NULL), _newchan_name_ta(NULL), _newchan_key_ta(NULL),
-      _newchan_err(NULL), _newchan_kb(NULL),
+      _newchan_key_field(NULL), _newchan_public_chk(NULL), _newchan_err(NULL), _newchan_kb(NULL),
+      _newchan_hero_av(NULL), _newchan_hero_avl(NULL), _newchan_hero_nm(NULL), _newchan_hero_key(NULL),
       _nodeinfo_screen(NULL), _nodeinfo_lbl(NULL), _nodeinfo_timer(NULL),
       _login_popup(NULL), _login_card(NULL), _login_title(NULL), _login_pw_ta(NULL),
       _login_save_chk(NULL), _login_auto_chk(NULL), _login_kb(NULL),
@@ -857,6 +896,8 @@ public:
         _clip_text[0] = 0;
         _crash_note[0] = 0;
         _joinch_name[0] = 0;
+        _chinfo_name[0] = 0;
+        memset(_chinfo_secret, 0, sizeof(_chinfo_secret));
         _clip_kind = CLIP_EMPTY;
         memset(&_sel, 0, sizeof(_sel));
         _contacts_filter[0] = 0;

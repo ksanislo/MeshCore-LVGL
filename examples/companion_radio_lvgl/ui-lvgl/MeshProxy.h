@@ -56,6 +56,7 @@ enum class CmdKind : uint8_t {
   Send, SaveGps, ToggleFav, SetNameOvr, ResetPath, SetPath,
   AddContact, ReqTelem, ShareZhop, Advert, UpdatePrefs, ApplyRadio,
   AddChannel,   // reuses name = channel name, path/path_len = raw secret bytes (16/32)
+  RenameChannel,// rename a channel: path = its 32-byte secret (identity), name = new name
   ServerLogin,  // login to a repeater/room server: pubkey + password (+ save_login)
   SendCommand,  // send a CLI command (TXT_TYPE_CLI_DATA) to a repeater: pubkey + text
   AutoLogin,    // pubkey: log in using a saved credential if one exists (silent)
