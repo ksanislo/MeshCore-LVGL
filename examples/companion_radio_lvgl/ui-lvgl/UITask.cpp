@@ -5799,7 +5799,7 @@ void UITask::insert_paste_cb(lv_event_t* e) {
 // floating Copy / Select All menu. Textareas, smart paste, word-select, and
 // handle re-grab come in later phases.
 // =====================================================================
-static const lv_coord_t SEL_HANDLE_D = 16;   // triangle handle size
+static const lv_coord_t SEL_HANDLE_D = 12;   // grab-dot diameter
 
 // Faithful replica of LVGL's recolor command state machine (misc/lv_txt.c
 // _lv_txt_is_cmd), so we can map a native label selection (char-id range over the
@@ -5860,34 +5860,17 @@ void UITask::ensureSelHandles() {
   if (_sel.h_start) return;
   for (int i = 0; i < 2; i++) {
     lv_obj_t* h = lv_obj_create(lv_layer_top());
-    lv_obj_remove_style_all(h);   // transparent: the triangle is custom-drawn
+    lv_obj_remove_style_all(h);
     lv_obj_set_size(h, SEL_HANDLE_D, SEL_HANDLE_D);
+    lv_obj_set_style_bg_color(h, lv_color_hex(UI_ACCENT), 0);
+    lv_obj_set_style_bg_opa(h, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(h, LV_RADIUS_CIRCLE, 0);    // grab dot (triangle styling: TBD)
     lv_obj_add_flag(h, LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(h, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_ext_click_area(h, 14);   // fat touch target around the small triangle
+    lv_obj_set_ext_click_area(h, 14);   // fat touch target around the small dot
     lv_obj_add_event_cb(h, sel_handle_cb, LV_EVENT_ALL, NULL);
-    lv_obj_add_event_cb(h, sel_handle_draw_cb, LV_EVENT_DRAW_MAIN_END, NULL);
     if (i == 0) _sel.h_start = h; else _sel.h_end = h;
   }
-}
-
-// Draw a handle as a filled accent triangle: start = points DOWN (tip at the
-// selection start / caret line, body above); end = points UP (tip at the
-// selection end, body below).
-void UITask::sel_handle_draw_cb(lv_event_t* e) {
-  if (!_instance) return;
-  lv_obj_t* h = lv_event_get_target(e);
-  lv_draw_ctx_t* ctx = lv_event_get_draw_ctx(e);
-  lv_area_t a; lv_obj_get_coords(h, &a);
-  bool down = (h == _instance->_sel.h_start);
-  lv_coord_t cx = (a.x1 + a.x2) / 2;
-  lv_point_t pts[3];
-  if (down) { pts[0] = {a.x1, a.y1}; pts[1] = {a.x2, a.y1}; pts[2] = {cx, a.y2}; }
-  else      { pts[0] = {a.x1, a.y2}; pts[1] = {a.x2, a.y2}; pts[2] = {cx, a.y1}; }
-  lv_draw_rect_dsc_t dsc; lv_draw_rect_dsc_init(&dsc);
-  dsc.bg_color = lv_color_hex(UI_ACCENT);
-  dsc.bg_opa = LV_OPA_COVER;
-  lv_draw_polygon(ctx, &dsc, pts, 3);
 }
 
 void UITask::beginLabelSel(lv_obj_t* lbl, lv_point_t abs_pt) {
@@ -6020,8 +6003,59 @@ void UITask::selAnchorRect(lv_area_t* out) {
     out->x2 = multiline ? a.x2 : a.x1 + LV_MAX(ps.x, pe.x);
     out->y1 = a.y1 + ps.y;
     out->y2 = a.y1 + pe.y + lh;
+  } else if (_sel.kind == SEL_TEXTAREA) {
+    // Anchor on the actual paste target: the cursor (or the selection span if one
+    // exists), via the textarea's internal label -- not the middle of the field.
+    lv_obj_t* lbl = lv_textarea_get_label(_sel.target);
+    lv_area_t la; lv_obj_get_coords(lbl ? lbl : _sel.target, &la);
+    const lv_font_t* font = lv_obj_get_style_text_font(lbl ? lbl : _sel.target, LV_PART_MAIN);
+    lv_coord_t lh = lv_font_get_line_height(font);
+    lv_point_t ps, pe;
+    uint32_t s, e;
+    if (lbl && taSelRange(_sel.target, &s, &e)) {
+      lv_label_get_letter_pos(lbl, s, &ps);
+      lv_label_get_letter_pos(lbl, e, &pe);
+    } else if (lbl) {
+      lv_label_get_letter_pos(lbl, lv_textarea_get_cursor_pos(_sel.target), &ps);
+      pe = ps;                                          // zero-width caret
+    } else { ps.x = ps.y = pe.x = pe.y = 0; }
+    bool multiline = (pe.y > ps.y);
+    out->x1 = multiline ? la.x1 : la.x1 + LV_MIN(ps.x, pe.x);
+    out->x2 = multiline ? la.x2 : la.x1 + LV_MAX(ps.x, pe.x);
+    out->y1 = la.y1 + ps.y;
+    out->y2 = la.y1 + pe.y + lh;
   } else {
-    lv_obj_get_coords(_sel.target, out);
+    lv_obj_get_coords(_sel.target, out);   // whole-card selection
+  }
+}
+
+// Screen point of the selection START (or the caret) + that line's height. The
+// context toolbar anchors here -- by the actual paste/selection start, not the
+// middle of a span or field.
+void UITask::selStart(lv_point_t* tip, lv_coord_t* line_h) {
+  tip->x = 0; tip->y = 0; *line_h = 0;
+  if (!_sel.target) return;
+  if (_sel.kind == SEL_LABEL) {
+    lv_area_t a; lv_obj_get_coords(_sel.target, &a);
+    const lv_font_t* font = lv_obj_get_style_text_font(_sel.target, LV_PART_MAIN);
+    *line_h = lv_font_get_line_height(font);
+    lv_point_t ps; lv_label_get_letter_pos(_sel.target, _sel.sel_lo, &ps);
+    tip->x = a.x1 + ps.x; tip->y = a.y1 + ps.y;
+  } else if (_sel.kind == SEL_TEXTAREA) {
+    lv_obj_t* lbl = lv_textarea_get_label(_sel.target);
+    lv_obj_t* ref = lbl ? lbl : _sel.target;
+    lv_area_t la; lv_obj_get_coords(ref, &la);
+    *line_h = lv_font_get_line_height(lv_obj_get_style_text_font(ref, LV_PART_MAIN));
+    lv_point_t ps = {0, 0};
+    if (lbl) {
+      uint32_t s, e;
+      if (taSelRange(_sel.target, &s, &e)) lv_label_get_letter_pos(lbl, s, &ps);
+      else lv_label_get_letter_pos(lbl, lv_textarea_get_cursor_pos(_sel.target), &ps);
+    }
+    tip->x = la.x1 + ps.x; tip->y = la.y1 + ps.y;
+  } else {   // whole card: top-left corner
+    lv_area_t a; lv_obj_get_coords(_sel.target, &a);
+    tip->x = a.x1; tip->y = a.y1; *line_h = a.y2 - a.y1;
   }
 }
 
@@ -6097,25 +6131,25 @@ void UITask::showSelMenu() {
   lv_obj_clear_flag(_sel.menu, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(_sel.menu);
 
-  lv_area_t anchor; selAnchorRect(&anchor);
+  lv_point_t tip; lv_coord_t lh; selStart(&tip, &lh);   // the cursor / start of the selection
   lv_obj_update_layout(_sel.menu);
   lv_coord_t mw = lv_obj_get_width(_sel.menu);
   lv_coord_t mh = lv_obj_get_height(_sel.menu);
   const lv_coord_t GAP = 6;
-  const lv_coord_t HANDLE_CLR = (_sel.kind == SEL_TEXTAREA) ? 2 : SEL_HANDLE_D + 2;  // clear the handles
-  lv_coord_t y = anchor.y1 - mh - GAP - HANDLE_CLR;        // prefer above the selection (above its top handle)
+  const lv_coord_t HANDLE_CLR = (_sel.kind == SEL_TEXTAREA) ? 2 : SEL_HANDLE_D + 2;  // clear the handle
+  lv_coord_t y = tip.y - mh - GAP - HANDLE_CLR;           // prefer above the start line
   if (_sel.kind == SEL_TEXTAREA) {
-    // A field usually has the keyboard up across the bottom: stay above the field,
-    // clamp under the header rather than dropping into the keyboard.
+    // A field usually has the keyboard up across the bottom: stay above, clamp
+    // under the header rather than dropping into the keyboard.
     if (y < HEADER_H + GAP) y = HEADER_H + GAP;
   } else {
-    if (y < HEADER_H + GAP) y = anchor.y2 + GAP + HANDLE_CLR;   // no room above -> below (under bottom handle)
+    if (y < HEADER_H + GAP) y = tip.y + lh + GAP + HANDLE_CLR;  // no room above -> below the start line
     if (y + mh > _screen_h - GAP) y = _screen_h - mh - GAP;     // clamp on-screen
     if (y < HEADER_H + GAP) y = HEADER_H + GAP;
   }
-  lv_coord_t x = (anchor.x1 + anchor.x2) / 2 - mw / 2;      // centered on the selection
-  if (x < GAP) x = GAP;
+  lv_coord_t x = tip.x;                                   // left edge at the cursor / selection start
   if (x + mw > _screen_w - GAP) x = _screen_w - mw - GAP;
+  if (x < GAP) x = GAP;
   lv_obj_set_pos(_sel.menu, x, y);
 }
 

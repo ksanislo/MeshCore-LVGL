@@ -650,12 +650,12 @@ private:
   void      endSelection();                         // clear everything, back to idle
   void      showSelMenu();                          // floating horizontal toolbar over the selection
   void      selAnchorRect(lv_area_t* out);          // screen bbox of the current selection
+  void      selStart(lv_point_t* tip, lv_coord_t* line_h);  // screen point of the selection start / cursor
   bool      selPointInside(lv_point_t p);           // is a touch point within the selection?
   void      copySelection();
   static uint32_t labelCharAt(lv_obj_t* lbl, lv_point_t abs_pt);  // touch point -> char-id
   static void sel_event_cb(lv_event_t* e);          // long-press/drag/release on a target
   static void sel_handle_cb(lv_event_t* e);         // drag a handle to re-adjust an endpoint
-  static void sel_handle_draw_cb(lv_event_t* e);    // render a handle as a triangle
   static void sel_catcher_cb(lv_event_t* e);        // tap outside selection -> dismiss
   // Editable text fields: long-press -> toolbar (Cut/Copy/Paste/Select All).
   void      beginTextareaSel(lv_obj_t* ta);
