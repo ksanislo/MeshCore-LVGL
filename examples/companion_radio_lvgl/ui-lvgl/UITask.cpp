@@ -2091,7 +2091,43 @@ static bool textHasContactRef(const char* text) {
 // message may contain several cards). Freed on the card's LV_EVENT_DELETE.
 struct CardTarget { uint8_t pubkey[PUB_KEY_SIZE]; uint8_t type; char name[CHAT_PEER_NAME_MAX]; };
 
+// Channels are branded as a name-colored HEXAGON (vs the contact circle). The
+// avatar obj is flagged USER_1 + made bg-transparent; this draw hook fills a
+// flat-top hexagon in the obj's bg_color. Attach once at the avatar's creation
+// (heroes, chat header, banner, channel rows); harmless on circle (contact) avatars.
+static void drawHexAt(lv_draw_ctx_t* ctx, lv_coord_t cx, lv_coord_t cy, lv_coord_t r, lv_color_t color) {
+  lv_coord_t hy = (lv_coord_t)((int32_t)r * 866 / 1000);   // r*sin(60)
+  lv_point_t pts[6] = {                                    // flat-top hexagon
+    { (lv_coord_t)(cx + r),     cy },
+    { (lv_coord_t)(cx + r / 2), (lv_coord_t)(cy - hy) },
+    { (lv_coord_t)(cx - r / 2), (lv_coord_t)(cy - hy) },
+    { (lv_coord_t)(cx - r),     cy },
+    { (lv_coord_t)(cx - r / 2), (lv_coord_t)(cy + hy) },
+    { (lv_coord_t)(cx + r / 2), (lv_coord_t)(cy + hy) },
+  };
+  lv_draw_rect_dsc_t d; lv_draw_rect_dsc_init(&d);
+  d.bg_color = color; d.bg_opa = LV_OPA_COVER;
+  lv_draw_polygon(ctx, &d, pts, 6);
+}
+
+static void hexAvatarDrawCb(lv_event_t* e) {
+  lv_obj_t* o = lv_event_get_target(e);
+  if (!lv_obj_has_flag(o, LV_OBJ_FLAG_USER_1)) return;   // only in hexagon (channel) mode
+  lv_area_t a; lv_obj_get_coords(o, &a);
+  lv_coord_t w = a.x2 - a.x1 + 1, h = a.y2 - a.y1 + 1;
+  lv_coord_t cx = a.x1 + w / 2, cy = a.y1 + h / 2;        // match LVGL's label centering (x1 + w/2)
+  lv_coord_t r = LV_MIN(w, h) / 2;
+  lv_draw_ctx_t* ctx = lv_event_get_draw_ctx(e);
+  drawHexAt(ctx, cx, cy, r, lv_color_hex(UI_BG));                              // 1px outline ring
+  drawHexAt(ctx, cx, cy, r - 1, lv_obj_get_style_bg_color(o, LV_PART_MAIN));   // channel-color fill
+}
+
+// Brand a CONTACT avatar: a name-colored circle (chat) or neutral type-glyph
+// circle (repeater/room/sensor). Also resets any prior hexagon (channel) state.
 static void brandAvatar(lv_obj_t* circle, lv_obj_t* lbl, const char* sname, uint8_t type) {
+  lv_obj_clear_flag(circle, LV_OBJ_FLAG_USER_1);              // back to circle mode
+  lv_obj_set_style_bg_opa(circle, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(circle, LV_RADIUS_CIRCLE, 0);
   if (type == ADV_TYPE_CHAT || type == 0) {
     char g[8]; firstGrapheme(sname, g, sizeof(g));
     lv_label_set_text(lbl, g[0] ? g : "?");
@@ -2100,6 +2136,19 @@ static void brandAvatar(lv_obj_t* circle, lv_obj_t* lbl, const char* sname, uint
     lv_label_set_text(lbl, contactSymbol(type));
     lv_obj_set_style_bg_color(circle, lv_color_hex(UI_AVATAR_NEUT), 0);
   }
+}
+
+// Brand a CHANNEL avatar: a name-colored hexagon with the name's first grapheme
+// (a leading '#' is skipped). Requires hexAvatarDrawCb attached to the avatar.
+static void brandChannelAvatar(lv_obj_t* hex, lv_obj_t* lbl, const char* cname) {
+  const char* nm = cname ? cname : "";
+  while (*nm == '#' || *nm == ' ') nm++;                      // skip the leading '#'
+  char g[8]; firstGrapheme(nm[0] ? nm : cname, g, sizeof(g));
+  lv_label_set_text(lbl, g[0] ? g : "#");
+  lv_obj_set_style_bg_color(hex, lv_color_hex(nameColor(nm[0] ? nm : cname)), 0);
+  lv_obj_set_style_bg_opa(hex, LV_OPA_TRANSP, 0);             // hide the rect; the hexagon is drawn
+  lv_obj_set_style_radius(hex, 0, 0);
+  lv_obj_add_flag(hex, LV_OBJ_FLAG_USER_1);                   // -> hexAvatarDrawCb draws the hexagon
 }
 
 // A contact reference (<pubkey:type:name>) rendered as its own bordered card box
@@ -2428,20 +2477,13 @@ void UITask::updateChatHeader() {
   lv_label_set_text(_chat_title, tname);
 
   if (_chat_is_channel) {
-    lv_label_set_text(_chat_avatar_lbl, "#");
-    lv_obj_set_style_bg_color(_chat_avatar, lv_color_hex(UI_AVATAR_NEUT), 0);
+    brandChannelAvatar(_chat_avatar, _chat_avatar_lbl, shown);   // name-colored hexagon
     lv_label_set_text(_chat_status, "Channel");
     return;
   }
   const ContactInfo* c = mproxy::lookupContactByPubKey(_chat_pubkey, 6);
-  if (!c || c->type == ADV_TYPE_CHAT || c->type == 0) {
-    char g[8]; firstGrapheme(tname, g, sizeof(g));
-    lv_label_set_text(_chat_avatar_lbl, g[0] ? g : "?");
-    lv_obj_set_style_bg_color(_chat_avatar, lv_color_hex(nameColor(shown)), 0);
-  } else {
-    lv_label_set_text(_chat_avatar_lbl, contactSymbol(c->type));
-    lv_obj_set_style_bg_color(_chat_avatar, lv_color_hex(UI_AVATAR_NEUT), 0);
-  }
+  brandAvatar(_chat_avatar, _chat_avatar_lbl, tname,
+              (c && !(c->type == ADV_TYPE_CHAT || c->type == 0)) ? c->type : ADV_TYPE_CHAT);
   char rs[24];
   if (c) routeStatus(*c, rs, sizeof(rs));
   else   snprintf(rs, sizeof(rs), "Flood");
@@ -2482,6 +2524,7 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_set_style_radius(_chat_avatar, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(_chat_avatar, LV_OPA_COVER, 0);
     lv_obj_clear_flag(_chat_avatar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_chat_avatar, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel hexagon
     _chat_avatar_lbl = lv_label_create(_chat_avatar);
     lv_obj_center(_chat_avatar_lbl);
     lv_obj_set_style_text_color(_chat_avatar_lbl, lv_color_hex(0xFFFFFF), 0);
@@ -3057,6 +3100,20 @@ void UITask::ensureBanner() {
     lv_obj_set_style_border_width(_banner_avatar, 0, 0);
     lv_obj_set_style_pad_all(_banner_avatar, 0, 0);
     lv_obj_clear_flag(_banner_avatar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_banner_avatar, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel hexagon
+    // Inner circle (channel messages only): the sender's circle layered on the
+    // channel hexagon. Created before the label so the letter stays on top.
+    _banner_inner = lv_obj_create(_banner_avatar);
+    lv_obj_remove_style_all(_banner_inner);
+    lv_obj_set_size(_banner_inner, 26, 26);
+    lv_obj_set_style_radius(_banner_inner, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(_banner_inner, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(_banner_inner, 1, 0);
+    lv_obj_set_style_border_color(_banner_inner, lv_color_hex(UI_BG), 0);   // ring separates it from the hexagon
+    lv_obj_center(_banner_inner);
+    lv_obj_clear_flag(_banner_inner, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(_banner_inner, LV_OBJ_FLAG_HIDDEN);   // shown only for channel messages
+
     _banner_avatar_lbl = lv_label_create(_banner_avatar);
     lv_obj_center(_banner_avatar_lbl);
     lv_obj_set_style_text_color(_banner_avatar_lbl, lv_color_hex(0xFFFFFF), 0);
@@ -3106,9 +3163,38 @@ void UITask::showBanner(const char* conv_key, const char* sender,
   const char* who = (sender && sender[0]) ? sender : "(unknown)";
   char glyph[8];
   firstGrapheme(who, glyph, sizeof(glyph));
-  lv_label_set_text(_banner_avatar_lbl, glyph[0] ? glyph : "?");
-  lv_obj_set_style_bg_color(_banner_avatar,
-      lv_color_hex(is_channel ? UI_AVATAR_NEUT : nameColor(who)), 0);
+  lv_label_set_text(_banner_avatar_lbl, glyph[0] ? glyph : "?");   // always the sender's letter
+
+  if (is_channel) {
+    // Channel hexagon (channel color) with the sender's circle layered on top, so
+    // the sender's identity shows but it's clearly a channel message. Channel color
+    // comes from the channel's name, looked up by the conv_key's secret prefix.
+    uint32_t chcol = UI_AVATAR_NEUT;
+    uint8_t sec6[6];
+    if (conv_key && strncmp(conv_key, "ch_", 3) == 0 && mesh::Utils::fromHex(sec6, 6, conv_key + 3)) {
+      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+        ChannelDetails ch;
+        if (!mproxy::getChannel(i, ch) || ch.name[0] == 0) continue;
+        if (memcmp(ch.channel.secret, sec6, 6) == 0) {
+          const char* cn = ch.name; while (*cn == '#' || *cn == ' ') cn++;
+          chcol = nameColor(cn[0] ? cn : ch.name);
+          break;
+        }
+      }
+    }
+    lv_obj_add_flag(_banner_avatar, LV_OBJ_FLAG_USER_1);            // hexagon
+    lv_obj_set_style_bg_opa(_banner_avatar, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_radius(_banner_avatar, 0, 0);
+    lv_obj_set_style_bg_color(_banner_avatar, lv_color_hex(chcol), 0);
+    lv_obj_clear_flag(_banner_inner, LV_OBJ_FLAG_HIDDEN);          // sender circle on top
+    lv_obj_set_style_bg_color(_banner_inner, lv_color_hex(nameColor(who)), 0);
+  } else {
+    lv_obj_clear_flag(_banner_avatar, LV_OBJ_FLAG_USER_1);          // plain sender circle
+    lv_obj_set_style_bg_opa(_banner_avatar, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(_banner_avatar, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(_banner_avatar, lv_color_hex(nameColor(who)), 0);
+    lv_obj_add_flag(_banner_inner, LV_OBJ_FLAG_HIDDEN);
+  }
 
   char clean[CHAT_PEER_NAME_MAX + 4];
   sanitizeForFont(who, clean, sizeof(clean));
@@ -3284,6 +3370,7 @@ static void makeHeroCard(lv_obj_t* parent, lv_obj_t** avatarOut, lv_obj_t** avat
   lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
   lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(av, hexAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);  // channel hexagon support
   lv_obj_t* avl = lv_label_create(av);
   lv_obj_center(avl);
   lv_obj_set_style_text_color(avl, lv_color_hex(0xFFFFFF), 0);
