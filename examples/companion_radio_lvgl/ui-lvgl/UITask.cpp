@@ -4700,9 +4700,67 @@ void UITask::buildChannelInfoScreen() {
   lv_obj_set_width(_chinfo_name_ta, LV_PCT(100));
   lv_obj_add_event_cb(_chinfo_name_ta, chinfo_ta_event_cb, LV_EVENT_ALL, NULL);
 
+  // Delete channel: destructive button + confirm modal.
+  lv_obj_t* delb = lv_btn_create(_chinfo_body);
+  lv_obj_set_width(delb, LV_PCT(100));
+  lv_obj_set_style_bg_color(delb, lv_color_hex(UI_DANGER), 0);
+  lv_obj_add_event_cb(delb, chinfo_delete_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* dchl = lv_label_create(delb);
+  lv_label_set_text(dchl, LV_SYMBOL_TRASH " Delete channel");
+  lv_obj_center(dchl);
+
   _chinfo_kb = lv_keyboard_create(_chinfo_screen);
   lv_obj_add_event_cb(_chinfo_kb, chinfo_kb_event_cb, LV_EVENT_ALL, NULL);
   lv_obj_add_flag(_chinfo_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::chinfo_delete_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->showDeleteChannelConfirm();
+}
+// Confirm modal for deleting the viewed channel.
+void UITask::showDeleteChannelConfirm() {
+  if (!_delch_popup) {
+    lv_obj_t* card = makeModalCard(&_delch_popup, NULL);
+    lv_obj_t* w = lv_label_create(card);
+    lv_label_set_long_mode(w, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(w, LV_PCT(100));
+    lv_obj_set_style_text_color(w, lv_color_hex(UI_FG_STRONG), 0);
+    lv_label_set_text(w, "Delete this channel? This can't be undone.");
+    lv_obj_t* btns = lv_obj_create(card);
+    lv_obj_remove_style_all(btns);
+    lv_obj_set_width(btns, LV_PCT(100));
+    lv_obj_set_height(btns, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_column(btns, 8, 0);
+    lv_obj_clear_flag(btns, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t* cancel = lv_btn_create(btns);
+    lv_obj_add_event_cb(cancel, delch_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(cancel), "Cancel");
+    lv_obj_t* del = lv_btn_create(btns);
+    lv_obj_set_style_bg_color(del, lv_color_hex(UI_DANGER), 0);
+    lv_obj_add_event_cb(del, delch_confirm_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(del), "Delete");
+  }
+  lv_obj_clear_flag(_delch_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_delch_popup);
+}
+void UITask::delch_cancel_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance && _instance->_delch_popup) lv_obj_add_flag(_instance->_delch_popup, LV_OBJ_FLAG_HIDDEN);
+}
+void UITask::delch_confirm_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::RemoveChannel;
+  memcpy(c.path, _instance->_chinfo_secret, sizeof(_instance->_chinfo_secret));   // identity = secret
+  c.path_len = sizeof(_instance->_chinfo_secret);
+  mproxy::postCommand(c);
+  if (_instance->_delch_popup) lv_obj_add_flag(_instance->_delch_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_scr_load(_instance->_chinfo_return_screen ? _instance->_chinfo_return_screen : _instance->_home_screen);
+  _instance->showToast("Channel deleted");
 }
 
 void UITask::populateChannelInfo() {

@@ -215,6 +215,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _cinfo_outpath_row;
   lv_obj_t*       _cinfo_delete_btn;    // "Delete contact" (view mode only)
   lv_obj_t*       _delc_popup;          // delete-contact confirm modal
+  lv_obj_t*       _delch_popup;         // delete-channel confirm modal
   // Add-mode extras (shown only when _cinfo_mode == CINFO_ADD): a header Save
   // button, an editable Key field (manual entry; hidden when prefilled), and an
   // inline error line. In view-mode the key lives in the hero (read-only popup).
@@ -618,6 +619,10 @@ class UITask : public AbstractUITask {
   static void chinfo_ta_event_cb(lv_event_t* e);
   static void chinfo_kb_event_cb(lv_event_t* e);
   static void chinfo_key_cb(lv_event_t* e);   // hero key -> full secret popup
+  static void chinfo_delete_cb(lv_event_t* e);
+  void        showDeleteChannelConfirm();
+  static void delch_cancel_cb(lv_event_t* e);
+  static void delch_confirm_cb(lv_event_t* e);
   void      populateContactInfo();
   void      applyCinfoMode();           // show/hide widgets for view vs add mode
   void      refreshCinfoHero();         // hero avatar/title/key from current state
@@ -874,7 +879,7 @@ public:
       _cinfo_outpath(NULL), _cinfo_kb(NULL), _cinfo_active_ta(NULL),
       _cinfo_actions(NULL), _cinfo_pos_field(NULL), _cinfo_type_field(NULL),
       _cinfo_lh_field(NULL), _cinfo_tel_field(NULL), _cinfo_hops_row(NULL), _cinfo_outpath_row(NULL),
-      _cinfo_delete_btn(NULL), _delc_popup(NULL),
+      _cinfo_delete_btn(NULL), _delc_popup(NULL), _delch_popup(NULL),
       _cinfo_header_title(NULL), _cinfo_save_btn(NULL), _cinfo_key_field(NULL),
       _cinfo_key_ta(NULL), _cinfo_err(NULL),
       _chinfo_screen(NULL), _chinfo_body(NULL), _chinfo_avatar(NULL), _chinfo_avatar_lbl(NULL),
