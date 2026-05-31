@@ -31,6 +31,10 @@ static void sanitizeForFont(const char* in, char* out, size_t cap);
 static bool containsCI(const char* hay, const char* needle);
 static void firstGrapheme(const char* in, char* out, size_t cap);  // first UTF-8 codepoint (avatar glyph)
 static const lv_font_t* withEmoji(const lv_font_t* base);  // base font + emoji/unicode fallback
+static lv_obj_t* attachClearX(lv_obj_t* ta);  // floating ✕ in a textarea; shown only when it has text
+extern const lv_font_t meshcore_icons_16;     // generated icon font (FontAwesome magnifier 0xF002)
+#define MC_SYMBOL_SEARCH "\xEF\x80\x82"        // U+F002 magnifying-glass (in meshcore_icons_16)
+static void attachSearchIcon(lv_obj_t* ta);    // left-aligned magnifier glyph in a search field
 
 // Type ramp: one place that maps a text role to a size (all emoji/unicode-capable).
 // hero=page name, title=screen header, heading=section/dialog title, body=default,
@@ -187,6 +191,7 @@ lv_obj_t* UITask::makeSelTextarea(lv_obj_t* parent) {
   lv_obj_t* ta = mk(parent);
   lv_textarea_set_text_selection(ta, true);
   lv_obj_add_event_cb(ta, UITask::ta_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
+  attachClearX(ta);   // one-click clear ✕ (shown only when the field has text)
   return ta;
 }
 
@@ -411,7 +416,8 @@ lv_obj_t* UITask::buildHomeScreen() {
 
   _contacts_search_ta = makeSelTextarea(cctl);
   lv_textarea_set_one_line(_contacts_search_ta, true); lv_obj_add_event_cb(_contacts_search_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
-  lv_textarea_set_placeholder_text(_contacts_search_ta, LV_SYMBOL_EYE_OPEN " Search");
+  lv_textarea_set_placeholder_text(_contacts_search_ta, "Search");
+  attachSearchIcon(_contacts_search_ta);
   lv_obj_set_flex_grow(_contacts_search_ta, 1);
   lv_obj_set_style_pad_ver(_contacts_search_ta, 5, 0);   // shorter input (default theme pad is tall)
   lv_obj_set_style_text_font(_contacts_search_ta, &lv_font_montserrat_14, 0);
@@ -757,7 +763,8 @@ void UITask::fillLeadRow(ContactListView& lv, ContactRow& w) {
     lv_obj_set_style_text_color(w.avatar_lbl, lv_color_hex(FG_HEX), 0);
     lv_label_set_text(w.name, "New Contact");
     lv_obj_set_style_text_color(w.name, lv_color_hex(UI_ACCENT), 0);
-    lv_label_set_text(w.seen, "");
+    char cnt[16]; snprintf(cnt, sizeof(cnt), "%d/%d", mproxy::getNumContacts(), MAX_CONTACTS);
+    lv_label_set_text(w.seen, cnt);   // contact count / cap, right-aligned
   } else {  // LEAD_SELF: our own identity, like a contact card
     lv_obj_set_style_border_width(w.avatar, 0, 0);   // clear the New-Contact ring (slot reuse)
     lv_obj_set_style_text_color(w.avatar_lbl, lv_color_hex(UI_ON_COLOR), 0);   // letter back to white
@@ -1091,6 +1098,12 @@ void UITask::rebuildChannelsList() {
   if (!_channels_list) return;
   lv_obj_clean(_channels_list);
 
+  int chan_count = 0;   // named (non-empty) channel slots, for the "n/limit" badge
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    ChannelDetails c;
+    if (mproxy::getChannel(i, c) && c.name[0] != 0) chan_count++;
+  }
+
   // "+ New channel" entry: a hollow white circle ring (an empty channel waiting to be
   // created), matching the New Contact placeholder. Same row layout as the channel
   // rows below, so the two pages read consistently. (Channels are circles overall;
@@ -1132,6 +1145,12 @@ void UITask::rebuildChannelsList() {
     lv_obj_set_style_text_font(nm, fontBody(), 0);
     lv_obj_set_style_text_color(nm, lv_color_hex(UI_ACCENT), 0);
     lv_label_set_text(nm, "New channel");
+
+    lv_obj_t* cl = lv_label_create(row);   // channel count / cap, right-aligned (no flex-grow)
+    lv_obj_set_style_text_font(cl, fontBody(), 0);
+    lv_obj_set_style_text_color(cl, lv_color_hex(DIM_HEX), 0);
+    char cc[16]; snprintf(cc, sizeof(cc), "%d/%d", chan_count, MAX_GROUP_CHANNELS);
+    lv_label_set_text(cl, cc);
   }
 
   // getChannel() returns true for any in-range slot incl. empty ones, so skip
@@ -1410,7 +1429,8 @@ void UITask::buildContactPickerScreen() {
   lv_obj_set_flex_align(srow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   _pick_search_ta = makeSelTextarea(srow);
   lv_textarea_set_one_line(_pick_search_ta, true); lv_obj_add_event_cb(_pick_search_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
-  lv_textarea_set_placeholder_text(_pick_search_ta, LV_SYMBOL_EYE_OPEN " Search");
+  lv_textarea_set_placeholder_text(_pick_search_ta, "Search");
+  attachSearchIcon(_pick_search_ta);
   lv_obj_set_flex_grow(_pick_search_ta, 1);
   lv_obj_set_style_pad_ver(_pick_search_ta, 5, 0);
   lv_obj_set_style_text_font(_pick_search_ta, &lv_font_montserrat_14, 0);
@@ -2697,6 +2717,7 @@ void UITask::openChat(const char* peer_name) {
     _chat_search_ta = makeSelTextarea(_chat_search_bar);
     lv_textarea_set_one_line(_chat_search_ta, true); lv_obj_add_event_cb(_chat_search_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
     lv_textarea_set_placeholder_text(_chat_search_ta, "Search messages");
+    attachSearchIcon(_chat_search_ta);
     lv_obj_set_flex_grow(_chat_search_ta, 1);
     lv_obj_add_event_cb(_chat_search_ta, chat_search_ta_event_cb, LV_EVENT_ALL, NULL);
 
@@ -5052,11 +5073,59 @@ void UITask::clistNewContact() {
   if (_instance) _instance->openNewContact(_instance->_home_screen);
 }
 
+// One-click clear ✕ for a textarea: a small floating glyph at the right edge (in
+// reserved padding), shown only when the field has text. The ✕ stores its textarea
+// in user_data; the textarea stores the ✕ in *its* user_data so the value-changed
+// handler (and attachInlineEye, for password fields) can find it.
+static void clearx_click_cb(lv_event_t* e) {
+  lv_obj_t* x = lv_event_get_target(e);
+  lv_obj_t* ta = (lv_obj_t*)lv_obj_get_user_data(x);
+  if (ta) lv_textarea_set_text(ta, "");   // clears + fires VALUE_CHANGED -> ✕ hides itself
+}
+static void clearx_update_cb(lv_event_t* e) {
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_obj_t* x = (lv_obj_t*)lv_obj_get_user_data(ta);
+  if (!x) return;
+  const char* t = lv_textarea_get_text(ta);
+  if (t && t[0]) lv_obj_clear_flag(x, LV_OBJ_FLAG_HIDDEN);
+  else           lv_obj_add_flag(x, LV_OBJ_FLAG_HIDDEN);
+}
+// Left-aligned magnifier glyph inside a search field (decorative; reserves pad_left).
+static void attachSearchIcon(lv_obj_t* ta) {
+  lv_obj_set_style_pad_left(ta, 26, 0);                  // reserve room so text starts right of the icon
+  lv_obj_t* ic = lv_label_create(ta);
+  lv_label_set_text(ic, MC_SYMBOL_SEARCH);
+  lv_obj_set_style_text_font(ic, &meshcore_icons_16, 0);
+  lv_obj_set_style_text_color(ic, lv_color_hex(DIM_HEX), 0);
+  lv_obj_add_flag(ic, LV_OBJ_FLAG_FLOATING);
+  lv_obj_clear_flag(ic, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_align(ic, LV_ALIGN_LEFT_MID, -22, 0);           // sit in the left padding (not over the text)
+}
+
+static lv_obj_t* attachClearX(lv_obj_t* ta) {
+  lv_obj_set_style_pad_right(ta, 22, 0);                 // reserve room so text clears the ✕
+  lv_obj_t* x = lv_label_create(ta);
+  lv_label_set_text(x, LV_SYMBOL_CLOSE);
+  lv_obj_set_style_text_font(x, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(x, lv_color_hex(DIM_HEX), 0);
+  lv_obj_add_flag(x, LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN);
+  lv_obj_align(x, LV_ALIGN_RIGHT_MID, 18, 0);            // flush to the edge, in the padding
+  lv_obj_set_user_data(x, ta);
+  lv_obj_set_user_data(ta, x);
+  lv_obj_add_event_cb(x, clearx_click_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(ta, clearx_update_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  return x;
+}
+
 // Add an inline show/hide eye to a one-line textarea: hidden (password) by default,
 // the small mono eye sits ~2px from the right edge (in reserved padding so text clears).
 lv_obj_t* UITask::attachInlineEye(lv_obj_t* ta) {
   lv_textarea_set_password_mode(ta, true);
-  lv_obj_set_style_pad_right(ta, 20, 0);
+  // makeSelTextarea already added a clear ✕ at the right edge; make room for both and
+  // shift the ✕ left so the eye sits at the far right.
+  lv_obj_t* clearx = (lv_obj_t*)lv_obj_get_user_data(ta);
+  lv_obj_set_style_pad_right(ta, clearx ? 40 : 20, 0);
+  if (clearx) lv_obj_align(clearx, LV_ALIGN_RIGHT_MID, -2, 0);
   lv_obj_t* eye = lv_label_create(ta);
   lv_label_set_text(eye, LV_SYMBOL_EYE_CLOSE);          // closed = currently hidden
   lv_obj_set_style_text_font(eye, &lv_font_montserrat_14, 0);
