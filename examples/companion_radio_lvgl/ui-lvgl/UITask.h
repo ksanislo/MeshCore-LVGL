@@ -184,6 +184,7 @@ class UITask : public AbstractUITask {
   enum { CINFO_VIEW = 0, CINFO_ADD = 1 };
   lv_obj_t*       _cinfo_screen;
   lv_obj_t*       _cinfo_body;          // scrollable form
+  lv_obj_t*       _cinfo_hero;          // hero card (selectable -> long-press Copy contact)
   lv_obj_t*       _cinfo_title;
   lv_obj_t*       _cinfo_avatar;        // hero avatar circle on the Contact Info page
   lv_obj_t*       _cinfo_avatar_lbl;    // grapheme / type glyph inside it
@@ -240,6 +241,7 @@ class UITask : public AbstractUITask {
   // hero/field widgets; the channel is identified by its 32-byte secret.
   lv_obj_t*       _chinfo_screen;
   lv_obj_t*       _chinfo_body;
+  lv_obj_t*       _chinfo_hero;         // channel hero card (selectable -> long-press Copy link)
   lv_obj_t*       _chinfo_avatar;
   lv_obj_t*       _chinfo_avatar_lbl;
   lv_obj_t*       _chinfo_title;
@@ -274,6 +276,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_profile_avatar_lbl;
   lv_obj_t*       _set_profile_name;
   lv_obj_t*       _set_profile_key;
+  lv_obj_t*       _prof_hero;              // owner hero card (selectable -> long-press Copy)
   lv_obj_t*       _prof_avatar;            // big owner hero (full-screen Profile page)
   lv_obj_t*       _prof_avatar_lbl;
   lv_obj_t*       _prof_name;
@@ -722,6 +725,9 @@ private:
   // ----- Text-selection controller -----
   void      makeLabelSelectable(lv_obj_t* lbl);   // wire a chat-text label for selection
   void      makeCardSelectable(lv_obj_t* card);   // wire a contact card for atomic selection
+  void      makeHeroCopyable(lv_obj_t* hero);      // hero -> selectable contact card (long-press Copy)
+  void      setHeroTarget(lv_obj_t* hero, const uint8_t* pubkey, uint8_t type, const char* name);
+  void      setHeroChannelTarget(lv_obj_t* hero, const char* name, const uint8_t* secret, int seclen);
   void      ensureSelHandles();                    // build the two triangle handles (once)
   void      beginLabelSel(lv_obj_t* lbl, lv_point_t abs_pt);
   void      selectWordAt(lv_obj_t* lbl, lv_point_t abs_pt);   // double-tap word select
@@ -911,7 +917,7 @@ public:
       _chat_is_channel(false), _chat_channel_idx(-1), _chat_contact_type(0),
       _chat_search_bar(NULL), _chat_search_ta(NULL), _search_active(false),
       _sending_lbl(NULL), _dot_frame(0), _anim_ms(0),
-      _cinfo_screen(NULL), _cinfo_body(NULL), _cinfo_title(NULL),
+      _cinfo_screen(NULL), _cinfo_body(NULL), _cinfo_hero(NULL), _cinfo_title(NULL),
       _cinfo_avatar(NULL), _cinfo_avatar_lbl(NULL), _cinfo_realname(NULL), _cinfo_key(NULL),
       _cinfo_fav_lbl(NULL), _cinfo_name_ta(NULL), _cinfo_keyfull(NULL),
       _cinfo_lat_ta(NULL), _cinfo_lon_ta(NULL), _cinfo_type_lbl(NULL),
@@ -922,7 +928,7 @@ public:
       _cinfo_delete_btn(NULL), _delc_popup(NULL), _delch_popup(NULL),
       _cinfo_header_title(NULL), _cinfo_save_btn(NULL), _cinfo_key_field(NULL),
       _cinfo_key_ta(NULL), _cinfo_err(NULL),
-      _chinfo_screen(NULL), _chinfo_body(NULL), _chinfo_avatar(NULL), _chinfo_avatar_lbl(NULL),
+      _chinfo_screen(NULL), _chinfo_body(NULL), _chinfo_hero(NULL), _chinfo_avatar(NULL), _chinfo_avatar_lbl(NULL),
       _chinfo_title(NULL), _chinfo_key(NULL), _chinfo_name_ta(NULL), _chinfo_kb(NULL),
       _chinfo_active_ta(NULL), _chinfo_return_screen(NULL),
       _cinfo_mode(CINFO_VIEW), _cinfo_addkey_locked(false), _cinfo_haskey(false),
@@ -930,7 +936,7 @@ public:
       _menu_popup(NULL), _menu_list(NULL), _toast(NULL), _path_return_screen(NULL),
       _path_screen(NULL), _path_size_dd(NULL), _path_ta(NULL), _path_kb(NULL), _path_err(NULL),
       _set_profile_avatar(NULL), _set_profile_avatar_lbl(NULL), _set_profile_name(NULL), _set_profile_key(NULL),
-      _prof_avatar(NULL), _prof_avatar_lbl(NULL), _prof_name(NULL), _prof_key(NULL),
+      _prof_hero(NULL), _prof_avatar(NULL), _prof_avatar_lbl(NULL), _prof_name(NULL), _prof_key(NULL),
       _profile_screen(NULL), _profile_body(NULL), _profile_kb(NULL), _profile_return_screen(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),

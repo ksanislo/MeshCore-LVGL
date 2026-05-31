@@ -2300,7 +2300,11 @@ static bool textHasRichToken(const char* text) {
 
 // Heap target stashed on a contact card so a tap knows which contact it is (a
 // message may contain several cards). Freed on the card's LV_EVENT_DELETE.
-struct CardTarget { uint8_t pubkey[PUB_KEY_SIZE]; uint8_t type; char name[CHAT_PEER_NAME_MAX]; };
+struct CardTarget {
+  uint8_t pubkey[PUB_KEY_SIZE]; uint8_t type; char name[CHAT_PEER_NAME_MAX];
+  bool    is_channel;          // true -> copy as a channel link (uses secret/seclen, not pubkey)
+  uint8_t secret[32]; uint8_t seclen;
+};
 struct ChanCardTarget { char name[CHAT_PEER_NAME_MAX]; uint8_t secret[32]; uint8_t seclen; };
 static void chan_card_free_cb(lv_event_t* e) {
   ChanCardTarget* t = (ChanCardTarget*)lv_obj_get_user_data(lv_event_get_target(e));
@@ -2411,8 +2415,10 @@ void UITask::buildContactCard(lv_obj_t* parent, const ChatMessage* m,
   lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
   CardTarget* ct = (CardTarget*)lv_mem_alloc(sizeof(CardTarget));   // freed on card delete
   if (ct) {
+    memset(ct, 0, sizeof(*ct));
     memcpy(ct->pubkey, pubkey, PUB_KEY_SIZE);
     ct->type = type;
+    ct->is_channel = false;
     strncpy(ct->name, name, sizeof(ct->name) - 1); ct->name[sizeof(ct->name) - 1] = 0;
     lv_obj_set_user_data(card, ct);
     lv_obj_add_event_cb(card, card_free_cb, LV_EVENT_DELETE, NULL);
@@ -3710,8 +3716,15 @@ static lv_obj_t* makeField(lv_obj_t* parent, const char* caption) {
 // "<pub..key>" line. Shared by the Contact Info page and the Settings > Profile
 // page so every detail page looks identical. Out-params expose the pieces for
 // populate; keyCb handles a tap on the key line (opens the full-key popup).
+// keyCb != nullptr  -> "channel" hero: passive card, the key line taps to a key popup.
+// keyCb == nullptr  -> "contact" hero: the whole card is selectable like a chat
+//   contact card (long-press -> Copy menu). The caller wires makeCardSelectable +
+//   a CardTarget; we just leave the card clickable and give it the same 1px border
+//   the selection restores to, so the look is identical before/after selecting.
+// heroOut (optional) returns the card so the caller can wire/refresh it.
 static void makeHeroCard(lv_obj_t* parent, lv_obj_t** avatarOut, lv_obj_t** avatarLblOut,
-                         lv_obj_t** nameOut, lv_obj_t** keyOut, lv_event_cb_t keyCb) {
+                         lv_obj_t** nameOut, lv_obj_t** keyOut, lv_event_cb_t keyCb,
+                         lv_obj_t** heroOut = nullptr) {
   lv_obj_t* hero = lv_obj_create(parent);
   lv_obj_remove_style_all(hero);
   lv_obj_set_width(hero, LV_PCT(100));
@@ -3724,7 +3737,14 @@ static void makeHeroCard(lv_obj_t* parent, lv_obj_t** avatarOut, lv_obj_t** avat
   lv_obj_set_flex_flow(hero, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(hero, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_clear_flag(hero, LV_OBJ_FLAG_SCROLLABLE);
-  makePassive(hero);   // tap the card (except the key line) falls through to dismiss kb
+  bool selectable = (keyCb == nullptr);
+  if (selectable) {
+    lv_obj_add_flag(hero, LV_OBJ_FLAG_CLICKABLE);                       // selection needs press events
+    lv_obj_set_style_border_color(hero, lv_color_hex(UI_BORDER), 0);    // matches the selection-restore look
+    lv_obj_set_style_border_width(hero, 1, 0);
+  } else {
+    makePassive(hero);   // tap the card (except the key line) falls through to dismiss kb
+  }
 
   lv_obj_t* av = lv_obj_create(hero);
   lv_obj_remove_style_all(av);
@@ -3755,10 +3775,15 @@ static void makeHeroCard(lv_obj_t* parent, lv_obj_t** avatarOut, lv_obj_t** avat
   lv_label_set_long_mode(ky, LV_LABEL_LONG_DOT);
   lv_obj_set_style_text_color(ky, lv_color_hex(DIM_HEX), 0);
   lv_obj_set_style_text_font(ky, fontCaption(), 0);
-  lv_obj_add_flag(ky, LV_OBJ_FLAG_CLICKABLE);   // long-press -> copy contact (channel hero: key popup)
-  lv_obj_add_event_cb(ky, keyCb, LV_EVENT_LONG_PRESSED, NULL);
+  if (selectable) {
+    lv_obj_clear_flag(ky, LV_OBJ_FLAG_CLICKABLE);     // whole card is the selection target
+  } else {
+    lv_obj_add_flag(ky, LV_OBJ_FLAG_CLICKABLE);       // channel hero: tap the key line -> key popup
+    lv_obj_add_event_cb(ky, keyCb, LV_EVENT_CLICKED, NULL);
+  }
 
   *avatarOut = av; *avatarLblOut = avl; *nameOut = nm; *keyOut = ky;
+  if (heroOut) *heroOut = hero;
 }
 
 void UITask::buildContactInfoScreen() {
@@ -3793,7 +3818,8 @@ void UITask::buildContactInfoScreen() {
   // with the Settings > Profile page so all detail pages match. Branding
   // (name-seeded color / type glyph) is applied in populateContactInfo().
   makeHeroCard(_cinfo_body, &_cinfo_avatar, &_cinfo_avatar_lbl, &_cinfo_title,
-               &_cinfo_key, cinfo_key_cb);
+               &_cinfo_key, nullptr, &_cinfo_hero);   // selectable like a chat contact card
+  makeHeroCopyable(_cinfo_hero);   // long-press -> Copy menu (target filled in refreshCinfoHero)
 
   // action row (Fav / Telem / Share -- view-mode only)
   lv_obj_t* actions = lv_obj_create(_cinfo_body);
@@ -4061,9 +4087,11 @@ void UITask::refreshCinfoHero() {
     char hex[2 * PUB_KEY_SIZE + 1];
     mesh::Utils::toHex(hex, c->id.pub_key, PUB_KEY_SIZE);
     char ktrunc[32];
-    snprintf(ktrunc, sizeof(ktrunc), "<%.6s...%.6s>  " LV_SYMBOL_COPY, hex, hex + 2 * PUB_KEY_SIZE - 6);
+    snprintf(ktrunc, sizeof(ktrunc), "<%.6s...%.6s>", hex, hex + 2 * PUB_KEY_SIZE - 6);
     lv_label_set_text(_cinfo_key, ktrunc);
   }
+  // Keep the long-press Copy target in sync with the contact being viewed.
+  setHeroTarget(_cinfo_hero, c->id.pub_key, c->type, shownbuf);
 }
 
 void UITask::populateContactInfo() {
@@ -4874,7 +4902,8 @@ void UITask::buildChannelInfoScreen() {
   lv_obj_set_style_pad_row(_chinfo_body, 8, 0);
   lv_obj_set_flex_flow(_chinfo_body, LV_FLEX_FLOW_COLUMN);
 
-  makeHeroCard(_chinfo_body, &_chinfo_avatar, &_chinfo_avatar_lbl, &_chinfo_title, &_chinfo_key, chinfo_key_cb);
+  makeHeroCard(_chinfo_body, &_chinfo_avatar, &_chinfo_avatar_lbl, &_chinfo_title, &_chinfo_key, nullptr, &_chinfo_hero);
+  makeHeroCopyable(_chinfo_hero);   // long-press -> Copy menu (channel link; target set in populateChannelInfo)
 
   lv_obj_t* fn = makeField(_chinfo_body, "Name");
   _chinfo_name_ta = makeSelTextarea(fn);
@@ -4959,8 +4988,9 @@ void UITask::populateChannelInfo() {
   int slen = (memcmp(&_chinfo_secret[16], zeros, 16) == 0) ? 16 : 32;   // 128- vs 256-bit
   char hex[2 * 32 + 1]; mesh::Utils::toHex(hex, _chinfo_secret, slen);
   char ktrunc[40];
-  snprintf(ktrunc, sizeof(ktrunc), "<%.6s...%.6s>  " LV_SYMBOL_COPY, hex, hex + 2 * slen - 6);
+  snprintf(ktrunc, sizeof(ktrunc), "<%.6s...%.6s>", hex, hex + 2 * slen - 6);
   lv_label_set_text(_chinfo_key, ktrunc);
+  setHeroChannelTarget(_chinfo_hero, _chinfo_name, _chinfo_secret, slen);   // long-press Copy target
 }
 
 void UITask::openChannelInfo(int channel_idx, lv_obj_t* return_screen) {
@@ -5993,7 +6023,8 @@ void UITask::buildProfileScreen() {
   lv_obj_set_flex_flow(_profile_body, LV_FLEX_FLOW_COLUMN);
 
   // Big hero card (avatar + name over the tappable "<pub..key>"), like any contact.
-  makeHeroCard(_profile_body, &_prof_avatar, &_prof_avatar_lbl, &_prof_name, &_prof_key, profile_key_cb);
+  makeHeroCard(_profile_body, &_prof_avatar, &_prof_avatar_lbl, &_prof_name, &_prof_key, nullptr, &_prof_hero);
+  makeHeroCopyable(_prof_hero);   // long-press -> Copy menu (target filled in the profile refresh)
 
   // ===== Public Info (owner-only edit options) =====
   addSettingsSection(_profile_body, "Public Info");
@@ -6551,16 +6582,16 @@ void UITask::updateOwnerProfile() {
   else           plain[0] = 0;
   lv_label_set_text(_set_profile_key, plain);
 
-  // Profile page hero: same owner identity, but its key line is tappable (full key
-  // + copy), so it gets the copy glyph.
+  // Profile page hero: same owner identity; long-press the card to copy (no glyph).
   if (_prof_name) {
     char snip[32];
-    if (keyhex[0]) snprintf(snip, sizeof(snip), "<%.6s...%.6s>  " LV_SYMBOL_COPY, keyhex, keyhex + 2 * PUB_KEY_SIZE - 6);
+    if (keyhex[0]) snprintf(snip, sizeof(snip), "<%.6s...%.6s>", keyhex, keyhex + 2 * PUB_KEY_SIZE - 6);
     else           snip[0] = 0;
     lv_label_set_text(_prof_name, clean);
     lv_label_set_text(_prof_avatar_lbl, g[0] ? g : "?");
     lv_obj_set_style_bg_color(_prof_avatar, lv_color_hex(nameColor(who)), 0);
     lv_label_set_text(_prof_key, snip);
+    if (mproxy::selfPubKey()) setHeroTarget(_prof_hero, mproxy::selfPubKey(), ADV_TYPE_CHAT, clean);
   }
 }
 
@@ -6905,6 +6936,43 @@ void UITask::makeCardSelectable(lv_obj_t* card) {
   lv_obj_add_event_cb(card, sel_event_cb, LV_EVENT_ALL, NULL);
 }
 
+// Make a hero card copy like a chat contact card: a CardTarget in its user_data
+// (freed on delete) + the shared selection wiring. setHeroTarget() keeps the
+// target current as the viewed contact / owner identity changes.
+void UITask::makeHeroCopyable(lv_obj_t* hero) {
+  if (!hero) return;
+  CardTarget* ct = (CardTarget*)lv_mem_alloc(sizeof(CardTarget));
+  if (ct) {
+    memset(ct, 0, sizeof(*ct));
+    lv_obj_set_user_data(hero, ct);
+    lv_obj_add_event_cb(hero, card_free_cb, LV_EVENT_DELETE, NULL);
+  }
+  makeCardSelectable(hero);
+}
+void UITask::setHeroTarget(lv_obj_t* hero, const uint8_t* pubkey, uint8_t type, const char* name) {
+  if (!hero) return;
+  CardTarget* ct = (CardTarget*)lv_obj_get_user_data(hero);
+  if (!ct) return;
+  ct->is_channel = false;
+  memcpy(ct->pubkey, pubkey, PUB_KEY_SIZE);
+  ct->type = type;
+  strncpy(ct->name, name ? name : "", sizeof(ct->name) - 1);
+  ct->name[sizeof(ct->name) - 1] = 0;
+}
+// Channel variant: copy resolves to a meshcore://channel/add link (name + secret).
+void UITask::setHeroChannelTarget(lv_obj_t* hero, const char* name, const uint8_t* secret, int seclen) {
+  if (!hero) return;
+  CardTarget* ct = (CardTarget*)lv_obj_get_user_data(hero);
+  if (!ct) return;
+  ct->is_channel = true;
+  if (seclen > (int)sizeof(ct->secret)) seclen = sizeof(ct->secret);
+  memset(ct->secret, 0, sizeof(ct->secret));
+  memcpy(ct->secret, secret, seclen);
+  ct->seclen = (uint8_t)seclen;
+  strncpy(ct->name, name ? name : "", sizeof(ct->name) - 1);
+  ct->name[sizeof(ct->name) - 1] = 0;
+}
+
 void UITask::ensureSelHandles() {
   if (_sel.h_start) return;
   for (int i = 0; i < 2; i++) {
@@ -7205,7 +7273,16 @@ void UITask::showSelMenu() {
 void UITask::copySelection() {
   if (_sel.kind == SEL_CARD && _sel.target) {
     const CardTarget* t = (const CardTarget*)lv_obj_get_user_data(_sel.target);
-    if (t) {
+    if (t && t->is_channel) {
+      // Copy a channel as a meshcore://channel/add link -> pastes into chat as a
+      // tappable "Join channel" chip (mirrors how a contact pastes as a card).
+      char hex[2 * 32 + 1]; mesh::Utils::toHex(hex, t->secret, t->seclen);
+      char ename[3 * CHAT_PEER_NAME_MAX + 1]; urlEncode(t->name, ename, sizeof(ename));
+      char uri[64 + sizeof(ename) + 2 * 32];
+      snprintf(uri, sizeof(uri), "meshcore://channel/add?name=%s&secret=%s", ename, hex);
+      clipSet(CLIP_PLAIN, uri, nullptr, nullptr, 0);
+      showToast("Channel copied");
+    } else if (t) {
       char hex[2 * PUB_KEY_SIZE + 1]; mesh::Utils::toHex(hex, t->pubkey, PUB_KEY_SIZE);
       char ref[2 * PUB_KEY_SIZE + 48];
       snprintf(ref, sizeof(ref), "<%s:%u:%s>", hex, (unsigned)t->type, t->name);
