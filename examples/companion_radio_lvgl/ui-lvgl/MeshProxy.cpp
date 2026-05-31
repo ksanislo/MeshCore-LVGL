@@ -315,6 +315,22 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
     case CmdKind::SetMute:
       mesh.setMute(cmd.name, cmd.muted);   // persists to /mutes
       break;
+    case CmdKind::RemoveContact:
+      mesh.removeContactAndPersist(cmd.pubkey);
+      break;
+    case CmdKind::RemoveChannel: {
+      ChannelDetails ch;
+      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+        if (!mesh.getChannel(i, ch) || ch.name[0] == 0) continue;
+        if (memcmp(ch.channel.secret, cmd.path, sizeof(ch.channel.secret)) == 0) {
+          ChannelDetails empty; memset(&empty, 0, sizeof(empty));   // name[0]=0 -> empty slot
+          mesh.setChannel(i, empty);
+          mesh.saveChannels();
+          break;
+        }
+      }
+      break;
+    }
   }
 }
 

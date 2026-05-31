@@ -62,6 +62,8 @@ enum class CmdKind : uint8_t {
   AutoLogin,    // pubkey: log in using a saved credential if one exists (silent)
   SetRadio,     // apply prefs.radio_off: sleep the radio (off) or re-enable it (on) + persist
   SetMute,      // mute/unmute a conversation: name = conv-key, muted = on/off; persists
+  RemoveContact,// delete a contact: pubkey
+  RemoveChannel,// delete a channel: path = its 32-byte secret (identity)
 };
 
 struct MeshCmd {

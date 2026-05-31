@@ -215,6 +215,7 @@ public:
   void saveChannels() { _store->saveChannels(this); }  // public: on-device UI adds channels
   // Per-conversation mute: a set of UI-defined conversation keys (pubkey/secret hex,
   // <=15 chars). The backend treats them as opaque strings and persists to /mutes.
+  bool   removeContactAndPersist(const uint8_t* pubkey);  // delete a contact (RAM + blob + /contacts3)
   void   loadMutes();                      // from /mutes at boot
   void   loadUnmutes();                    // from /unmutes at boot (explicit-unmute set)
   bool   isMuted(const char* key) const;   // explicitly muted

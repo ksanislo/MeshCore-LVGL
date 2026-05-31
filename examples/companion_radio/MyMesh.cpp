@@ -2260,6 +2260,16 @@ static void muteSetDel(char set[][20], int& n, const char* key) {
   }
 }
 
+// Delete a contact by pubkey: remove from RAM, drop its stored blob, rewrite /contacts3.
+// Mirrors the serial CMD_REMOVE_CONTACT path; used by the LVGL UI's delete button.
+bool MyMesh::removeContactAndPersist(const uint8_t* pubkey) {
+  ContactInfo* c = lookupContactByPubKey(pubkey, PUB_KEY_SIZE);
+  if (!c || !removeContact(*c)) return false;
+  _store->deleteBlobByKey(pubkey, PUB_KEY_SIZE);
+  saveContacts();
+  return true;
+}
+
 void MyMesh::loadMutes() {
   size_t n = _store->loadMutes((uint8_t*)_mutes, sizeof(_mutes));
   _num_mutes = (int)(n / sizeof(_mutes[0]));

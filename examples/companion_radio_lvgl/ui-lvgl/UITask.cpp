@@ -3767,6 +3767,15 @@ void UITask::buildContactInfoScreen() {
   lv_obj_t* epl = lv_label_create(ep);
   lv_label_set_text(epl, LV_SYMBOL_EDIT);
 
+  // Delete contact (view mode only): destructive button + confirm modal.
+  _cinfo_delete_btn = lv_btn_create(_cinfo_body);
+  lv_obj_set_width(_cinfo_delete_btn, LV_PCT(100));
+  lv_obj_set_style_bg_color(_cinfo_delete_btn, lv_color_hex(UI_DANGER), 0);
+  lv_obj_add_event_cb(_cinfo_delete_btn, cinfo_delete_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* dcl = lv_label_create(_cinfo_delete_btn);
+  lv_label_set_text(dcl, LV_SYMBOL_TRASH " Delete contact");
+  lv_obj_center(dcl);
+
   // keyboard (hidden) + toast
   _cinfo_kb = lv_keyboard_create(_cinfo_screen);
   lv_obj_add_event_cb(_cinfo_kb, cinfo_kb_event_cb, LV_EVENT_ALL, NULL);
@@ -3795,7 +3804,54 @@ void UITask::applyCinfoMode() {
   show(_cinfo_tel_field,    !add);
   show(_cinfo_hops_row,     !add);
   show(_cinfo_outpath_row,  !add);
+  show(_cinfo_delete_btn,   !add);
   if (add && _cinfo_err) lv_obj_add_flag(_cinfo_err, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::cinfo_delete_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->showDeleteContactConfirm();
+}
+// Confirm modal for deleting the viewed contact (explicit destructive button).
+void UITask::showDeleteContactConfirm() {
+  if (!_delc_popup) {
+    lv_obj_t* card = makeModalCard(&_delc_popup, NULL);   // explicit buttons; no tap-to-dismiss
+    lv_obj_t* w = lv_label_create(card);
+    lv_label_set_long_mode(w, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(w, LV_PCT(100));
+    lv_obj_set_style_text_color(w, lv_color_hex(UI_FG_STRONG), 0);
+    lv_label_set_text(w, "Delete this contact? This can't be undone.");
+    lv_obj_t* btns = lv_obj_create(card);
+    lv_obj_remove_style_all(btns);
+    lv_obj_set_width(btns, LV_PCT(100));
+    lv_obj_set_height(btns, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_column(btns, 8, 0);
+    lv_obj_clear_flag(btns, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t* cancel = lv_btn_create(btns);
+    lv_obj_add_event_cb(cancel, delc_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(cancel), "Cancel");
+    lv_obj_t* del = lv_btn_create(btns);
+    lv_obj_set_style_bg_color(del, lv_color_hex(UI_DANGER), 0);
+    lv_obj_add_event_cb(del, delc_confirm_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(del), "Delete");
+  }
+  lv_obj_clear_flag(_delc_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_delc_popup);
+}
+void UITask::delc_cancel_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance && _instance->_delc_popup) lv_obj_add_flag(_instance->_delc_popup, LV_OBJ_FLAG_HIDDEN);
+}
+void UITask::delc_confirm_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->postPubkeyCmd(mproxy::CmdKind::RemoveContact, _instance->_cinfo_pubkey);
+  if (_instance->_delc_popup) lv_obj_add_flag(_instance->_delc_popup, LV_OBJ_FLAG_HIDDEN);
+  _instance->_contacts_dirty = true;   // rebuild the list (snapshot will also bump)
+  lv_scr_load(_instance->_cinfo_return_screen ? _instance->_cinfo_return_screen : _instance->_home_screen);
+  _instance->showToast("Contact deleted");
 }
 
 // Refresh the hero (avatar + name + truncated key line) from current state. Used
