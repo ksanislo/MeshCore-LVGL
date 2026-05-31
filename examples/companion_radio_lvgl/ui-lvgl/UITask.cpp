@@ -4058,7 +4058,9 @@ void UITask::delc_confirm_cb(lv_event_t* e) {
   _instance->postPubkeyCmd(mproxy::CmdKind::RemoveContact, _instance->_cinfo_pubkey);
   if (_instance->_delc_popup) lv_obj_add_flag(_instance->_delc_popup, LV_OBJ_FLAG_HIDDEN);
   _instance->_contacts_dirty = true;   // rebuild the list (snapshot will also bump)
-  lv_scr_load(_instance->_cinfo_return_screen ? _instance->_cinfo_return_screen : _instance->_home_screen);
+  // Back to the Contacts list, not the deleted contact's chat (which no longer exists).
+  if (_instance->_tabview) lv_tabview_set_act(_instance->_tabview, 0, LV_ANIM_OFF);
+  lv_scr_load(_instance->_home_screen);
   _instance->showToast("Contact deleted");
 }
 
@@ -4972,7 +4974,10 @@ void UITask::delch_confirm_cb(lv_event_t* e) {
   c.path_len = sizeof(_instance->_chinfo_secret);
   mproxy::postCommand(c);
   if (_instance->_delch_popup) lv_obj_add_flag(_instance->_delch_popup, LV_OBJ_FLAG_HIDDEN);
-  lv_scr_load(_instance->_chinfo_return_screen ? _instance->_chinfo_return_screen : _instance->_home_screen);
+  _instance->_channels_pending = true;   // rebuild the list (the slot is now empty)
+  // Back to the Channels list, not the deleted channel's chat (which no longer exists).
+  if (_instance->_tabview) lv_tabview_set_act(_instance->_tabview, 1, LV_ANIM_OFF);
+  lv_scr_load(_instance->_home_screen);
   _instance->showToast("Channel deleted");
 }
 
