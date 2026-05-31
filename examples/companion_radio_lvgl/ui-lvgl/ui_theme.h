@@ -15,44 +15,81 @@
 // tokens map to Tailwind shades so the scheme stays coherent as it grows.
 // ---------------------------------------------------------------------------
 
-// ----- Color tokens (role-based palette) -----------------------------------
-// ~13 distinct colors. CANONICAL ROLE tokens come first; the semantic + legacy
-// aliases below map onto them, so the palette stays small while the hundreds of
-// existing call sites compile unchanged. When the palette becomes runtime-
-// swappable, only the canonical roles need a slot.
+// ----- Color tokens (runtime, role-based palette) --------------------------
+// ~13 canonical ROLES live in a UiPalette struct; the active one is g_ui_palette
+// (defined in UITask.cpp, swappable at runtime). The token names below are macros
+// that read g_ui_palette, so the hundreds of existing lv_color_hex(UI_*) call
+// sites are untouched -- they just follow whatever palette is active. Semantic +
+// legacy aliases map onto the canonical roles, so the palette stays small.
+struct UiPalette {
+  // Neutrals
+  uint32_t bg;          // page background
+  uint32_t surface;     // cards / top bars
+  uint32_t border;      // hairlines, dividers, neutral fills
+  uint32_t msg_in;      // incoming chat bubble (own role; themeable apart from border)
+  uint32_t dim;         // secondary / metadata text
+  uint32_t fg;          // primary text
+  uint32_t fg_bright;   // emphasized text / wordmark
+  uint32_t on_color;    // text/glyph on a saturated fill (avatar letters)
+  uint32_t scrim;       // modal backdrop / scrim (used with opacity)
+  // Brand
+  uint32_t accent;      // links, chips, selected indicator
+  uint32_t primary;     // primary action button / outgoing bubble
+  // Status
+  uint32_t alert;       // unread + error + alerts (one bright color)
+  uint32_t danger;      // destructive-action button bg
+  uint32_t fav;         // favourite accent
+};
 
-// Neutrals
-static constexpr uint32_t UI_BG          = 0x111827;  // gray-900  page background
-static constexpr uint32_t UI_SURFACE     = 0x1F2937;  // gray-800  cards / top bars
-static constexpr uint32_t UI_BORDER      = 0x374151;  // gray-700  hairlines, dividers, neutral fills
-static constexpr uint32_t UI_MSG_IN      = 0x374151;  // gray-700  incoming chat bubble (own role; themeable apart from UI_BORDER)
-static constexpr uint32_t UI_DIM         = 0x6B7280;  // gray-500  secondary / metadata text
-static constexpr uint32_t UI_FG          = 0xD1D5DB;  // gray-300  primary text
-static constexpr uint32_t UI_FG_BRIGHT   = 0xF3F4F6;  // gray-100  emphasized text / wordmark
-static constexpr uint32_t UI_ON_COLOR    = 0xFFFFFF;  // white     text/glyph on a saturated fill (avatar letters)
-static constexpr uint32_t UI_SCRIM       = 0x000000;  // black     modal backdrop / scrim (used with opacity)
+// The meshcore.io dark theme (Tailwind gray-900 base) -- the default palette and
+// the base every other theme (incl. SD-card overrides) starts from.
+static constexpr UiPalette UI_THEME_DARK = {
+  /*bg*/        0x111827,  // gray-900
+  /*surface*/   0x1F2937,  // gray-800
+  /*border*/    0x374151,  // gray-700
+  /*msg_in*/    0x374151,  // gray-700
+  /*dim*/       0x6B7280,  // gray-500
+  /*fg*/        0xD1D5DB,  // gray-300
+  /*fg_bright*/ 0xF3F4F6,  // gray-100
+  /*on_color*/  0xFFFFFF,  // white
+  /*scrim*/     0x000000,  // black
+  /*accent*/    0x60A5FA,  // blue-400
+  /*primary*/   0x2563EB,  // blue-600
+  /*alert*/     0xEF4444,  // red-500
+  /*danger*/    0x7F1D1D,  // red-900
+  /*fav*/       0xFBBF24,  // amber-400
+};
 
-// Brand
-static constexpr uint32_t UI_ACCENT      = 0x60A5FA;  // blue-400  links, chips, selected indicator
-static constexpr uint32_t UI_PRIMARY     = 0x2563EB;  // blue-600  primary action button / outgoing bubble
+extern UiPalette g_ui_palette;   // active palette (defined in UITask.cpp)
 
-// Status
-static constexpr uint32_t UI_ALERT       = 0xEF4444;  // red-500   unread + error + alerts (one bright red)
-static constexpr uint32_t UI_DANGER      = 0x7F1D1D;  // red-900   destructive-action button bg
-static constexpr uint32_t UI_FAV         = 0xFBBF24;  // amber-400 favourite accent
+// Canonical role tokens -> active palette fields.
+#define UI_BG          (g_ui_palette.bg)
+#define UI_SURFACE     (g_ui_palette.surface)
+#define UI_BORDER      (g_ui_palette.border)
+#define UI_MSG_IN      (g_ui_palette.msg_in)
+#define UI_DIM         (g_ui_palette.dim)
+#define UI_FG          (g_ui_palette.fg)
+#define UI_FG_BRIGHT   (g_ui_palette.fg_bright)
+#define UI_ON_COLOR    (g_ui_palette.on_color)
+#define UI_SCRIM       (g_ui_palette.scrim)
+#define UI_ACCENT      (g_ui_palette.accent)
+#define UI_PRIMARY     (g_ui_palette.primary)
+#define UI_ALERT       (g_ui_palette.alert)
+#define UI_DANGER      (g_ui_palette.danger)
+#define UI_FAV         (g_ui_palette.fav)
 
 // Semantic aliases (map onto the roles above; keep call sites unchanged).
-static constexpr uint32_t UI_AVATAR_NEUT = UI_BORDER;    // non-chat avatar bg
-static constexpr uint32_t UI_MSG_OUT     = UI_PRIMARY;   // outgoing chat bubble
-static constexpr uint32_t UI_LOGO        = UI_FG_BRIGHT; // wordmark tint (recolorable)
-static constexpr uint32_t UI_UNREAD      = UI_ALERT;     // unread dot / mark
-static constexpr uint32_t UI_ERROR       = UI_ALERT;     // inline error / failure text
+#define UI_AVATAR_NEUT UI_BORDER     // non-chat avatar bg
+#define UI_MSG_OUT     UI_PRIMARY    // outgoing chat bubble
+#define UI_LOGO        UI_FG_BRIGHT  // wordmark tint (recolorable)
+#define UI_UNREAD      UI_ALERT      // unread dot / mark
+#define UI_ERROR       UI_ALERT      // inline error / failure text
 
 // Legacy short aliases (do not remove -- referenced widely in UITask.cpp).
-static constexpr uint32_t BG_HEX  = UI_BG;
-static constexpr uint32_t FG_HEX  = UI_FG;
-static constexpr uint32_t DIM_HEX = UI_DIM;
-static constexpr uint32_t FAV_HEX = UI_FAV;
+#define BG_HEX         UI_BG
+#define FG_HEX         UI_FG
+#define DIM_HEX        UI_DIM
+#define FAV_HEX        UI_FAV
 
 // ----- Layout metrics ------------------------------------------------------
 // (HEADER_H / TABBAR_H / COMPOSE_H / SEARCH_BAR_H still live in UITask.cpp.)

@@ -48,6 +48,10 @@ UITask* UITask::_instance = NULL;
 // the Settings "Avatar colors" dropdown.
 uint8_t g_avatar_palette_mode = 0;
 
+// Active chrome palette (declared in ui_theme.h; UI_* tokens read from it). Starts
+// as the built-in dark theme; the Settings "Theme" picker swaps it at runtime.
+UiPalette g_ui_palette = UI_THEME_DARK;
+
 void UITask::disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
   if (!_instance || !_instance->_lgfx) {
     lv_disp_flush_ready(drv);
