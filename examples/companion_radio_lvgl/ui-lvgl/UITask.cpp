@@ -36,6 +36,7 @@ extern const lv_font_t meshcore_icons_16;     // generated icon font (FontAwesom
 #define MC_SYMBOL_SEARCH "\xEF\x80\x82"        // U+F002 magnifying-glass (in meshcore_icons_16)
 static void attachSearchIcon(lv_obj_t* ta);    // left-aligned magnifier glyph in a search field
 static void kbAccentDrawCb(lv_event_t* e);     // tint a keyboard's ✓ accept key (attach to any kb)
+static void urlEncode(const char* in, char* out, size_t cap);  // %-encode for meshcore:// links
 
 // Type ramp: one place that maps a text role to a size (all emoji/unicode-capable).
 // hero=page name, title=screen header, heading=section/dialog title, body=default,
@@ -1163,53 +1164,62 @@ void UITask::rebuildChannelsList() {
   for (int idx = 0; idx < MAX_GROUP_CHANNELS; idx++) {
     ChannelDetails ch;
     if (!mproxy::getChannel(idx, ch) || ch.name[0] == 0) continue;
+    buildChannelRow(_channels_list, idx, ch, channel_clicked_cb, /*show_unread*/true);
+  }
+}
 
+// One channel list row (name-colored circle + name, optional unread badge). Shared by
+// the Channels tab and the channel picker so they look/scroll identically; only the
+// tap action differs. `idx` is stashed in the row's user_data for the tap handler.
+lv_obj_t* UITask::buildChannelRow(lv_obj_t* parent, int idx, const ChannelDetails& ch,
+                                  lv_event_cb_t tap_cb, bool show_unread) {
+  bool unread = false;
+  if (show_unread) {
     char ckey[CHAT_PEER_NAME_MAX];
     convKey(ch.channel.secret, true, ckey, sizeof(ckey));
-    bool unread = isUnread(ckey);
-    char cname[CHAT_PEER_NAME_MAX + 4];
-    sanitizeForFont(ch.name, cname, sizeof(cname));
-
-    lv_obj_t* row = lv_obj_create(_channels_list);
-    lv_obj_remove_style_all(row);
-    lv_obj_set_size(row, LV_PCT(100), UI_CONTACT_ROW_H);
-    lv_obj_set_style_bg_color(row, lv_color_hex(BG_HEX), 0);
-    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(row, lv_color_hex(UI_BORDER), 0);
-    lv_obj_set_style_border_width(row, 1, 0);
-    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
-    lv_obj_set_style_pad_left(row, 8, 0);
-    lv_obj_set_style_pad_right(row, 8, 0);
-    lv_obj_set_style_pad_column(row, 10, 0);
-    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_user_data(row, (void*)(intptr_t)idx);
-    lv_obj_add_event_cb(row, channel_clicked_cb, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t* av = lv_obj_create(row);
-    lv_obj_remove_style_all(av);
-    lv_obj_set_size(av, UI_AVATAR_D, UI_AVATAR_D);
-    lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
-    lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(av, LV_OBJ_FLAG_OVERFLOW_VISIBLE);   // let the unread badge sit on/over the ring
-    lv_obj_add_event_cb(av, channelAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);
-    lv_obj_t* dot = makeUnreadBadge(av);   // envelope badge centred on the top-right ring (before the letter)
-    if (!unread) lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_t* avl = lv_label_create(av);
-    lv_obj_center(avl);
-    lv_obj_set_style_text_color(avl, lv_color_hex(UI_ON_COLOR), 0);
-    lv_obj_set_style_text_font(avl, fontHeading(), 0);
-    brandChannelAvatar(av, avl, ch.name);   // name-colored channel circle
-
-    lv_obj_t* nm = lv_label_create(row);
-    lv_obj_set_flex_grow(nm, 1);
-    lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_font(nm, fontBody(), 0);
-    lv_obj_set_style_text_color(nm, lv_color_hex(unread ? UI_UNREAD : FG_HEX), 0);
-    lv_label_set_text(nm, cname);
-    // (long-press intentionally left unbound -- reserved for a future context menu)
+    unread = isUnread(ckey);
   }
+  char cname[CHAT_PEER_NAME_MAX + 4];
+  sanitizeForFont(ch.name, cname, sizeof(cname));
+
+  lv_obj_t* row = lv_obj_create(parent);
+  lv_obj_remove_style_all(row);
+  lv_obj_set_size(row, LV_PCT(100), UI_CONTACT_ROW_H);
+  lv_obj_set_style_bg_color(row, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_color(row, lv_color_hex(UI_BORDER), 0);
+  lv_obj_set_style_border_width(row, 1, 0);
+  lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
+  lv_obj_set_style_pad_left(row, 8, 0);
+  lv_obj_set_style_pad_right(row, 8, 0);
+  lv_obj_set_style_pad_column(row, 10, 0);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_user_data(row, (void*)(intptr_t)idx);
+  lv_obj_add_event_cb(row, tap_cb, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t* av = lv_obj_create(row);
+  lv_obj_remove_style_all(av);
+  lv_obj_set_size(av, UI_AVATAR_D, UI_AVATAR_D);
+  lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(av, LV_OBJ_FLAG_OVERFLOW_VISIBLE);   // let the unread badge sit on/over the ring
+  lv_obj_add_event_cb(av, channelAvatarDrawCb, LV_EVENT_DRAW_MAIN_END, NULL);
+  if (show_unread) { lv_obj_t* dot = makeUnreadBadge(av); if (!unread) lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN); }
+  lv_obj_t* avl = lv_label_create(av);
+  lv_obj_center(avl);
+  lv_obj_set_style_text_color(avl, lv_color_hex(UI_ON_COLOR), 0);
+  lv_obj_set_style_text_font(avl, fontHeading(), 0);
+  brandChannelAvatar(av, avl, ch.name);   // name-colored channel circle
+
+  lv_obj_t* nm = lv_label_create(row);
+  lv_obj_set_flex_grow(nm, 1);
+  lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
+  lv_obj_set_style_text_font(nm, fontBody(), 0);
+  lv_obj_set_style_text_color(nm, lv_color_hex(unread ? UI_UNREAD : FG_HEX), 0);
+  lv_label_set_text(nm, cname);
+  return row;
 }
 
 void UITask::splash_dismiss_cb(lv_timer_t* t) {
@@ -1407,12 +1417,15 @@ static void styleMenuBtn(lv_obj_t* b) {
 void UITask::showInsertMenu() {
   ensureInsertPopup();
   lv_obj_clean(_insert_list);
-  lv_obj_t* b1 = lv_list_add_btn(_insert_list, LV_SYMBOL_HOME, "My Contact Info");
+  // Send a contact (our own is the lead row of the picker) or a channel; both
+  // insert a tappable token into the message. Paste appears only when something's
+  // on the clipboard.
+  lv_obj_t* b1 = lv_list_add_btn(_insert_list, LV_SYMBOL_UPLOAD, "Send Contact");
   styleMenuBtn(b1);
-  lv_obj_add_event_cb(b1, insert_myinfo_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_t* b2 = lv_list_add_btn(_insert_list, LV_SYMBOL_UPLOAD, "Share Contact");
+  lv_obj_add_event_cb(b1, insert_share_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* b2 = lv_list_add_btn(_insert_list, LV_SYMBOL_WIFI, "Send Channel");
   styleMenuBtn(b2);
-  lv_obj_add_event_cb(b2, insert_share_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(b2, insert_sendchannel_cb, LV_EVENT_CLICKED, NULL);
   if (_clip_kind != CLIP_EMPTY) {  // only when something has been copied
     lv_obj_t* b3 = lv_list_add_btn(_insert_list, LV_SYMBOL_PASTE, "Paste");
     styleMenuBtn(b3);
@@ -1595,6 +1608,155 @@ void UITask::insert_share_cb(lv_event_t* e) {
   if (!_instance) return;
   _instance->closeInsertPopup();
   _instance->openContactPicker(2);  // pick a contact -> insert its <ref> into compose
+}
+
+void UITask::insert_sendchannel_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->closeInsertPopup();
+  _instance->openChannelPicker();   // full-screen picker -> insert the channel's link
+}
+
+// Full-screen channel picker, same chrome as the contact picker: header + search +
+// a scrollable list of channel rows. Tapping a row inserts that channel's add-link.
+void UITask::buildChannelPickerScreen() {
+  if (_chpick_popup) return;
+  _chpick_popup = lv_obj_create(lv_layer_top());
+  lv_obj_set_size(_chpick_popup, _screen_w, _screen_h);
+  lv_obj_set_pos(_chpick_popup, 0, 0);
+  styleAsDarkScreen(_chpick_popup);
+  lv_obj_set_style_pad_all(_chpick_popup, 0, 0);
+  lv_obj_set_flex_flow(_chpick_popup, LV_FLEX_FLOW_COLUMN);
+
+  lv_obj_t* bar = lv_obj_create(_chpick_popup);
+  lv_obj_set_width(bar, LV_PCT(100));
+  lv_obj_set_height(bar, HEADER_H);
+  lv_obj_set_style_bg_color(bar, lv_color_hex(UI_SURFACE), 0);
+  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(bar, 0, 0);
+  lv_obj_set_style_radius(bar, 0, 0);
+  lv_obj_set_style_pad_all(bar, 6, 0);
+  lv_obj_set_style_pad_column(bar, 6, 0);
+  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  makeBackButton(bar, chpick_close_cb);
+  lv_obj_t* ttl = lv_label_create(bar);
+  lv_obj_set_flex_grow(ttl, 1);
+  lv_label_set_long_mode(ttl, LV_LABEL_LONG_DOT);
+  lv_obj_set_style_text_color(ttl, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(ttl, fontTitle(), 0);
+  lv_label_set_text(ttl, "Send channel");
+
+  lv_obj_t* srow = lv_obj_create(_chpick_popup);
+  lv_obj_set_width(srow, LV_PCT(100));
+  lv_obj_set_height(srow, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_color(srow, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(srow, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(srow, 0, 0);
+  lv_obj_set_style_radius(srow, 0, 0);
+  lv_obj_set_style_pad_hor(srow, 6, 0);
+  lv_obj_set_style_pad_ver(srow, 4, 0);
+  lv_obj_clear_flag(srow, LV_OBJ_FLAG_SCROLLABLE);
+  _chpick_search_ta = makeSelTextarea(srow);
+  lv_textarea_set_one_line(_chpick_search_ta, true); lv_obj_add_event_cb(_chpick_search_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+  lv_textarea_set_placeholder_text(_chpick_search_ta, "Search");
+  attachSearchIcon(_chpick_search_ta);
+  lv_obj_set_width(_chpick_search_ta, LV_PCT(100));
+  lv_obj_set_style_pad_ver(_chpick_search_ta, 5, 0);
+  lv_obj_set_style_text_font(_chpick_search_ta, &lv_font_montserrat_14, 0);
+  lv_obj_add_event_cb(_chpick_search_ta, chpick_search_cb, LV_EVENT_ALL, NULL);
+
+  _chpick_list = lv_obj_create(_chpick_popup);
+  lv_obj_remove_style_all(_chpick_list);
+  lv_obj_set_width(_chpick_list, LV_PCT(100));
+  lv_obj_set_flex_grow(_chpick_list, 1);
+  lv_obj_set_style_bg_color(_chpick_list, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(_chpick_list, LV_OPA_COVER, 0);
+  lv_obj_set_flex_flow(_chpick_list, LV_FLEX_FLOW_COLUMN);
+
+  _chpick_kb = lv_keyboard_create(_chpick_popup);
+  lv_obj_add_event_cb(_chpick_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ key
+  lv_obj_add_flag(_chpick_kb, LV_OBJ_FLAG_FLOATING);
+  lv_keyboard_set_textarea(_chpick_kb, _chpick_search_ta);
+  lv_obj_add_event_cb(_chpick_kb, chpick_kb_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_chpick_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::rebuildChannelPicker() {
+  if (!_chpick_list) return;
+  lv_obj_clean(_chpick_list);
+  int n = 0;
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    ChannelDetails ch;
+    if (!mproxy::getChannel(i, ch) || ch.name[0] == 0) continue;
+    if (_chpick_filter[0] && !containsCI(ch.name, _chpick_filter)) continue;
+    buildChannelRow(_chpick_list, i, ch, chanpick_cb, /*show_unread*/false);
+    n++;
+  }
+  if (n == 0) {
+    lv_obj_t* empty = lv_label_create(_chpick_list);
+    lv_label_set_text(empty, _chpick_filter[0] ? "No matches." : "No channels.");
+    lv_obj_set_style_text_color(empty, lv_color_hex(DIM_HEX), 0);
+    lv_obj_set_style_pad_all(empty, 12, 0);
+  }
+}
+
+void UITask::openChannelPicker() {
+  buildChannelPickerScreen();
+  _chpick_filter[0] = 0;
+  lv_textarea_set_text(_chpick_search_ta, "");
+  lv_obj_add_flag(_chpick_kb, LV_OBJ_FLAG_HIDDEN);
+  rebuildChannelPicker();
+  lv_obj_clear_flag(_chpick_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_chpick_popup);
+}
+
+void UITask::closeChannelPicker() {
+  if (_chpick_popup) lv_obj_add_flag(_chpick_popup, LV_OBJ_FLAG_HIDDEN);
+}
+void UITask::chpick_close_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->closeChannelPicker();
+}
+void UITask::chpick_search_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    lv_keyboard_set_textarea(_instance->_chpick_kb, ta);
+    lv_obj_clear_flag(_instance->_chpick_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_chpick_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_chpick_kb);
+  } else if (code == LV_EVENT_VALUE_CHANGED) {
+    const char* t = lv_textarea_get_text(ta);
+    strncpy(_instance->_chpick_filter, t ? t : "", sizeof(_instance->_chpick_filter) - 1);
+    _instance->_chpick_filter[sizeof(_instance->_chpick_filter) - 1] = 0;
+    _instance->rebuildChannelPicker();
+  }
+}
+void UITask::chpick_kb_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
+    lv_obj_add_flag(_instance->_chpick_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+// A channel row in the picker: insert that channel's add-link into compose. Trailing
+// space, since the link has no closing delimiter (lets the user keep typing).
+void UITask::chanpick_cb(lv_event_t* e) {
+  if (!_instance) return;
+  int idx = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target(e));
+  _instance->closeChannelPicker();
+  ChannelDetails ch;
+  if (!mproxy::getChannel(idx, ch) || ch.name[0] == 0) return;
+  static const uint8_t zeros[16] = {0};
+  int slen = (memcmp(&ch.channel.secret[16], zeros, 16) == 0) ? 16 : 32;   // 128- vs 256-bit
+  char hex[2 * 32 + 1]; mesh::Utils::toHex(hex, ch.channel.secret, slen);
+  char ename[3 * CHAT_PEER_NAME_MAX + 1]; urlEncode(ch.name, ename, sizeof(ename));
+  char uri[80 + sizeof(ename) + 2 * 32];
+  snprintf(uri, sizeof(uri), "meshcore://channel/add?name=%s&secret=%s ", ename, hex);
+  if (_instance->_chat_input) lv_textarea_add_text(_instance->_chat_input, uri);
 }
 
 
@@ -2491,19 +2653,30 @@ void UITask::buildContactCard(lv_obj_t* parent, const ChatMessage* m,
 // http image links, etc.): add a detector + a builder in the scan below.
 // A meshcore://channel/add link rendered as a tappable "join channel" chip; tap adds
 // the channel (name + secret) via CmdKind::AddChannel.
+// Tap a channel link card: open its Channel Details if we already have it, else the
+// New Channel page prefilled (name + key) for review -- same as tapping a contact
+// card. No silent auto-add.
 void UITask::chan_card_cb(lv_event_t* e) {
   if (!_instance) return;
   if (_instance->_sel.state != SS_IDLE) return;   // a long-press selected the card instead
   const ChanCardTarget* t = (const ChanCardTarget*)lv_obj_get_user_data(lv_event_get_current_target(e));
   if (!t) return;
-  mproxy::MeshCmd cmd{};
-  cmd.kind = mproxy::CmdKind::AddChannel;
-  strncpy(cmd.name, t->name, sizeof(cmd.name) - 1);
-  memcpy(cmd.path, t->secret, t->seclen);
-  cmd.path_len = t->seclen;
-  mproxy::postCommand(cmd);
-  char toast[CHAT_PEER_NAME_MAX + 16]; snprintf(toast, sizeof(toast), "Joined %s", t->name);
-  _instance->showToast(toast);
+  int idx = _instance->findChannelBySecret(t->secret, t->seclen);
+  if (idx >= 0) _instance->openChannelInfo(idx, _instance->_chat_screen);
+  else          _instance->openNewChannelPrefilled(t->name, t->secret, t->seclen, _instance->_chat_screen);
+}
+
+// Find a saved channel by its secret; -1 if none. Secrets are zero-padded to 32 bytes.
+int UITask::findChannelBySecret(const uint8_t* secret, int seclen) {
+  uint8_t want[32]; memset(want, 0, sizeof(want));
+  if (seclen > (int)sizeof(want)) seclen = sizeof(want);
+  memcpy(want, secret, seclen);
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+    ChannelDetails ch;
+    if (!mproxy::getChannel(i, ch) || ch.name[0] == 0) continue;
+    if (memcmp(ch.channel.secret, want, sizeof(want)) == 0) return i;
+  }
+  return -1;
 }
 void UITask::buildChannelLinkCard(lv_obj_t* parent, const char* name, const uint8_t* secret, int seclen) {
   lv_obj_t* card = lv_obj_create(parent);
@@ -4656,7 +4829,12 @@ void UITask::chat_kebab_cb(lv_event_t* e) {
   lv_obj_t* list = s->ensureMenuPopup();
   lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_LIST, "Details"),
                       s->_chat_is_channel ? kebab_chdetails_cb : kebab_details_cb, LV_EVENT_CLICKED, NULL);
-  lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_EYE_OPEN, "Search"), kebab_search_cb, LV_EVENT_CLICKED, NULL);
+  {
+    lv_obj_t* sb = lv_list_add_btn(list, MC_SYMBOL_SEARCH, "Search");   // magnifier, not an eye
+    lv_obj_t* sicon = lv_obj_get_child(sb, 0);   // icon label -> the glyph lives in our icon font
+    if (sicon && lv_obj_check_type(sicon, &lv_label_class)) lv_obj_set_style_text_font(sicon, &meshcore_icons_16, 0);
+    lv_obj_add_event_cb(sb, kebab_search_cb, LV_EVENT_CLICKED, NULL);
+  }
   {
     bool m = s->isMuted(s->_chat_key);
     lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_BELL, m ? "Unmute notifications" : "Mute notifications"),
@@ -5151,10 +5329,10 @@ void UITask::buildNewChannelScreen() {
   lv_obj_set_style_pad_all(_newchan_screen, 0, 0);
 
   lv_obj_t* bar = makeHeaderBar(_newchan_screen, "New Channel", newchan_back_cb);
-  lv_obj_t* save = lv_btn_create(bar);   // flexes to the right of the grown title
+  lv_obj_t* save = lv_btn_create(bar);   // header Save, same place/label as New Contact
   lv_obj_add_event_cb(save, newchan_save_cb, LV_EVENT_CLICKED, NULL);
   lv_obj_t* svl = lv_label_create(save);
-  lv_label_set_text(svl, LV_SYMBOL_OK);
+  lv_label_set_text(svl, LV_SYMBOL_OK " Save");
 
   lv_obj_t* body = lv_obj_create(_newchan_screen);
   lv_obj_add_event_cb(body, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap empty -> hide kb
@@ -5202,10 +5380,27 @@ void UITask::buildNewChannelScreen() {
 
 void UITask::openNewChannel() {
   buildNewChannelScreen();
+  _newchan_return_screen = _home_screen;
   lv_textarea_set_text(_newchan_name_ta, "");
   lv_textarea_set_text(_newchan_key_ta, "");
   if (_newchan_public_chk) lv_obj_clear_state(_newchan_public_chk, LV_STATE_CHECKED);
   lv_obj_clear_state(_newchan_key_ta, LV_STATE_DISABLED);
+  lv_obj_add_flag(_newchan_err, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_newchan_kb, LV_OBJ_FLAG_HIDDEN);
+  refreshNewChannelHero();
+  lv_scr_load(_newchan_screen);
+}
+
+// New Channel page prefilled from a tapped channel link (name + key), for review +
+// confirm before adding -- like opening New Contact from a contact card.
+void UITask::openNewChannelPrefilled(const char* name, const uint8_t* secret, int seclen, lv_obj_t* return_screen) {
+  buildNewChannelScreen();
+  _newchan_return_screen = return_screen ? return_screen : _home_screen;
+  char hex[2 * 32 + 1]; mesh::Utils::toHex(hex, secret, seclen);
+  if (_newchan_public_chk) lv_obj_clear_state(_newchan_public_chk, LV_STATE_CHECKED);
+  lv_obj_clear_state(_newchan_key_ta, LV_STATE_DISABLED);
+  lv_textarea_set_text(_newchan_name_ta, name ? name : "");
+  lv_textarea_set_text(_newchan_key_ta, hex);
   lv_obj_add_flag(_newchan_err, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(_newchan_kb, LV_OBJ_FLAG_HIDDEN);
   refreshNewChannelHero();
@@ -5365,7 +5560,7 @@ void UITask::newchan_back_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   lv_obj_add_flag(_instance->_newchan_kb, LV_OBJ_FLAG_HIDDEN);
-  lv_scr_load(_instance->_home_screen);
+  lv_scr_load(_instance->_newchan_return_screen ? _instance->_newchan_return_screen : _instance->_home_screen);
 }
 
 void UITask::newchan_save_cb(lv_event_t* e) {
@@ -5373,7 +5568,7 @@ void UITask::newchan_save_cb(lv_event_t* e) {
   if (!_instance) return;
   if (_instance->createChannelFromForm()) {
     lv_obj_add_flag(_instance->_newchan_kb, LV_OBJ_FLAG_HIDDEN);
-    lv_scr_load(_instance->_home_screen);
+    lv_scr_load(_instance->_newchan_return_screen ? _instance->_newchan_return_screen : _instance->_home_screen);
   }
 }
 

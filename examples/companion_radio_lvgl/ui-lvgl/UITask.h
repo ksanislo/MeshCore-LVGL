@@ -133,6 +133,13 @@ class UITask : public AbstractUITask {
   int             _pick_action;        // 1 = share viewed contact to pick; 2 = insert pick's ref
   ContactListView _pick_list;          // the picker's list (same component as the Contacts tab)
 
+  // Channel picker (full-screen, same chrome as the contact picker) -> insert a link.
+  lv_obj_t*       _chpick_popup;
+  lv_obj_t*       _chpick_list;
+  lv_obj_t*       _chpick_search_ta;
+  lv_obj_t*       _chpick_kb;
+  char            _chpick_filter[40];
+
   // Chat (conversation) screen. Three-band: fixed top bar / scrollable history
   // / fixed compose band (compose added with the keyboard step).
   RamMessageStore<CHAT_HISTORY_CAP> _rammsgs;   // session-only fallback
@@ -435,6 +442,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _newchan_hero_avl;
   lv_obj_t*       _newchan_hero_nm;
   lv_obj_t*       _newchan_hero_key;
+  lv_obj_t*       _newchan_return_screen;   // where Back / Save returns (chat when prefilled)
 
   // (Adding a contact is not a separate screen: it's the Contact Info screen in
   // CINFO_ADD mode -- see openNewContact / openNewContactPrefilled.)
@@ -598,6 +606,19 @@ class UITask : public AbstractUITask {
   static void insert_backdrop_cb(lv_event_t* e);
   static void insert_myinfo_cb(lv_event_t* e);
   static void insert_share_cb(lv_event_t* e);
+  static void insert_sendchannel_cb(lv_event_t* e);   // (+) -> pick a channel -> insert link
+  lv_obj_t*   buildChannelRow(lv_obj_t* parent, int idx, const ChannelDetails& ch,
+                              lv_event_cb_t tap_cb, bool show_unread);   // shared channel row
+  int         findChannelBySecret(const uint8_t* secret, int seclen);   // -> slot idx or -1
+  void        openNewChannelPrefilled(const char* name, const uint8_t* secret, int seclen, lv_obj_t* return_screen);
+  void        buildChannelPickerScreen();
+  void        openChannelPicker();
+  void        closeChannelPicker();
+  void        rebuildChannelPicker();
+  static void chpick_close_cb(lv_event_t* e);
+  static void chpick_search_cb(lv_event_t* e);
+  static void chpick_kb_cb(lv_event_t* e);
+  static void chanpick_cb(lv_event_t* e);             // a channel row -> insert its meshcore:// link
   static void contact_card_cb(lv_event_t* e);   // tap inline card -> open / add contact
   static void card_free_cb(lv_event_t* e);       // free the card's heap target on delete
   void      renderRichBody(lv_obj_t* bubble, const ChatMessage* m, uint32_t fg);  // text + inline rich tokens
@@ -907,6 +928,7 @@ public:
       _pending_chime(UIEventType::none),
       _pick_popup(NULL), _pick_search_ta(NULL), _pick_kb(NULL),
       _pick_title(NULL), _pick_action(0), _pick_list{},
+      _chpick_popup(NULL), _chpick_list(NULL), _chpick_search_ta(NULL), _chpick_kb(NULL), _chpick_filter{},
       _chat_screen(NULL), _chat_title(NULL), _chat_avatar(NULL), _chat_avatar_lbl(NULL),
       _chat_status(NULL), _chat_history(NULL), _chat_sb(NULL),
       _chat_compose(NULL), _chat_input(NULL), _chat_send_btn(NULL), _chat_count_lbl(NULL), _chat_keyboard(NULL),
@@ -957,7 +979,7 @@ public:
       _qr_return_screen(NULL),
       _newchan_screen(NULL), _newchan_name_ta(NULL), _newchan_key_ta(NULL),
       _newchan_key_field(NULL), _newchan_public_chk(NULL), _newchan_err(NULL), _newchan_kb(NULL),
-      _newchan_hero_av(NULL), _newchan_hero_avl(NULL), _newchan_hero_nm(NULL), _newchan_hero_key(NULL),
+      _newchan_hero_av(NULL), _newchan_hero_avl(NULL), _newchan_hero_nm(NULL), _newchan_hero_key(NULL), _newchan_return_screen(NULL),
       _nodeinfo_screen(NULL), _nodeinfo_lbl(NULL), _nodeinfo_timer(NULL),
       _login_popup(NULL), _login_card(NULL), _login_title(NULL), _login_pw_ta(NULL),
       _login_save_chk(NULL), _login_auto_chk(NULL), _login_kb(NULL),
