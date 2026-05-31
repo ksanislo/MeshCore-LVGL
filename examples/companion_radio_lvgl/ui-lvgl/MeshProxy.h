@@ -120,6 +120,7 @@ struct UiEvent {
 bool init();                       // alloc snapshot (PSRAM) + queues; call once in setup()
 
 // ---- Backend side (runs where `the_mesh` lives) ----------------------------
+void setBackend(MyMesh& mesh);         // capture the backend for read-only accessors; call BEFORE the UI seeds (begin)
 void drainCommands(MyMesh& mesh);      // execute all queued commands
 bool publishIfChanged(MyMesh& mesh);   // rebuild + publish snapshot if anything changed; returns true if published
 void updateStats(MyMesh& mesh);        // refresh the live node-stats buffer (call each backend loop)
@@ -139,7 +140,8 @@ bool getChannel(int idx, ChannelDetails& out);
 void getStats(NodeStats& out);     // latest node/radio counters (display-only, lock-protected copy)
 bool getNameOverride(const uint8_t* pubkey, char* out, size_t cap);
 const NodePrefs* prefsSnap();      // current published prefs (UI seeds its working copy from this)
-int  copyMutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);  // seed the UI's muted set at begin()
+int  copyMutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);    // seed the UI's explicit-muted set at begin()
+int  copyUnmutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);  // seed the UI's explicit-unmuted set at begin()
 uint32_t rtcSeconds();             // live device clock (ESP32 internal RTC; safe cross-core)
 
 // Valid ONLY inside a mesh callback (backend thread): the conversation key of the

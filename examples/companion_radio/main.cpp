@@ -267,6 +267,7 @@ void setup() {
 #ifdef MESH_PROXY
   if (the_mesh.getNodePrefs()->radio_off) radio_sleep();  // booted with the radio kill-switch on
   if (!mproxy::init()) Serial.println("MeshProxy: init failed (PSRAM/queue alloc)");
+  mproxy::setBackend(the_mesh);         // so the UI can seed mutes in begin() (drainCommands runs later)
   mproxy::publishIfChanged(the_mesh);   // seed the first snapshot before the UI reads it
   // Create the backend task BEFORE ui_task.begin(): the LVGL draw buffers are
   // allocated greedily (sized to whatever internal RAM is free, down to a floor),

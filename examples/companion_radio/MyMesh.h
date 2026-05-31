@@ -216,10 +216,14 @@ public:
   // Per-conversation mute: a set of UI-defined conversation keys (pubkey/secret hex,
   // <=15 chars). The backend treats them as opaque strings and persists to /mutes.
   void   loadMutes();                      // from /mutes at boot
-  bool   isMuted(const char* key) const;
-  void   setMute(const char* key, bool on);
+  void   loadUnmutes();                    // from /unmutes at boot (explicit-unmute set)
+  bool   isMuted(const char* key) const;   // explicitly muted
+  bool   isUnmuted(const char* key) const; // explicitly unmuted (overrides mute-by-default)
+  void   setMute(const char* key, bool on);// record an EXPLICIT choice (on->muted set, off->unmuted set)
   int    numMutes() const { return _num_mutes; }
   const char* muteKey(int i) const { return (i >= 0 && i < _num_mutes) ? _mutes[i] : ""; }
+  int    numUnmutes() const { return _num_unmutes; }
+  const char* unmuteKey(int i) const { return (i >= 0 && i < _num_unmutes) ? _unmutes[i] : ""; }
   void getNodeStats(NodeStats& s);                     // public: on-device node-info screen
   // Persist a single edited contact in place (crash-safe vs the full rewrite).
   // Use for field edits only (add/remove change indices -> use saveContacts()).
@@ -320,8 +324,10 @@ private:
 #endif
 
   static const int MAX_MUTES = 64;
-  char _mutes[MAX_MUTES][20];    // muted conversation keys (UI-defined, <=15 chars + NUL)
+  char _mutes[MAX_MUTES][20];    // explicitly-muted conversation keys (UI-defined, <=15 chars + NUL)
   int  _num_mutes = 0;
+  char _unmutes[MAX_MUTES][20];  // explicitly-unmuted keys (override mute-by-default); persisted to /unmutes
+  int  _num_unmutes = 0;
 
   uint8_t _hook_key[6] = {0};   // identity of the msg currently handed to the UI
   bool _hook_is_channel = false;

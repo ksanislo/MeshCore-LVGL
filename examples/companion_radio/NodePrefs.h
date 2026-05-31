@@ -51,4 +51,5 @@ struct NodePrefs {  // persisted to file
   char     theme_name[24];     // UI color theme: built-in name ("Dark"...) or an SD /themes file; "" = default (Dark)
   uint8_t  mention_user_colors;   // chat: color @mentions by the user's avatar color (1=on default, 0=off -> theme accent)
   uint8_t  hashtag_channel_colors;// chat: color #hashtags by the channel's color   (1=on default, 0=off -> theme accent)
+  uint8_t  notify_mute_default;   // notifications: 1 = muted by default (opt-in per conv), 0 = opt-out (default)
 };

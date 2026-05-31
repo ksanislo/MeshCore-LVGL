@@ -319,6 +319,8 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
 }
 
 static MyMesh* s_backend = nullptr;   // captured for read-only backend accessors (mutes)
+void setBackend(MyMesh& mesh) { s_backend = &mesh; }   // call before the UI seeds (begin), since
+                                                       // drainCommands (which also sets it) runs later
 void drainCommands(MyMesh& mesh) {
   s_backend = &mesh;
   if (!s_cmd_q) return;
@@ -369,6 +371,13 @@ int copyMutedKeys(char out[][CHAT_PEER_NAME_MAX], int max) {
   int n = s_backend->numMutes();
   if (n > max) n = max;
   for (int i = 0; i < n; i++) { strncpy(out[i], s_backend->muteKey(i), CHAT_PEER_NAME_MAX - 1); out[i][CHAT_PEER_NAME_MAX-1]=0; }
+  return n;
+}
+int copyUnmutedKeys(char out[][CHAT_PEER_NAME_MAX], int max) {
+  if (!s_backend || max <= 0) return 0;
+  int n = s_backend->numUnmutes();
+  if (n > max) n = max;
+  for (int i = 0; i < n; i++) { strncpy(out[i], s_backend->unmuteKey(i), CHAT_PEER_NAME_MAX - 1); out[i][CHAT_PEER_NAME_MAX-1]=0; }
   return n;
 }
 int  getNumContacts()       { const MeshSnapshot* s = readBuf(); return s ? s->contact_count : 0; }

@@ -3001,13 +3001,21 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   lv_timer_set_repeat_count(t, 1);
 
   ensureBanner();   // pre-build so the first notification frame stays light
-  _muted_count = mproxy::copyMutedKeys(_muted_keys, MUTE_MAX);   // seed mutes from the backend
+  _muted_count   = mproxy::copyMutedKeys(_muted_keys, MUTE_MAX);       // seed explicit mutes from the backend
+  _unmuted_count = mproxy::copyUnmutedKeys(_unmuted_keys, MUTE_MAX);   // and explicit unmutes
 
 #ifdef PIN_BUZZER
   // Notification chimes. quiet() honors the persisted buzzer_quiet; the genericBuzzer
   // also early-returns when quiet, so notify() needs no extra sound gate.
-  _buzzer.begin();
-  _buzzer.quiet(_node_prefs && _node_prefs->buzzer_quiet);
+  _buzzer.begin();   // NOTE: begin() unconditionally plays the startup chime (it forces quiet=false)
+  // Minimal-noises modes (mute-by-default, or the buzzer muted) should stay silent at boot
+  // too. begin() already queued the startup melody, so cancel it: play() while quiet stops the
+  // running melody and early-returns. _buzzer.loop() hasn't run yet, so nothing is audible.
+  if (_node_prefs && (_node_prefs->buzzer_quiet || _node_prefs->notify_mute_default)) {
+    _buzzer.quiet(true);
+    _buzzer.play("");   // stops the just-queued startup chime
+  }
+  _buzzer.quiet(_node_prefs && _node_prefs->buzzer_quiet);   // restore the intended persistent quiet state
 #endif
 
   reportCrashIfAny();   // if the last boot panicked, save a decodable report (SD or SPIFFS)
@@ -3154,31 +3162,42 @@ void UITask::clearUnread(const char* key) {
   }
 }
 
-bool UITask::isMuted(const char* key) const {
-  if (!key) return false;
-  for (int i = 0; i < _muted_count; i++)
-    if (strncmp(_muted_keys[i], key, CHAT_PEER_NAME_MAX) == 0) return true;
+// Membership helpers over the UI's explicit (set, count) tables.
+static bool uiSetHas(const char set[][CHAT_PEER_NAME_MAX], int n, const char* key) {
+  for (int i = 0; i < n; i++) if (strncmp(set[i], key, CHAT_PEER_NAME_MAX) == 0) return true;
   return false;
 }
+static void uiSetAdd(char set[][CHAT_PEER_NAME_MAX], int& n, int maxn, const char* key) {
+  if (uiSetHas(set, n, key) || n >= maxn) return;
+  strncpy(set[n], key, CHAT_PEER_NAME_MAX - 1); set[n][CHAT_PEER_NAME_MAX - 1] = 0; n++;
+}
+static void uiSetDel(char set[][CHAT_PEER_NAME_MAX], int& n, const char* key) {
+  for (int i = 0; i < n; i++) if (strncmp(set[i], key, CHAT_PEER_NAME_MAX) == 0) {
+    if (i != n - 1) memcpy(set[i], set[n - 1], CHAT_PEER_NAME_MAX);
+    n--; return;
+  }
+}
 
+bool UITask::isMuted(const char* key) const {          // explicitly muted
+  return key && uiSetHas(_muted_keys, _muted_count, key);
+}
+bool UITask::isExplicitUnmuted(const char* key) const {
+  return key && uiSetHas(_unmuted_keys, _unmuted_count, key);
+}
+// Effective mute used for notification gating: an explicit choice always wins; an
+// untouched conversation follows the "mute by default" pref.
+bool UITask::effectiveMuted(const char* key) const {
+  if (isMuted(key)) return true;
+  if (isExplicitUnmuted(key)) return false;
+  return _node_prefs && _node_prefs->notify_mute_default;
+}
+
+// Record an EXPLICIT choice (mirrors the backend): on -> muted set, off -> unmuted set,
+// each removing the key from the other. Persists via the backend (it owns flash).
 void UITask::setMuted(const char* key, bool on) {
   if (!key || !key[0]) return;
-  bool have = isMuted(key);
-  if (on && !have && _muted_count < MUTE_MAX) {
-    strncpy(_muted_keys[_muted_count], key, CHAT_PEER_NAME_MAX - 1);
-    _muted_keys[_muted_count][CHAT_PEER_NAME_MAX - 1] = 0;
-    _muted_count++;
-  } else if (!on && have) {
-    for (int i = 0; i < _muted_count; i++)
-      if (strncmp(_muted_keys[i], key, CHAT_PEER_NAME_MAX) == 0) {
-        if (i != _muted_count - 1) memcpy(_muted_keys[i], _muted_keys[_muted_count - 1], CHAT_PEER_NAME_MAX);
-        _muted_count--;
-        break;
-      }
-  } else {
-    return;   // no change
-  }
-  // Persist via the backend (it owns flash).
+  if (on) { uiSetAdd(_muted_keys, _muted_count, MUTE_MAX, key);     uiSetDel(_unmuted_keys, _unmuted_count, key); }
+  else    { uiSetAdd(_unmuted_keys, _unmuted_count, MUTE_MAX, key); uiSetDel(_muted_keys, _muted_count, key); }
   mproxy::MeshCmd c{};
   c.kind = mproxy::CmdKind::SetMute;
   strncpy(c.name, key, sizeof(c.name) - 1);
@@ -3201,7 +3220,7 @@ void UITask::kebab_mute_cb(lv_event_t* e) {
   (void)e;
   if (!_instance || !_instance->_chat_key[0]) return;
   _instance->closeMenuPopup();
-  bool m = _instance->isMuted(_instance->_chat_key);
+  bool m = _instance->effectiveMuted(_instance->_chat_key);
   _instance->setMuted(_instance->_chat_key, !m);
   _instance->showToast(m ? "Notifications on" : "Muted");
 }
@@ -5894,6 +5913,12 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_notify_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_notify_chk, set_notify_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  // Mute by default: conversations are silent unless you opt in (un-mute) per chat.
+  _set_mutedef_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_mutedef_chk, "Mute by default");
+  lv_obj_set_style_text_color(_set_mutedef_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_mutedef_chk, set_mutedef_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
   body = _set_pane_body[CAT_POWER];   // Power & Lock
   // ===== Power & Lock =====
   addSettingsSection(body, "Power & Lock");
@@ -6092,6 +6117,10 @@ void UITask::populateSettings() {
   if (_set_notify_chk) {
     if (_node_prefs->notify_enable != 0) lv_obj_add_state(_set_notify_chk, LV_STATE_CHECKED);
     else                                 lv_obj_clear_state(_set_notify_chk, LV_STATE_CHECKED);
+  }
+  if (_set_mutedef_chk) {
+    if (_node_prefs->notify_mute_default) lv_obj_add_state(_set_mutedef_chk, LV_STATE_CHECKED);
+    else                                  lv_obj_clear_state(_set_mutedef_chk, LV_STATE_CHECKED);
   }
 
   // Telemetry policy dropdowns (mode value maps 1:1 to the dropdown index).
@@ -7265,6 +7294,14 @@ void UITask::set_notify_cb(lv_event_t* e) {
 #endif
 }
 
+// "Mute by default": flips opt-out <-> opt-in for untouched conversations. Explicit
+// per-conversation mute/unmute choices are stored separately, so they're unaffected.
+void UITask::set_mutedef_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  _instance->_node_prefs->notify_mute_default = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
+  pushPrefs();
+}
+
 void UITask::set_history_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
@@ -7985,7 +8022,7 @@ void UITask::drainEvents() {
                        strncmp(ev.conv_key, _chat_key, CHAT_PEER_NAME_MAX) == 0;
         if (viewing) rebuildChatHistory();
         if (!ev.outgoing) {
-          bool muted = isMuted(ev.conv_key);
+          bool muted = effectiveMuted(ev.conv_key);   // explicit choice, else mute-by-default
           if (!viewing) markUnread(ev.conv_key);   // unread mark only for chats you're not in
           if (notifyEnabled() && !muted) {
             // Phone-style: chime on every non-muted message (viewed or not). The

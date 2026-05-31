@@ -993,6 +993,7 @@ void MyMesh::begin(bool has_display) {
   loadLoginCreds();
 #endif
   loadMutes();
+  loadUnmutes();
 
   radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_set_tx_power(_prefs.tx_power_dbm);
@@ -2242,28 +2243,44 @@ void MyMesh::loadLoginCreds() {
 }
 #endif
 
+// Small helpers over a fixed (set, count) table of 20-byte keys.
+static bool muteSetHas(const char set[][20], int n, const char* key) {
+  for (int i = 0; i < n; i++) if (strcmp(set[i], key) == 0) return true;
+  return false;
+}
+static void muteSetAdd(char set[][20], int& n, int maxn, const char* key) {
+  if (n >= maxn || muteSetHas(set, n, key)) return;
+  StrHelper::strncpy(set[n], key, 20);
+  n++;
+}
+static void muteSetDel(char set[][20], int& n, const char* key) {
+  for (int i = 0; i < n; i++) if (strcmp(set[i], key) == 0) {
+    if (i != n - 1) memcpy(set[i], set[n - 1], 20);
+    n--; return;
+  }
+}
+
 void MyMesh::loadMutes() {
   size_t n = _store->loadMutes((uint8_t*)_mutes, sizeof(_mutes));
   _num_mutes = (int)(n / sizeof(_mutes[0]));
   if (_num_mutes > MAX_MUTES) _num_mutes = MAX_MUTES;
 }
-bool MyMesh::isMuted(const char* key) const {
-  for (int i = 0; i < _num_mutes; i++) if (strcmp(_mutes[i], key) == 0) return true;
-  return false;
+void MyMesh::loadUnmutes() {
+  size_t n = _store->loadUnmutes((uint8_t*)_unmutes, sizeof(_unmutes));
+  _num_unmutes = (int)(n / sizeof(_unmutes[0]));
+  if (_num_unmutes > MAX_MUTES) _num_unmutes = MAX_MUTES;
 }
+bool MyMesh::isMuted(const char* key) const   { return muteSetHas(_mutes, _num_mutes, key); }
+bool MyMesh::isUnmuted(const char* key) const { return muteSetHas(_unmutes, _num_unmutes, key); }
+
+// Record an EXPLICIT per-conversation choice: on -> muted set, off -> unmuted set; each
+// removes the key from the other set. Absence from BOTH means "unset" -> follow the UI's
+// mute-by-default. Persists both files.
 void MyMesh::setMute(const char* key, bool on) {
-  int idx = -1;
-  for (int i = 0; i < _num_mutes; i++) if (strcmp(_mutes[i], key) == 0) { idx = i; break; }
-  if (on) {
-    if (idx >= 0 || _num_mutes >= MAX_MUTES) return;   // already muted / table full
-    StrHelper::strncpy(_mutes[_num_mutes], key, sizeof(_mutes[0]));
-    _num_mutes++;
-  } else {
-    if (idx < 0) return;                               // not muted
-    if (idx != _num_mutes - 1) memcpy(_mutes[idx], _mutes[_num_mutes - 1], sizeof(_mutes[0]));
-    _num_mutes--;
-  }
+  if (on) { muteSetAdd(_mutes, _num_mutes, MAX_MUTES, key);     muteSetDel(_unmutes, _num_unmutes, key); }
+  else    { muteSetAdd(_unmutes, _num_unmutes, MAX_MUTES, key); muteSetDel(_mutes, _num_mutes, key); }
   _store->saveMutes((const uint8_t*)_mutes, (size_t)_num_mutes * sizeof(_mutes[0]));
+  _store->saveUnmutes((const uint8_t*)_unmutes, (size_t)_num_unmutes * sizeof(_unmutes[0]));
 }
 
 void MyMesh::getNodeStats(NodeStats& s) {

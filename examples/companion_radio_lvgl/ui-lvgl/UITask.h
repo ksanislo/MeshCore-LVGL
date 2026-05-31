@@ -78,8 +78,10 @@ class UITask : public AbstractUITask {
   // Per-conversation mute: in-RAM set (seeded from the backend at begin, persisted via
   // CmdKind::SetMute). Muted = no wake/banner/buzzer, but the unread mark still shows.
   static const int MUTE_MAX = 64;
-  char            _muted_keys[MUTE_MAX][CHAT_PEER_NAME_MAX];
+  char            _muted_keys[MUTE_MAX][CHAT_PEER_NAME_MAX];     // explicitly muted
   int             _muted_count;
+  char            _unmuted_keys[MUTE_MAX][CHAT_PEER_NAME_MAX];   // explicitly unmuted (override mute-by-default)
+  int             _unmuted_count;
   lv_obj_t*       _banner;              // top-layer notification card (reused)
   lv_obj_t*       _banner_avatar;       // sender circle (DM) / channel avatar (channel msg)
   lv_obj_t*       _banner_avatar_lbl;   // sender grapheme (on the circle / inner circle)
@@ -295,6 +297,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_hashtag_chk;     // chat: color #hashtags by channel color
   lv_obj_t*       _set_history_chk;     // persist chat history to SD toggle
   lv_obj_t*       _set_notify_chk;      // master new-message notifications toggle
+  lv_obj_t*       _set_mutedef_chk;     // "Mute by default" (opt-in per conversation)
   lv_obj_t*       _set_kb;
   lv_obj_t*       _set_active_ta;       // settings textarea currently being edited
   // Settings categories. The pane index is the single source of truth shared by
@@ -465,8 +468,10 @@ class UITask : public AbstractUITask {
   void      markUnread(const char* key);
   void      clearUnread(const char* key);
   bool      isUnread(const char* key) const;
-  bool      isMuted(const char* key) const;
-  void      setMuted(const char* key, bool on);   // updates local set + persists via backend
+  bool      isMuted(const char* key) const;            // explicitly muted
+  bool      isExplicitUnmuted(const char* key) const;  // explicitly unmuted (overrides mute-by-default)
+  bool      effectiveMuted(const char* key) const;     // explicit choice, else mute-by-default
+  void      setMuted(const char* key, bool on);   // records an explicit choice + persists via backend
   static void kebab_mute_cb(lv_event_t* e);
   // Wake the screen + show the tappable banner + chime for an incoming message.
   void      onIncomingNotify(const char* conv_key, const char* sender,
@@ -734,6 +739,7 @@ private:
   void settingsBackToLauncher();
   void setHomeChrome(bool show);   // show/hide the logo header (+resize tabview) for pane drill-in
   static void set_notify_cb(lv_event_t* e);
+  static void set_mutedef_cb(lv_event_t* e);
   // Phase-1 additions: telemetry policy + advanced toggles + share-me.
   static void set_telem_cb(lv_event_t* e);          // user_data 0/1/2 = base/loc/env
   static void set_autoadd_cb(lv_event_t* e);
@@ -838,7 +844,7 @@ public:
       _channels_list(NULL), _status_label(NULL),
       _contacts_dirty(false), _contacts_rebuilt_ms(0),
       _contacts_pending(false), _channels_pending(false),
-      _unread_count(0), _muted_count(0), _banner(NULL), _banner_avatar(NULL), _banner_avatar_lbl(NULL),
+      _unread_count(0), _muted_count(0), _unmuted_count(0), _banner(NULL), _banner_avatar(NULL), _banner_avatar_lbl(NULL),
       _banner_title(NULL), _banner_body(NULL), _banner_timer(NULL),
       _pending_chime(UIEventType::none),
       _pick_popup(NULL), _pick_search_ta(NULL), _pick_kb(NULL),
@@ -872,7 +878,7 @@ public:
       _profile_screen(NULL), _profile_body(NULL), _profile_kb(NULL), _profile_return_screen(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
-      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_avatar_dd(NULL), _set_theme_dd(NULL), _set_mention_chk(NULL), _set_hashtag_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_kb(NULL),
+      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_avatar_dd(NULL), _set_theme_dd(NULL), _set_mention_chk(NULL), _set_hashtag_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_mutedef_chk(NULL), _set_kb(NULL),
       _set_active_ta(NULL),
       _set_launcher(NULL), _set_pane{}, _set_pane_body{}, _set_active_pane(NULL),
       _set_key_ta(NULL),
