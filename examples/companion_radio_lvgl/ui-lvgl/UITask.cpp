@@ -1231,6 +1231,25 @@ void UITask::chat_input_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) _instance->layoutChatBody(true);
+  if (code == LV_EVENT_VALUE_CHANGED || code == LV_EVENT_FOCUSED || code == LV_EVENT_DEFOCUSED)
+    _instance->updateCharCount();
+}
+
+// Refresh + show/hide the compose char-count ("n/limit"), shown only while the field
+// is focused and non-empty.
+void UITask::updateCharCount() {
+  if (!_chat_count_lbl || !_chat_input) return;
+  const char* t = lv_textarea_get_text(_chat_input);
+  size_t n = t ? strlen(t) : 0;
+  bool focused = lv_obj_has_state(_chat_input, LV_STATE_FOCUSED);
+  if (n > 0 && focused) {
+    char b[16]; snprintf(b, sizeof(b), "%u/%u", (unsigned)n, (unsigned)CHAT_MSG_TEXT_MAX);
+    lv_label_set_text(_chat_count_lbl, b);
+    lv_obj_clear_flag(_chat_count_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(_chat_count_lbl);
+  } else {
+    lv_obj_add_flag(_chat_count_lbl, LV_OBJ_FLAG_HIDDEN);
+  }
 }
 
 void UITask::chat_send_cb(lv_event_t* e) {
@@ -1327,6 +1346,8 @@ void UITask::layoutChatBody(bool keyboard_shown) {
 
   lv_obj_set_size(_chat_history, _screen_w, compose_y - top);
   lv_obj_align(_chat_history, LV_ALIGN_TOP_MID, 0, top);
+
+  if (_chat_count_lbl) lv_obj_align_to(_chat_count_lbl, _chat_compose, LV_ALIGN_OUT_TOP_RIGHT, -6, -2);
 
   lv_obj_update_layout(_chat_history);
   if (was_at_bottom) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
@@ -2790,6 +2811,16 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_t* send_lbl = lv_label_create(_chat_send_btn);
     lv_label_set_text(send_lbl, LV_SYMBOL_OK);
     lv_obj_center(send_lbl);
+
+    // Live char count, floating just above the compose band; shown only while typing.
+    _chat_count_lbl = lv_label_create(_chat_screen);
+    lv_obj_set_style_text_font(_chat_count_lbl, fontCaption(), 0);
+    lv_obj_set_style_text_color(_chat_count_lbl, lv_color_hex(DIM_HEX), 0);
+    lv_obj_set_style_bg_color(_chat_count_lbl, lv_color_hex(UI_SURFACE), 0);
+    lv_obj_set_style_bg_opa(_chat_count_lbl, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_hor(_chat_count_lbl, 4, 0);
+    lv_obj_set_style_radius(_chat_count_lbl, 4, 0);
+    lv_obj_add_flag(_chat_count_lbl, LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN);
 
     // On-screen keyboard, hidden until the input is focused.
     _chat_keyboard = lv_keyboard_create(_chat_screen);

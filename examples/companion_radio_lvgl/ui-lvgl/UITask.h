@@ -545,6 +545,7 @@ class UITask : public AbstractUITask {
   lv_obj_t* makeModalCard(lv_obj_t** backdrop_out, lv_event_cb_t backdrop_tap_cb);
   void      rebuildChatHistory();
   void      layoutChatBody(bool keyboard_shown);
+  void      updateCharCount();   // refresh the compose char-count label (shown while typing)
   // When a bottom-docked keyboard `kb` is shown, scroll `scroll` so the focused
   // field `ta` sits just above it (no-op if already clear of the keyboard).
   // resetKbScroll() restores the container when the keyboard hides.
