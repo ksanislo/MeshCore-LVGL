@@ -683,6 +683,7 @@ private:
   void      copyToClipboard(const char* text);
   void      clipSet(uint8_t kind, const char* text, const uint8_t* pubkey,
                     const char* name, uint8_t type);
+  void      copyContactRef(const uint8_t* pubkey, uint8_t type, const char* name);  // copy as <hex:type:name>
   // Smart paste: a target field's semantic kind decides which part of a typed
   // clipboard payload gets inserted (contact-ref -> hex field = key, name field =
   // name, chat compose = whole <...> token; plain text -> verbatim everywhere).

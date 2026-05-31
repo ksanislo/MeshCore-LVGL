@@ -3574,8 +3574,8 @@ static void makeHeroCard(lv_obj_t* parent, lv_obj_t** avatarOut, lv_obj_t** avat
   lv_label_set_long_mode(ky, LV_LABEL_LONG_DOT);
   lv_obj_set_style_text_color(ky, lv_color_hex(DIM_HEX), 0);
   lv_obj_set_style_text_font(ky, fontCaption(), 0);
-  lv_obj_add_flag(ky, LV_OBJ_FLAG_CLICKABLE);   // tap -> full key + copy popup
-  lv_obj_add_event_cb(ky, keyCb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_flag(ky, LV_OBJ_FLAG_CLICKABLE);   // long-press -> copy contact (channel hero: key popup)
+  lv_obj_add_event_cb(ky, keyCb, LV_EVENT_LONG_PRESSED, NULL);
 
   *avatarOut = av; *avatarLblOut = avl; *nameOut = nm; *keyOut = ky;
 }
@@ -4120,24 +4120,35 @@ void UITask::showKeyPopup(const char* hex) {
 
 // Contact hero key line -> full key popup (key from the contact being viewed, or
 // the prospective contact in add-mode once a valid key has been entered).
+// Copy a contact as a chat-paste contact ref (<hex:type:name>), same as long-pressing
+// an inline contact card in chat. Reused by the contact + owner hero long-press.
+void UITask::copyContactRef(const uint8_t* pubkey, uint8_t type, const char* name) {
+  if (!pubkey) return;
+  char hex[2 * PUB_KEY_SIZE + 1];
+  mesh::Utils::toHex(hex, pubkey, PUB_KEY_SIZE);
+  char ref[2 * PUB_KEY_SIZE + 48];
+  snprintf(ref, sizeof(ref), "<%s:%u:%s>", hex, (unsigned)type, name ? name : "");
+  clipSet(CLIP_CONTACT_REF, ref, pubkey, name ? name : "", type);
+  showToast("Contact copied");
+}
+
+// Contact Info hero key line -> long-press copies the contact (no more key popup).
 void UITask::cinfo_key_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   if (_instance->_cinfo_mode == CINFO_ADD && !_instance->_cinfo_haskey) return;
   ContactInfo* c = _instance->cinfoContact();
   if (!c) return;
-  char hex[2 * PUB_KEY_SIZE + 1];
-  mesh::Utils::toHex(hex, c->id.pub_key, PUB_KEY_SIZE);
-  _instance->showKeyPopup(hex);
+  _instance->copyContactRef(c->id.pub_key, c->type, c->name);
 }
 
-// Owner profile hero key line -> full key popup (our own public key).
+// Owner profile hero key line -> long-press copies our own contact.
 void UITask::profile_key_cb(lv_event_t* e) {
   (void)e;
   if (!_instance || !mproxy::selfPubKey()) return;
-  char hex[2 * PUB_KEY_SIZE + 1];
-  mesh::Utils::toHex(hex, mproxy::selfPubKey(), PUB_KEY_SIZE);
-  _instance->showKeyPopup(hex);
+  const char* nm = (_instance->_node_prefs && _instance->_node_prefs->node_name[0])
+                       ? _instance->_node_prefs->node_name : "Me";
+  _instance->copyContactRef(mproxy::selfPubKey(), ADV_TYPE_CHAT, nm);
 }
 
 void UITask::cinfo_name_clicked_cb(lv_event_t* e) {
