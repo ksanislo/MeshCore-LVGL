@@ -2225,9 +2225,70 @@ static bool textHasContactRef(const char* text) {
   return false;
 }
 
+// ---- meshcore:// share links (contact/add, channel/add) -------------------
+// URL-decode a [s,e) query value (+ -> space, %XX -> byte) into out.
+static void urlDecode(const char* s, const char* e, char* out, size_t cap) {
+  auto hv = [](char h) -> int { if (h >= '0' && h <= '9') return h - '0'; h |= 0x20; return (h >= 'a' && h <= 'f') ? h - 'a' + 10 : -1; };
+  size_t o = 0;
+  while (s < e && o + 1 < cap) {
+    char c = *s;
+    if (c == '+') { out[o++] = ' '; s++; }
+    else if (c == '%' && e - s >= 3 && hv(s[1]) >= 0 && hv(s[2]) >= 0) { out[o++] = (char)((hv(s[1]) << 4) | hv(s[2])); s += 3; }
+    else { out[o++] = c; s++; }
+  }
+  out[o] = 0;
+}
+// Find query param `key` in [qs,qe); set *vs/*ve to its raw value span.
+static bool findParam(const char* qs, const char* qe, const char* key, const char** vs, const char** ve) {
+  size_t kl = strlen(key);
+  for (const char* p = qs; p < qe; ) {
+    const char* amp = (const char*)memchr(p, '&', (size_t)(qe - p)); if (!amp) amp = qe;
+    const char* eq = (const char*)memchr(p, '=', (size_t)(amp - p));
+    if (eq && (size_t)(eq - p) == kl && strncmp(p, key, kl) == 0) { *vs = eq + 1; *ve = amp; return true; }
+    p = amp + 1;
+  }
+  return false;
+}
+struct McLink { bool is_channel; uint8_t pk[PUB_KEY_SIZE]; uint8_t type; uint8_t secret[32]; int seclen; char name[CHAT_PEER_NAME_MAX]; };
+// Parse a meshcore:// add link in [start,end). False if not a recognized contact/channel add.
+static bool parseMeshcoreLink(const char* start, const char* end, McLink& out) {
+  const char* p = start + 11;   // past "meshcore://"
+  if (end - p < 12) return false;
+  bool contact = strncmp(p, "contact/add?", 12) == 0;
+  bool channel = strncmp(p, "channel/add?", 12) == 0;
+  if (!contact && !channel) return false;
+  const char* qs = p + 12;      // first query char (just past '?')
+  out.is_channel = channel; out.name[0] = 0; out.type = ADV_TYPE_CHAT; out.seclen = 0;
+  const char *vs, *ve;
+  if (findParam(qs, end, "name", &vs, &ve)) urlDecode(vs, ve, out.name, sizeof(out.name));
+  if (contact) {
+    if (!findParam(qs, end, "public_key", &vs, &ve) || (ve - vs) != 2 * PUB_KEY_SIZE) return false;
+    char hx[2 * PUB_KEY_SIZE + 1]; memcpy(hx, vs, 2 * PUB_KEY_SIZE); hx[2 * PUB_KEY_SIZE] = 0;
+    if (!mesh::Utils::fromHex(out.pk, PUB_KEY_SIZE, hx)) return false;
+    if (findParam(qs, end, "type", &vs, &ve)) { char t[8] = {0}; size_t n = (size_t)(ve - vs); if (n < sizeof(t)) { memcpy(t, vs, n); out.type = (uint8_t)atoi(t); } }
+  } else {
+    if (!findParam(qs, end, "secret", &vs, &ve)) return false;
+    int hl = (int)(ve - vs);
+    if (hl != 32 && hl != 64) return false;
+    char hx[65]; memcpy(hx, vs, hl); hx[hl] = 0;
+    out.seclen = hl / 2;
+    if (!mesh::Utils::fromHex(out.secret, out.seclen, hx)) return false;
+  }
+  return true;
+}
+// True if the body has a contact ref OR a meshcore:// add link (-> renderRichBody).
+static bool textHasRichToken(const char* text) {
+  return textHasContactRef(text) || (text && strstr(text, "meshcore://") != nullptr);
+}
+
 // Heap target stashed on a contact card so a tap knows which contact it is (a
 // message may contain several cards). Freed on the card's LV_EVENT_DELETE.
 struct CardTarget { uint8_t pubkey[PUB_KEY_SIZE]; uint8_t type; char name[CHAT_PEER_NAME_MAX]; };
+struct ChanCardTarget { char name[CHAT_PEER_NAME_MAX]; uint8_t secret[32]; uint8_t seclen; };
+static void chan_card_free_cb(lv_event_t* e) {
+  ChanCardTarget* t = (ChanCardTarget*)lv_obj_get_user_data(lv_event_get_target(e));
+  if (t) lv_mem_free(t);
+}
 
 // Filled circle inscribed in the (square) box `a` -- the inner concentric circle of
 // a channel avatar. (radius = CIRCLE on a square area -> a circle.)
@@ -2405,23 +2466,87 @@ void UITask::buildContactCard(lv_obj_t* parent, const ChatMessage* m,
 // bubble. Today the only rich token is a contact ref (<pubkey:type:name>) -> an
 // inline contact card; this is the hook for future inline types (channel links,
 // http image links, etc.): add a detector + a builder in the scan below.
+// A meshcore://channel/add link rendered as a tappable "join channel" chip; tap adds
+// the channel (name + secret) via CmdKind::AddChannel.
+void UITask::chan_card_cb(lv_event_t* e) {
+  if (!_instance) return;
+  if (_instance->_sel.state != SS_IDLE) return;   // a long-press selected the card instead
+  const ChanCardTarget* t = (const ChanCardTarget*)lv_obj_get_user_data(lv_event_get_current_target(e));
+  if (!t) return;
+  mproxy::MeshCmd cmd{};
+  cmd.kind = mproxy::CmdKind::AddChannel;
+  strncpy(cmd.name, t->name, sizeof(cmd.name) - 1);
+  memcpy(cmd.path, t->secret, t->seclen);
+  cmd.path_len = t->seclen;
+  mproxy::postCommand(cmd);
+  char toast[CHAT_PEER_NAME_MAX + 16]; snprintf(toast, sizeof(toast), "Joined %s", t->name);
+  _instance->showToast(toast);
+}
+void UITask::buildChannelLinkCard(lv_obj_t* parent, const char* name, const uint8_t* secret, int seclen) {
+  lv_obj_t* card = lv_obj_create(parent);
+  lv_obj_remove_style_all(card);
+  lv_obj_set_width(card, LV_PCT(100));
+  lv_obj_set_height(card, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_color(card, lv_color_hex(UI_BG), 0);
+  lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_color(card, lv_color_hex(UI_BORDER), 0);
+  lv_obj_set_style_border_width(card, 1, 0);
+  lv_obj_set_style_radius(card, 8, 0);
+  lv_obj_set_style_pad_all(card, 8, 0);
+  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+  ChanCardTarget* t = (ChanCardTarget*)lv_mem_alloc(sizeof(ChanCardTarget));
+  if (t) {
+    strncpy(t->name, name, sizeof(t->name) - 1); t->name[sizeof(t->name) - 1] = 0;
+    memset(t->secret, 0, sizeof(t->secret));
+    if (seclen > (int)sizeof(t->secret)) seclen = sizeof(t->secret);
+    memcpy(t->secret, secret, seclen); t->seclen = (uint8_t)seclen;
+    lv_obj_set_user_data(card, t);
+    lv_obj_add_event_cb(card, chan_card_free_cb, LV_EVENT_DELETE, NULL);
+  }
+  lv_obj_add_event_cb(card, chan_card_cb, LV_EVENT_CLICKED, NULL);
+  char sn[CHAT_PEER_NAME_MAX + 4]; sanitizeForFont(name, sn, sizeof(sn));
+  char line[CHAT_PEER_NAME_MAX + 24]; snprintf(line, sizeof(line), LV_SYMBOL_PLUS " Join channel: %s", sn);
+  lv_obj_t* lbl = lv_label_create(card);
+  lv_obj_set_width(lbl, LV_PCT(100));
+  lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(UI_ACCENT), 0);
+  lv_label_set_text(lbl, line);
+}
+
 void UITask::renderRichBody(lv_obj_t* bubble, const ChatMessage* m, uint32_t fg) {
   lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(bubble, 4, 0);
   const char* p = m->text;
   while (p && *p) {
+    // Earliest token from here: a <hex:type:name> contact ref or a meshcore:// link.
     const char* lt = strchr(p, '<');
     const char* gt = lt ? strchr(lt, '>') : nullptr;
     uint8_t pk[PUB_KEY_SIZE], ty; char nm[CHAT_PEER_NAME_MAX];
-    if (lt && gt && parseContactRefSpan(lt, gt + 1, pk, ty, nm, sizeof(nm))) {
-      addTextSpan(bubble, p, (size_t)(lt - p), fg);   // text before the token (skips blanks)
-      buildContactCard(bubble, m, pk, ty, nm);        // inline contact card
+    bool cref = (lt && gt && parseContactRefSpan(lt, gt + 1, pk, ty, nm, sizeof(nm)));
+    const char* mc = strstr(p, "meshcore://");
+    const char* mcend = nullptr; McLink link; bool mcok = false;
+    if (mc) {
+      mcend = mc; while (*mcend && !isspace((unsigned char)*mcend)) mcend++;
+      mcok = parseMeshcoreLink(mc, mcend, link);
+    }
+    if (cref && (!mcok || lt <= mc)) {              // contact ref first
+      addTextSpan(bubble, p, (size_t)(lt - p), fg);
+      buildContactCard(bubble, m, pk, ty, nm);
       p = gt + 1;
-    } else if (lt) {
-      addTextSpan(bubble, p, (size_t)(lt - p) + 1, fg);  // a stray '<' -> keep as text
+    } else if (mcok) {                              // meshcore:// link
+      addTextSpan(bubble, p, (size_t)(mc - p), fg);
+      if (link.is_channel) buildChannelLinkCard(bubble, link.name, link.secret, link.seclen);
+      else                 buildContactCard(bubble, m, link.pk, link.type, link.name);
+      p = mcend;
+    } else if (lt && (!mc || lt < mc)) {            // stray '<' -> keep as text
+      addTextSpan(bubble, p, (size_t)(lt - p) + 1, fg);
       p = lt + 1;
+    } else if (mc) {                                // unparseable meshcore:// -> keep as text
+      addTextSpan(bubble, p, (size_t)(mcend - p), fg);
+      p = mcend;
     } else {
-      addTextSpan(bubble, p, strlen(p), fg);          // trailing text
+      addTextSpan(bubble, p, strlen(p), fg);
       break;
     }
   }
@@ -2555,8 +2680,8 @@ void UITask::rebuildChatHistory() {
     // the theme's bright/ink color on the neutral incoming bubble (so it stays legible
     // in light themes too).
     uint32_t bubble_fg = m->outgoing ? UI_ON_COLOR : UI_FG_STRONG;
-    if (textHasContactRef(m->text)) {
-      renderRichBody(bubble, m, bubble_fg);   // text runs + inline contact card(s)
+    if (textHasRichToken(m->text)) {
+      renderRichBody(bubble, m, bubble_fg);   // text runs + inline contact card(s) / link chips
     } else {
       addMessageText(bubble, m->text, bubble_fg);
       if (m->outgoing && m->status == MSG_STATUS_FAILED) {

@@ -586,6 +586,8 @@ class UITask : public AbstractUITask {
   void      renderRichBody(lv_obj_t* bubble, const ChatMessage* m, uint32_t fg);  // text + inline rich tokens
   void      buildContactCard(lv_obj_t* parent, const ChatMessage* m,
                              const uint8_t* pubkey, uint8_t type, const char* name);
+  void        buildChannelLinkCard(lv_obj_t* parent, const char* name, const uint8_t* secret, int seclen);
+  static void chan_card_cb(lv_event_t* e);      // tap a meshcore:// channel link -> join
 
   // Clickable chips in message text: @mentions (open a known contact) and
   // #hashtags (open a known public channel, or offer to join it). Resolved
