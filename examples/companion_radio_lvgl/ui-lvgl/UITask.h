@@ -338,6 +338,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_ota_url_ta;      // OTA firmware URL field (lives on the Node Info screen)
   lv_obj_t*       _set_ota_status;      // OTA status label
   lv_obj_t*       _set_ota_btn;         // "Update firmware" button (greyed when no IP)
+  lv_obj_t*       _set_ota_lbl;         // its label -> toggles to "Cancel upgrade" while downloading
   lv_obj_t*       _nodeinfo_body;       // Node Info scroll container (for kb raise)
   lv_obj_t*       _nodeinfo_kb;         // keyboard for the OTA URL field on the Node Info screen
   lv_obj_t*       _otafail_popup;       // "firmware update failed" modal (backdrop)
@@ -531,6 +532,8 @@ class UITask : public AbstractUITask {
   static UITask* _instance;
   static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p);
   static void touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data);
+  static void touch_isr();              // GT911 INT edge -> wake the touch task (no I2C in ISR)
+  static void touchTaskFn(void* arg);   // high-prio task: read GT911 on INT, latch for read_cb
   static void dismiss_kb_cb(lv_event_t* e);   // tap a background -> hide any open keyboard
   static void splash_dismiss_cb(lv_timer_t* t);
 
@@ -1049,7 +1052,7 @@ public:
       _set_wifi_dhcp(NULL), _set_wifi_dns_ovr(NULL), _set_wifi_ip(NULL), _set_wifi_mask(NULL),
       _set_wifi_gw(NULL), _set_wifi_dns(NULL), _set_wifi_status(NULL),
       _set_ntp_en(NULL), _set_ntp_server(NULL), _set_ntp_status(NULL), _set_preset_status(NULL),
-      _set_ota_url_ta(NULL), _set_ota_status(NULL), _set_ota_btn(NULL), _nodeinfo_body(NULL), _nodeinfo_kb(NULL),
+      _set_ota_url_ta(NULL), _set_ota_status(NULL), _set_ota_btn(NULL), _set_ota_lbl(NULL), _nodeinfo_body(NULL), _nodeinfo_kb(NULL),
       _otafail_popup(NULL), _otafail_lbl(NULL),
       _set_mqtt_en(NULL), _set_mqtt_host(NULL), _set_mqtt_port(NULL), _set_mqtt_user(NULL), _set_mqtt_pw(NULL),
       _set_mqtt_topic(NULL), _set_mqtt_tls(NULL), _set_mqtt_rx(NULL), _set_mqtt_tx(NULL), _set_mqtt_status(NULL),

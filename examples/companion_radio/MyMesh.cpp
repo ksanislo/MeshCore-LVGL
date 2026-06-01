@@ -493,6 +493,11 @@ void MyMesh::getOtaStatus(char* out, size_t cap) {
   out[cap - 1] = 0;
 }
 
+// Request the running download abort. Safe: the image streams into the INACTIVE app slot and
+// the boot partition only flips at Update.end(true) -- which we never reach when cancelled --
+// so the live firmware is untouched. The download loop notices the flag and tears down cleanly.
+void MyMesh::cancelOta() { if (_ota_busy) _ota_cancel = true; }
+
 // FreeRTOS entry: run the (blocking) download on its own task so the mesh keeps running.
 void MyMesh::otaTaskTramp(void* arg) {
   MyMesh* self = static_cast<MyMesh*>(arg);
@@ -509,6 +514,7 @@ void MyMesh::startOtaTask() {
     return;
   }
   _ota_busy = true;
+  _ota_cancel = false;       // clear any stale request from a prior run
   if (xTaskCreatePinnedToCore(otaTaskTramp, "ota", 16384, this, 1, nullptr, 1) != pdPASS) {
     _ota_busy = false;
     strncpy(_ota_status, "task spawn failed", sizeof(_ota_status) - 1); _ota_status[sizeof(_ota_status) - 1] = 0;
@@ -569,7 +575,22 @@ void MyMesh::otaFromUrl() {
   if (!ok)                             { fail("connect failed"); return; }
 
   int code = http.GET();
-  if (code != HTTP_CODE_OK)            { http.end(); char b[24]; snprintf(b, sizeof(b), "HTTP %d", code); fail(b); return; }
+  if (code != HTTP_CODE_OK) {           // positive = a real HTTP status (404/403/502/...) -> show
+    http.end();                         // it; negative = a transport error -> name the common ones
+    char b[28];
+    switch (code) {
+      case HTTPC_ERROR_CONNECTION_REFUSED: snprintf(b, sizeof(b), "can't reach server");  break;
+      case HTTPC_ERROR_CONNECTION_LOST:
+      case HTTPC_ERROR_NOT_CONNECTED:      snprintf(b, sizeof(b), "connection lost");      break;
+      case HTTPC_ERROR_READ_TIMEOUT:       snprintf(b, sizeof(b), "server timed out");     break;
+      case HTTPC_ERROR_TOO_LESS_RAM:       snprintf(b, sizeof(b), "out of memory");        break;
+      case HTTPC_ERROR_NO_HTTP_SERVER:     snprintf(b, sizeof(b), "not an HTTP server");   break;
+      default:
+        if (code < 0) snprintf(b, sizeof(b), "net error %d", code);   // rarer transport code
+        else          snprintf(b, sizeof(b), "HTTP %d", code);        // server status
+    }
+    fail(b); return;
+  }
   int len = http.getSize();            // may be -1 (chunked); Update handles unknown size
   Serial.printf("[OTA] %s, content-length=%d, md5=%s\n", url, len, expected_md5[0] ? expected_md5 : "(none)");
 
@@ -578,8 +599,41 @@ void MyMesh::otaFromUrl() {
   }
   if (expected_md5[0]) Update.setMD5(expected_md5);   // checked inline as it streams; only a
   set("downloading...");                              // mismatch surfaces a message (at end())
-  size_t written = Update.writeStream(*http.getStreamPtr());
+
+  // Stream the image ourselves (rather than Update.writeStream) so we can (a) honor a user
+  // cancel between chunks and (b) tolerate a slow/bursty link with our own no-data watchdog.
+  // It all lands in the INACTIVE slot; nothing is committed until Update.end(true) below, so
+  // a cancel or stall here can never corrupt the running firmware.
+  WiFiClient* stream = http.getStreamPtr();
+  uint8_t buf[2048];
+  size_t written = 0;
+  uint32_t last_data_ms = millis();
+  bool cancelled = false, stalled = false;
+  for (;;) {
+    if (_ota_cancel)                       { cancelled = true; break; }
+    if (len > 0 && written >= (size_t)len)  break;             // got the whole declared length
+    size_t avail = stream->available();
+    if (avail) {
+      int r = stream->readBytes(buf, avail > sizeof(buf) ? sizeof(buf) : avail);
+      if (r > 0) {
+        if (Update.write(buf, r) != (size_t)r) {
+          Update.abort(); http.end(); fail("write error");
+          Serial.printf("[OTA] write: %s\n", Update.errorString()); return;
+        }
+        written += r;
+        last_data_ms = millis();
+        if (len > 0) { char b[20]; snprintf(b, sizeof(b), "downloading %u%%",
+                       (unsigned)(written * 100ULL / (size_t)len)); set(b); }
+      }
+      continue;
+    }
+    if (!http.connected())                       break;        // drained + closed: done (chunked) or short
+    if (millis() - last_data_ms > 30000) { stalled = true; break; }  // slow-link watchdog (bursty links OK)
+    delay(1);                                                  // no data yet -> yield, keep waiting
+  }
   http.end();
+  if (cancelled) { Update.abort(); set("cancelled"); Serial.println("[OTA] cancelled by user"); return; }
+  if (stalled)   { Update.abort(); fail("connection lost"); Serial.println("[OTA] stalled mid-download"); return; }
   if (len > 0 && written != (size_t)len) {
     Update.abort(); char b[32]; snprintf(b, sizeof(b), "short: %u/%d", (unsigned)written, len); fail(b);
     Serial.printf("[OTA] %s\n", b); return;

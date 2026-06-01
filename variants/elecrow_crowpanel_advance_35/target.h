@@ -20,6 +20,15 @@
   #define P_TOUCH_SDA 15
   #define P_TOUCH_SCL 16
 #endif
+#ifndef P_TOUCH_INT
+  #define P_TOUCH_INT 47   // GT911 interrupt line -> interrupt-driven touch
+#endif
+
+// The GT911 touch and BM8563 RTC share one I2C bus. With interrupt-driven touch, the
+// high-priority touch task can preempt an RTC access mid-transaction (or race it across
+// cores), so both sides serialize their bus span on this lock. Defined in target.cpp.
+bool board_i2c_lock(uint32_t timeout_ms = 100);
+void board_i2c_unlock();
 
 // The on-board RTC is a BM8563 (PCF8563-register-compatible, I2C addr 0x51) on
 // the same bus as the GT911 touch. LovyanGFX drives that bus register-level and
@@ -38,6 +47,7 @@ public:
   CrowPanelRTCClock() : _hw_ok(false) {}
   void begin() {
     _internal.begin();
+    if (!board_i2c_lock()) return;          // share the bus with touch
     Wire.begin(P_TOUCH_SDA, P_TOUCH_SCL);
     Wire.beginTransmission(0x51);
     if (Wire.endTransmission() == 0 && _hw.begin(&Wire)) {
@@ -50,18 +60,20 @@ public:
     } else {
       Serial.println("[RTC] begin: NOT detected at 0x51");
     }
+    board_i2c_unlock();
   }
   uint32_t getCurrentTime() override { return _internal.getCurrentTime(); }
   void setCurrentTime(uint32_t time) override {
     _internal.setCurrentTime(time);
-    if (_hw_ok && _hw_write_armed) {
+    if (_hw_ok && _hw_write_armed && board_i2c_lock()) {
       Wire.begin(P_TOUCH_SDA, P_TOUCH_SCL);   // re-assert pins (touch reconfigures them per read)
       _hw.adjust(DateTime(time));             // keep the battery RTC in sync
       uint32_t rb = _hw.now().unixtime();     // read back to verify the write actually landed
+      board_i2c_unlock();
       Serial.printf("[RTC] set: wrote=%lu readback=%lu %s\n", (unsigned long)time,
                     (unsigned long)rb, (rb + 3 >= time && rb <= time + 3) ? "OK" : "MISMATCH");
     } else {
-      Serial.printf("[RTC] set: %s internal only=%lu\n", _hw_ok ? "disarmed," : "hw not ok,", (unsigned long)time);
+      Serial.printf("[RTC] set: %s internal only=%lu\n", _hw_ok ? "disarmed/busy," : "hw not ok,", (unsigned long)time);
     }
   }
 
@@ -73,11 +85,12 @@ public:
   // MCU oscillator against the better crystal). Live-clock-only: never writes the chip.
   // Returns true if the chip held a plausible time. Call from the UI core (touch bus).
   bool reseedFromHw() {
-    if (!_hw_ok) return false;
+    if (!_hw_ok || !board_i2c_lock()) return false;
     Wire.begin(P_TOUCH_SDA, P_TOUCH_SCL);
-    if (_hw.lostPower()) return false;
-    uint32_t t = _hw.now().unixtime();
-    if (t <= 1700000000UL) return false;
+    bool lp = _hw.lostPower();
+    uint32_t t = lp ? 0 : _hw.now().unixtime();
+    board_i2c_unlock();
+    if (lp || t <= 1700000000UL) return false;
     _internal.setCurrentTime(t);
     return true;
   }

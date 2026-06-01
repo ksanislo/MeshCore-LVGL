@@ -127,7 +127,9 @@ public:
   void getPresetStatus(char* out, size_t cap);
   void startOtaTask();                     // spawn otaFromUrl on its own task so it never blocks the mesh
   void otaFromUrl();                       // download a firmware .bin from prefs.ota_url -> OTA slot -> reboot
+  void cancelOta();                        // request the in-flight download abort (safe: only the inactive slot)
   void getOtaStatus(char* out, size_t cap);
+  bool otaBusy() const { return _ota_busy; }
 #endif
 #if defined(WITH_MQTT_BRIDGE)
   void applyMqttConfig();                  // push prefs into the shim + (re)start (from UI)
@@ -160,6 +162,7 @@ protected:
   char _preset_status[40] = "";       // last preset-update result, for the UI
   char _ota_status[48] = "idle";      // last OTA result/progress, for the UI
   volatile bool _ota_busy = false;    // an OTA task is running (one at a time)
+  volatile bool _ota_cancel = false;  // UI requested abort -> the download loop bails (inactive slot only)
   static void otaTaskTramp(void* arg); // FreeRTOS entry -> otaFromUrl() on its own task
   void startWifi();
   void stopWifi();

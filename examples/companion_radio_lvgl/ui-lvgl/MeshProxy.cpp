@@ -352,6 +352,11 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
       mesh.startOtaTask();         // spawn on its own task -- returns immediately, mesh keeps running
 #endif
       break;
+    case CmdKind::OtaCancel:
+#if defined(WITH_WIFI) && defined(ESP32)
+      mesh.cancelOta();            // request the in-flight download abort (inactive slot only -- safe)
+#endif
+      break;
     case CmdKind::ApplyMqtt:
       *mesh.getNodePrefs() = cmd.prefs;
       mesh.savePrefs();
@@ -478,6 +483,12 @@ void otaStatus(char* out, size_t cap) {
   if (s_backend) { s_backend->getOtaStatus(out, cap); return; }
 #endif
   strncpy(out, "n/a", cap - 1); out[cap - 1] = 0;
+}
+bool otaBusy() {
+#if defined(WITH_WIFI) && defined(ESP32)
+  if (s_backend) return s_backend->otaBusy();
+#endif
+  return false;
 }
 void wifiIpInfo(char* ip, char* mask, char* gw, char* dns, size_t cap) {
   if (cap == 0) return;

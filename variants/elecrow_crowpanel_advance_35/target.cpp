@@ -94,8 +94,19 @@ void board_rtc_arm_hw_write(bool on){ rtc_clock.armHwWrite(on); }
 bool board_rtc_reseed_from_hw()    { return rtc_clock.reseedFromHw(); }
 extern "C" void board_rtc_set_time(uint32_t epoch) { rtc_clock.setCurrentTime(epoch); }
 
+// Shared GT911-touch / BM8563-RTC I2C bus lock (see target.h). The interrupt-driven touch
+// task and the RTC both serialize their bus span on this so neither corrupts the other.
+static SemaphoreHandle_t s_i2c_mtx = nullptr;
+bool board_i2c_lock(uint32_t timeout_ms) {
+  if (!s_i2c_mtx) return true;   // not yet created (pre-init) -> single-threaded, no contention
+  return xSemaphoreTake(s_i2c_mtx, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+void board_i2c_unlock() { if (s_i2c_mtx) xSemaphoreGive(s_i2c_mtx); }
+int  board_touch_int_pin() { return P_TOUCH_INT; }   // UITask uses this to drive touch off the INT
+
 bool radio_init() {
   hspi_mutex_ensure();   // before any radio/SD SPI transaction can take it
+  if (!s_i2c_mtx) s_i2c_mtx = xSemaphoreCreateMutex();   // before the first RTC bus access
   rtc_clock.begin();
 
   lora_spi.begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI);

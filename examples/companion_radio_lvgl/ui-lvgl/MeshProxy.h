@@ -71,6 +71,7 @@ enum class CmdKind : uint8_t {
   SyncNtp,      // kick an immediate NTP clock sync
   UpdatePresets,// fetch the official radio presets over HTTPS -> internal flash
   OtaUpdate,    // download prefs.ota_url firmware -> OTA partition -> reboot
+  OtaCancel,    // abort an in-flight OTA download (safe: only the inactive slot is touched)
 };
 
 struct MeshCmd {
@@ -158,6 +159,7 @@ void wifiIpInfo(char* ip, char* mask, char* gw, char* dns, size_t cap);  // live
 void ntpStatus(char* out, size_t cap);   // NTP clock-sync status for the UI
 void presetStatus(char* out, size_t cap);   // radio-preset update status for the UI
 void otaStatus(char* out, size_t cap);       // OTA firmware-update status for the UI
+bool otaBusy();                              // true while an OTA download task is running
 int  copyMutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);    // seed the UI's explicit-muted set at begin()
 int  copyUnmutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);  // seed the UI's explicit-unmuted set at begin()
 uint32_t rtcSeconds();             // live device clock (ESP32 internal RTC; safe cross-core)

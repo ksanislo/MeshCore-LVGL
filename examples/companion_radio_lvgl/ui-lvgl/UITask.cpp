@@ -42,6 +42,66 @@ extern "C" __attribute__((weak)) void board_rtc_set_time(uint32_t epoch) {
   settimeofday(&tv, NULL);
 }
 
+// Interrupt-driven touch hooks. A variant wires the GT911 INT pin + shares the touch/RTC
+// I2C bus via a lock (CrowPanel: target.cpp). Defaults: no INT pin (-1) -> UITask keeps
+// polling getTouch in read_cb; the lock is a no-op.
+__attribute__((weak)) int  board_touch_int_pin() { return -1; }
+__attribute__((weak)) bool board_i2c_lock(uint32_t ms) { (void)ms; return true; }
+__attribute__((weak)) void board_i2c_unlock() {}
+
+// Interrupt-driven touch state (CrowPanel). The ISR notifies a high-priority touch task;
+// the task does the GT911 I2C read the instant the finger lands -- off the (possibly slow)
+// LVGL loop -- and latches the result here. touchpad_read_cb returns the latch, with a
+// press-pending edge so a tap that happens entirely between two slow read_cb calls still
+// registers as a click. This makes button hits reliable regardless of frame time.
+static TaskHandle_t   s_touch_task = nullptr;
+static volatile bool  s_t_down = false;          // finger physically on the panel
+static volatile int16_t s_t_x = 0, s_t_y = 0;    // latest coords (while down)
+static volatile bool  s_t_press_pending = false; // a press edge not yet reported to LVGL
+static volatile bool  s_touch_int_mode = false;  // INT-driven path active
+
+// ISR: the GT911 toggles its INT line on a touch event. We do NO I2C here (that would
+// block in an ISR) -- just wake the touch task, which reads the coords off the bus.
+void IRAM_ATTR UITask::touch_isr() {
+  BaseType_t hpw = pdFALSE;
+  if (s_touch_task) vTaskNotifyGiveFromISR(s_touch_task, &hpw);
+  portYIELD_FROM_ISR(hpw);
+}
+
+// High-priority touch task (core 1). Wakes on the INT edge, reads the GT911 over the
+// shared I2C bus, and latches state for touchpad_read_cb. The short timeout means we also
+// poll a few times after the last edge so the finger-lift edge is never missed (some GT911
+// configs only interrupt on touch, not release). A rising edge arms s_t_press_pending so a
+// quick tap that lands and lifts entirely between two LVGL reads still registers as a click.
+void UITask::touchTaskFn(void* arg) {
+  UITask* self = static_cast<UITask*>(arg);
+  const uint32_t RELEASE_MS = 45;   // ignore no-touch reads shorter than this (debounce a held press)
+  uint32_t last_seen_ms = 0;        // last time getTouch actually reported a finger
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(15));   // wake on INT edge; else poll (track holds + lift)
+    uint16_t tx = 0, ty = 0;
+    bool raw = false;
+    if (self->_lgfx && board_i2c_lock(50)) {
+      raw = self->_lgfx->getTouch(&tx, &ty);
+      board_i2c_unlock();
+    }
+    uint32_t now = millis();
+    if (raw) {
+      s_t_x = (int16_t)tx;
+      s_t_y = (int16_t)ty;
+      last_seen_ms = now;
+      if (!s_t_down) s_t_press_pending = true;   // rising edge -> guarantee a click
+      s_t_down = true;
+    } else if (s_t_down && (now - last_seen_ms) < RELEASE_MS) {
+      // GT911 occasionally reports 0 points between its internal samples while a finger is still
+      // down. Without this, that one-sample dropout looks like a release+re-press, which resets
+      // the textarea's cursor/selection state -- so a tap to reposition the cursor often no-ops.
+    } else {
+      s_t_down = false;                          // sustained no-touch -> real lift
+    }
+  }
+}
+
 static void sanitizeForFont(const char* in, char* out, size_t cap);
 static bool containsCI(const char* hay, const char* needle);
 static void firstGrapheme(const char* in, char* out, size_t cap);  // first UTF-8 codepoint (avatar glyph)
@@ -106,8 +166,20 @@ void UITask::touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     return;
   }
   uint16_t tx = 0, ty = 0;
-  bool down = _instance->_lgfx->getTouch(&tx, &ty);
-  _instance->_touch_down = down;            // physical finger state -> loop() defers heavy rebuilds while down
+  bool down, phys;
+  if (s_touch_int_mode) {
+    // Latched by the touch task (read off the INT, not here). Honor a press edge even if the
+    // finger already lifted between LVGL reads, so fast taps never get dropped on a slow frame.
+    phys = s_t_down;
+    tx = (uint16_t)s_t_x;
+    ty = (uint16_t)s_t_y;
+    down = phys;
+    if (s_t_press_pending) { s_t_press_pending = false; down = true; }
+  } else {
+    down = _instance->_lgfx->getTouch(&tx, &ty);   // legacy polled path (no INT pin)
+    phys = down;
+  }
+  _instance->_touch_down = phys;            // physical finger state -> loop() defers heavy rebuilds while down
   if (down) {
     _instance->_last_input_ms = millis();   // reset the idle-off timer
     if (_instance->_display_off) {
@@ -216,6 +288,13 @@ lv_obj_t* UITask::makeSelTextarea(lv_obj_t* parent) {
   lv_obj_t* (*mk)(lv_obj_t*) = lv_textarea_create;
   lv_obj_t* ta = mk(parent);
   lv_textarea_set_text_selection(ta, true);
+  // Selection highlight is drawn by the inner label's SELECTED part -- the default theme leaves
+  // it unset (reads as white-on-dim). Give it an accent fill with white text so it's legible.
+  if (lv_obj_t* lbl = lv_textarea_get_label(ta)) {
+    lv_obj_set_style_bg_color(lbl, lv_color_hex(UI_ACCENT), LV_PART_SELECTED);
+    lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, LV_PART_SELECTED);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), LV_PART_SELECTED);
+  }
   lv_obj_add_event_cb(ta, UITask::ta_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
   attachClearX(ta);   // one-click clear ✕ (shown only when the field has text)
   return ta;
@@ -633,9 +712,72 @@ void UITask::rebuildContactsList() {
   if (!_clist.scroll) return;
   _contacts_dirty = false;
   _contacts_rebuilt_ms = millis();
+
+  // Preserve scroll position across the re-sort: capture the on-screen contacts (stable key +
+  // pixel offset from the viewport top) BEFORE refilling, then restore so they stay put. We use
+  // the MEDIAN of the candidate scroll positions, so the one contact that moved (usually what
+  // triggered this rebuild -- e.g. bumped to top by a new message) is an outlier we ignore. Only
+  // when genuinely scrolled; at the top we stay at the top so new arrivals remain visible.
+  struct { uint8_t key[6]; int off; } anc[12];
+  int nanc = 0;
+  int sy_old = lv_obj_get_scroll_y(_clist.scroll);
+  if (sy_old < 0) sy_old = 0;
+  int leadN = (_clist.lead != ContactListView::LEAD_NONE) ? 1 : 0;
+  if (sy_old > UI_CONTACT_ROW_H / 2) {
+    int vis = lv_obj_get_height(_clist.scroll) / UI_CONTACT_ROW_H + 1;
+    int top = sy_old / UI_CONTACT_ROW_H;
+    for (int d = top; d <= top + vis && nanc < 12; d++) {
+      int ci = d - leadN;
+      if (ci < 0 || ci >= _clist.count) continue;
+      ContactInfo c;
+      if (!mproxy::getContactByIdx(_clist.rows[ci].idx, c)) continue;
+      memcpy(anc[nanc].key, c.id.pub_key, 6);
+      anc[nanc].off = d * UI_CONTACT_ROW_H - sy_old;
+      nanc++;
+    }
+  }
+
   fillContactDisplaySet(_clist, _contacts_filter);
   clistRefresh(_clist, mproxy::getNumContacts() > 0
       ? "No contacts match." : "No contacts yet.\nWaiting for adverts...");
+
+  if (nanc > 0 && _clist.count > 0) {
+    int newLead = (_clist.lead != ContactListView::LEAD_NONE) ? 1 : 0;
+    int cand[12], nc = 0;
+    for (int j = 0; j < _clist.count && nc < nanc; j++) {
+      ContactInfo c;
+      if (!mproxy::getContactByIdx(_clist.rows[j].idx, c)) continue;
+      for (int a = 0; a < nanc; a++)
+        if (memcmp(c.id.pub_key, anc[a].key, 6) == 0) {
+          cand[nc++] = (j + newLead) * UI_CONTACT_ROW_H - anc[a].off;
+          break;
+        }
+    }
+    if (nc > 0) {
+      // Pin to the MODE, not an average: every contact that didn't move shifts by the same
+      // amount, so the stable ones land on one identical scroll value while movers scatter.
+      // The biggest agreeing cluster == "the visible contacts that weren't updated," so we
+      // anchor exactly to them and keep them pixel-stable, even if several contacts moved
+      // above us (mode needs the stable group to be a plurality, not a majority). Ties -> the
+      // topmost cluster (we scan in visible order).
+      int sy_new = cand[0], best = 0;
+      for (int i = 0; i < nc; i++) {
+        int cnt = 0;
+        for (int k = 0; k < nc; k++) if (cand[k] == cand[i]) cnt++;
+        if (cnt > best) { best = cnt; sy_new = cand[i]; }
+      }
+      int max_sy = (_clist.count + newLead) * UI_CONTACT_ROW_H - lv_obj_get_height(_clist.scroll);
+      if (max_sy < 0) max_sy = 0;
+      if (sy_new < 0) sy_new = 0;
+      if (sy_new > max_sy) sy_new = max_sy;
+      if (sy_new > 0) {
+        lv_obj_scroll_to_y(_clist.scroll, sy_new, LV_ANIM_OFF);
+        _clist.first_visible = -1;   // force a re-bind for the restored window
+        clistRelayout(_clist);
+        sb_update(_clist.scroll, _clist.sb);
+      }
+    }
+  }
 }
 
 
@@ -3524,6 +3666,17 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _indev_drv.read_cb = touchpad_read_cb;
   lv_indev_drv_register(&_indev_drv);
 
+  // Interrupt-driven touch: if the variant exposes a GT911 INT pin, read coords off the
+  // INT edge in a dedicated high-priority task instead of polling getTouch on the LVGL loop.
+  // Button hits then land the instant the finger touches, independent of UI frame time.
+  int tint = board_touch_int_pin();
+  if (tint >= 0) {
+    pinMode(tint, INPUT);
+    xTaskCreatePinnedToCore(touchTaskFn, "touch", 4096, this, 3, &s_touch_task, 1);
+    attachInterrupt(digitalPinToInterrupt(tint), touch_isr, CHANGE);
+    s_touch_int_mode = true;   // read_cb now returns the latched state
+  }
+
   if (_node_prefs) g_avatar_palette_mode = _node_prefs->avatar_palette ? 1 : 0;  // seed avatar scheme BEFORE any list renders
   if (_node_prefs) applyThemeByName(_node_prefs->theme_name);  // seed g_ui_palette BEFORE the UI builds (no rebuild yet)
   if (_node_prefs) {                                           // seed chat chip-color toggles
@@ -6171,8 +6324,10 @@ void UITask::buildNodeInfoScreen() {
     lv_obj_add_event_cb(_set_ota_url_ta, set_ota_url_event_cb, LV_EVENT_ALL, NULL); }
   _set_ota_btn = lv_btn_create(body);
   lv_obj_set_width(_set_ota_btn, LV_PCT(100));
+  lv_obj_set_style_bg_color(_set_ota_btn, lv_color_hex(UI_ACCENT), 0);  // baseline; flips red while downloading
   lv_obj_add_event_cb(_set_ota_btn, ota_update_cb, LV_EVENT_CLICKED, NULL);
-  { lv_obj_t* l = lv_label_create(_set_ota_btn); lv_label_set_text(l, LV_SYMBOL_DOWNLOAD " Update firmware"); lv_obj_center(l); }
+  _set_ota_lbl = lv_label_create(_set_ota_btn);
+  lv_label_set_text(_set_ota_lbl, LV_SYMBOL_DOWNLOAD " Update firmware"); lv_obj_center(_set_ota_lbl);
   _set_ota_status = lv_label_create(body);
   lv_label_set_long_mode(_set_ota_status, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(_set_ota_status, LV_PCT(100));
@@ -6245,7 +6400,22 @@ void UITask::refreshNodeInfo() {
     if (hasIp) lv_obj_clear_state(o, LV_STATE_DISABLED);
     else       lv_obj_add_state(o, LV_STATE_DISABLED);
   };
-  en(_set_ota_url_ta); en(_set_ota_btn);
+  en(_set_ota_url_ta);
+  // While a download runs, morph the Update button into a red "Cancel upgrade". Cancel is safe
+  // -- the image streams into the inactive app slot, so aborting never touches the live firmware
+  // (the click handler reads this same state to decide cancel vs. start). The URL field is locked
+  // mid-transfer; the button stays live even though there's an IP-gate on it otherwise.
+  bool downloading = mproxy::otaBusy();
+  if (downloading) {
+    lv_obj_clear_state(_set_ota_btn, LV_STATE_DISABLED);
+    lv_obj_add_state(_set_ota_url_ta, LV_STATE_DISABLED);
+    lv_obj_set_style_bg_color(_set_ota_btn, lv_color_hex(UI_ALERT), 0);
+    if (_set_ota_lbl) lv_label_set_text(_set_ota_lbl, LV_SYMBOL_CLOSE " Cancel upgrade");
+  } else {
+    en(_set_ota_btn);
+    lv_obj_set_style_bg_color(_set_ota_btn, lv_color_hex(UI_ACCENT), 0);
+    if (_set_ota_lbl) lv_label_set_text(_set_ota_lbl, LV_SYMBOL_DOWNLOAD " Update firmware");
+  }
   if (_set_ota_status) {
     char ob[48];
     if (!hasIp) strcpy(ob, "no network (WiFi off?)");
@@ -9168,9 +9338,14 @@ void UITask::set_ota_url_event_cb(lv_event_t* e) {
 void UITask::ota_update_cb(lv_event_t* e) {
   (void)e;
   if (!_instance || !_instance->_node_prefs) return;
+  if (mproxy::otaBusy()) {            // mid-download -> this is the "Cancel upgrade" action
+    mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::OtaCancel; mproxy::postCommand(c);
+    _instance->showToast("Cancelling upgrade...");   // safe: only the inactive slot is discarded
+    return;
+  }
   if (!_instance->_node_prefs->ota_url[0]) { _instance->showToast("Set a firmware URL first"); return; }
   mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::OtaUpdate; mproxy::postCommand(c);
-  _instance->showToast("Downloading firmware...");   // backend blocks then reboots; status line updates at 1 Hz
+  _instance->showToast("Downloading firmware...");   // runs on its own task; status line updates at 1 Hz
 }
 
 void UITask::mqtt_save_cb(lv_event_t* e) {
