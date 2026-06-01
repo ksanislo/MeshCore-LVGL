@@ -140,7 +140,7 @@ void UITask::dismiss_kb_cb(lv_event_t* e) {
   UITask* s = _instance;
   if (s->_chat_keyboard && lv_scr_act() == s->_chat_screen) s->layoutChatBody(false);  // also restores chat layout
   lv_obj_t* kbs[] = { s->_set_kb, s->_cinfo_kb, s->_path_kb, s->_newchan_kb, s->_login_kb,
-                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_profile_kb };
+                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_profile_kb, s->_nodeinfo_kb };
   for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -3572,6 +3572,52 @@ void UITask::noteRxSnr(float snr_db, uint32_t hold_ms, uint32_t tau_ms) {
   mproxy::noteRxSnr(snr_db, millis(), hold_ms, tau_ms);
 }
 
+// Backend thread: an OTA failed (no reboot). Enqueue; the UI core wakes + shows the modal.
+void UITask::otaFailed(const char* reason) {
+  mproxy::UiEvent ev{};
+  ev.kind = mproxy::EvKind::OtaFailed;
+  strncpy(ev.text, reason ? reason : "", sizeof(ev.text) - 1);
+  mproxy::pushEvent(ev);
+}
+
+// Backend thread: OTA succeeded, reboot imminent. Enqueue so the UI flashes a toast.
+void UITask::otaRebooting() {
+  mproxy::UiEvent ev{};
+  ev.kind = mproxy::EvKind::OtaRebooting;
+  mproxy::pushEvent(ev);
+}
+
+// UI core: a blocking modal so a walked-away user can't mistake a failed update for success
+// (success reboots; failure is silent without this). Lazily built; reused.
+void UITask::showOtaFailedModal(const char* reason) {
+  if (!_otafail_popup) {
+    lv_obj_t* card = makeModalCard(&_otafail_popup, [](lv_event_t* ev) {  // tap backdrop = dismiss
+      if (_instance && lv_event_get_target(ev) == _instance->_otafail_popup)
+        lv_obj_add_flag(_instance->_otafail_popup, LV_OBJ_FLAG_HIDDEN);
+    });
+    lv_obj_t* title = lv_label_create(card);
+    lv_label_set_text(title, LV_SYMBOL_WARNING " Firmware update failed");
+    lv_obj_set_style_text_color(title, lv_color_hex(UI_ERROR), 0);
+    lv_obj_set_style_text_font(title, fontHeading(), 0);
+    _otafail_lbl = lv_label_create(card);
+    lv_label_set_long_mode(_otafail_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(_otafail_lbl, LV_PCT(100));
+    lv_obj_set_style_text_color(_otafail_lbl, lv_color_hex(FG_HEX), 0);
+    lv_obj_t* ok = lv_btn_create(card);
+    lv_obj_set_width(ok, LV_PCT(100));
+    lv_obj_add_event_cb(ok, [](lv_event_t* ev) {
+      (void)ev; if (_instance) lv_obj_add_flag(_instance->_otafail_popup, LV_OBJ_FLAG_HIDDEN);
+    }, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* l = lv_label_create(ok); lv_label_set_text(l, LV_SYMBOL_OK " OK"); lv_obj_center(l);
+  }
+  char b[96];
+  snprintf(b, sizeof(b), "%s\n\nThe device was not updated. Try again.",
+           reason && reason[0] ? reason : "Download failed");
+  lv_label_set_text(_otafail_lbl, b);
+  lv_obj_clear_flag(_otafail_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_otafail_popup);
+}
+
 // True if `name` matches a configured channel (vs a contact).
 static bool nameIsChannel(const char* name) {
   if (!name) return false;
@@ -3760,7 +3806,7 @@ void UITask::ta_done_cb(lv_event_t* e) {
   lv_event_send(ta, LV_EVENT_DEFOCUSED, NULL);   // run the field's commit-on-defocus
   lv_obj_clear_state(ta, LV_STATE_FOCUSED);
   lv_obj_t* kbs[] = { s->_set_kb, s->_cinfo_kb, s->_path_kb, s->_newchan_kb, s->_login_kb,
-                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_profile_kb };
+                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_profile_kb, s->_nodeinfo_kb };
   for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -6087,12 +6133,15 @@ void UITask::buildNodeInfoScreen() {
   makeHeaderBar(_nodeinfo_screen, "Node Info", nodeinfo_back_cb);
 
   lv_obj_t* body = lv_obj_create(_nodeinfo_screen);
+  _nodeinfo_body = body;
   lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
   lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
   lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
   lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(body, 0, 0);
   lv_obj_set_style_pad_all(body, 12, 0);
+  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);   // stack the stats label + OTA controls
+  lv_obj_set_style_pad_row(body, 8, 0);
 
   _nodeinfo_lbl = lv_label_create(body);
   lv_obj_set_width(_nodeinfo_lbl, LV_PCT(100));
@@ -6100,6 +6149,36 @@ void UITask::buildNodeInfoScreen() {
   lv_obj_set_style_text_color(_nodeinfo_lbl, lv_color_hex(FG_HEX), 0);
   lv_obj_set_style_text_font(_nodeinfo_lbl, &lv_font_montserrat_14, 0);
   lv_label_set_text(_nodeinfo_lbl, "");
+
+  // ----- Firmware update (OTA). Greys out when there's no IP (WiFi off/broken). -----
+  { lv_obj_t* sec = lv_label_create(body);
+    lv_label_set_text(sec, "Firmware update");
+    lv_obj_set_style_text_color(sec, lv_color_hex(UI_ACCENT), 0);
+    lv_obj_set_style_text_font(sec, fontHeading(), 0); }
+  { lv_obj_t* f = makeField(body, "Firmware URL (.bin)");
+    _set_ota_url_ta = makeSelTextarea(f);
+    lv_textarea_set_one_line(_set_ota_url_ta, true);
+    lv_obj_add_event_cb(_set_ota_url_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_obj_set_width(_set_ota_url_ta, LV_PCT(100));
+    lv_obj_add_event_cb(_set_ota_url_ta, set_ota_url_event_cb, LV_EVENT_ALL, NULL); }
+  _set_ota_btn = lv_btn_create(body);
+  lv_obj_set_width(_set_ota_btn, LV_PCT(100));
+  lv_obj_add_event_cb(_set_ota_btn, ota_update_cb, LV_EVENT_CLICKED, NULL);
+  { lv_obj_t* l = lv_label_create(_set_ota_btn); lv_label_set_text(l, LV_SYMBOL_DOWNLOAD " Update firmware"); lv_obj_center(l); }
+  _set_ota_status = lv_label_create(body);
+  lv_label_set_long_mode(_set_ota_status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_set_ota_status, LV_PCT(100));
+  lv_obj_set_style_text_color(_set_ota_status, lv_color_hex(DIM_HEX), 0);
+  lv_label_set_text(_set_ota_status, "");
+
+  // Keyboard for the URL field (this is a standalone screen, so it has its own).
+  _nodeinfo_kb = lv_keyboard_create(_nodeinfo_screen);
+  lv_obj_add_event_cb(_nodeinfo_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);
+  lv_obj_add_event_cb(_nodeinfo_kb, [](lv_event_t* ev) {
+    if (_instance && (lv_event_get_code(ev) == LV_EVENT_READY || lv_event_get_code(ev) == LV_EVENT_CANCEL))
+      lv_obj_add_flag(_instance->_nodeinfo_kb, LV_OBJ_FLAG_HIDDEN);
+  }, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_nodeinfo_kb, LV_OBJ_FLAG_HIDDEN);
 }
 
 void UITask::refreshNodeInfo() {
@@ -6145,6 +6224,26 @@ void UITask::refreshNodeInfo() {
   n += snprintf(buf + n, sizeof(buf) - n, "Airtime TX/RX: %us / %us\n", st.tx_air_secs, st.rx_air_secs);
   n += snprintf(buf + n, sizeof(buf) - n, "Queue: %u   ErrFlags: 0x%02X", st.queue_len, st.err_flags);
   lv_label_set_text(_nodeinfo_lbl, buf);
+
+  // OTA controls: keep the URL synced from prefs (unless being edited), show status, and
+  // grey out the field + button when there's no IP -- a solid "WiFi is off or broken" cue.
+  char ip[24], mask[24], gw[24], dns[24];
+  mproxy::wifiIpInfo(ip, mask, gw, dns, 24);
+  bool hasIp = ip[0] != 0;
+  if (_set_ota_url_ta && _set_ota_url_ta != _set_active_ta && p)
+    lv_textarea_set_text(_set_ota_url_ta, p->ota_url);
+  auto en = [&](lv_obj_t* o) {
+    if (!o) return;
+    if (hasIp) lv_obj_clear_state(o, LV_STATE_DISABLED);
+    else       lv_obj_add_state(o, LV_STATE_DISABLED);
+  };
+  en(_set_ota_url_ta); en(_set_ota_btn);
+  if (_set_ota_status) {
+    char ob[48];
+    if (!hasIp) strcpy(ob, "no network (WiFi off?)");
+    else        mproxy::otaStatus(ob, sizeof(ob));
+    lv_label_set_text(_set_ota_status, ob);
+  }
 }
 
 void UITask::openNodeInfo() {
@@ -6603,6 +6702,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
 
   // Category launcher rows -> each drills into the matching pane.
   // (The owner hero above is the Profile entry -> pane 0, so no separate row.)
+  makeCategoryRow(_set_launcher, LV_SYMBOL_LIST,  "About",           "Device status, version, firmware update", CAT_ABOUT);
   makeCategoryRow(_set_launcher, LV_SYMBOL_WIFI,  "Radio & Routing", "Frequency, power, presets, mesh",      CAT_RADIO);
   makeCategoryRow(_set_launcher, LV_SYMBOL_GPS,   "Telemetry & GPS", "Telemetry sharing, GPS module",        CAT_TELEMETRY);
   makeCategoryRow(_set_launcher, LV_SYMBOL_BELL,  "Notifications",   "New-message alerts & sound",           CAT_NOTIFY);
@@ -6610,7 +6710,6 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   makeCategoryRow(_set_launcher, LV_SYMBOL_POWER, "Power & Lock",    "LoRa radio, PIN lock, reboot",         CAT_POWER);
   makeCategoryRow(_set_launcher, LV_SYMBOL_WIFI,  "WiFi",            "Connect to a WiFi network",            CAT_WIFI);
   makeCategoryRow(_set_launcher, LV_SYMBOL_UPLOAD,"MQTT",            "Virtual-radio bridge to a broker",     CAT_MQTT);
-  makeCategoryRow(_set_launcher, LV_SYMBOL_LIST,  "About",           "Device status & telemetry",           CAT_ABOUT);
 
   // Profile is a full-screen detail page (built below), not an in-tab pane; the
   // launcher hero opens it. The rest are in-tab category panes.
@@ -6859,23 +6958,6 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_width(_set_preset_status, LV_PCT(100));
   lv_obj_set_style_text_color(_set_preset_status, lv_color_hex(DIM_HEX), 0);
   lv_label_set_text(_set_preset_status, "");
-
-  // ===== Firmware (OTA over WiFi) =====
-  addSettingsSection(body, "Firmware (OTA)");
-  { lv_obj_t* f = makeField(body, "Firmware URL (.bin)");
-    _set_ota_url_ta = makeSelTextarea(f);
-    lv_textarea_set_one_line(_set_ota_url_ta, true);
-    lv_obj_add_event_cb(_set_ota_url_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
-    lv_obj_set_width(_set_ota_url_ta, LV_PCT(100));
-    lv_obj_add_event_cb(_set_ota_url_ta, set_ota_url_event_cb, LV_EVENT_ALL, NULL); }
-  { lv_obj_t* sb = lv_btn_create(body); lv_obj_set_width(sb, LV_PCT(100));
-    lv_obj_add_event_cb(sb, ota_update_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t* l = lv_label_create(sb); lv_label_set_text(l, LV_SYMBOL_DOWNLOAD " Update firmware"); lv_obj_center(l); }
-  _set_ota_status = lv_label_create(body);
-  lv_label_set_long_mode(_set_ota_status, LV_LABEL_LONG_WRAP);
-  lv_obj_set_width(_set_ota_status, LV_PCT(100));
-  lv_obj_set_style_text_color(_set_ota_status, lv_color_hex(DIM_HEX), 0);
-  lv_label_set_text(_set_ota_status, "");
 
   body = _set_pane_body[CAT_MQTT];   // ===== MQTT bridge =====
   addSettingsSection(body, "MQTT bridge");
@@ -9062,12 +9144,12 @@ void UITask::set_ota_url_event_cb(lv_event_t* e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     _instance->_set_active_ta = ta;
-    lv_keyboard_set_textarea(_instance->_set_kb, ta);
-    lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_move_foreground(_instance->_set_kb);
-    if (_instance->_set_active_pane) _instance->raiseFieldForKb(_instance->_set_active_pane, _instance->_set_kb, ta);
+    lv_keyboard_set_textarea(_instance->_nodeinfo_kb, ta);
+    lv_keyboard_set_mode(_instance->_nodeinfo_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_nodeinfo_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_nodeinfo_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_nodeinfo_kb);
+    _instance->raiseFieldForKb(_instance->_nodeinfo_body, _instance->_nodeinfo_kb, ta);
   } else if (code == LV_EVENT_DEFOCUSED && _instance->_node_prefs) {
     strncpy(_instance->_node_prefs->ota_url, lv_textarea_get_text(ta), sizeof(_instance->_node_prefs->ota_url) - 1);
     _instance->_node_prefs->ota_url[sizeof(_instance->_node_prefs->ota_url) - 1] = 0;
@@ -9154,11 +9236,6 @@ void UITask::refreshNetStatus() {
     _preset_status_last[sizeof(_preset_status_last) - 1] = 0;
   }
   showStatus(_set_preset_status, wifiOn, buf);
-  // OTA: status line, and keep the URL field synced from prefs unless it's being edited.
-  if (_set_ota_url_ta && _set_ota_url_ta != _set_active_ta && _node_prefs)
-    lv_textarea_set_text(_set_ota_url_ta, _node_prefs->ota_url);
-  mproxy::otaStatus(buf, sizeof(buf));
-  showStatus(_set_ota_status, wifiOn, buf);
   // Live addressing into the read-only (disabled) IP fields -- never clobbers an
   // editable field the user is filling in static mode.
   char ip[24], mask[24], gw[24], dns[24];
@@ -10022,6 +10099,21 @@ void UITask::drainEvents() {
       case mproxy::EvKind::MsgCount:
         _msgcount = ev.msgcount;
         break;
+      case mproxy::EvKind::OtaFailed: {
+        // Wake the screen (the user may have tapped Update and walked away), then block
+        // with a modal -- a failed update doesn't reboot, so it'd otherwise be invisible.
+        _last_input_ms = millis();
+        if (_display_off) { board_set_backlight(_backlight_duty); _display_off = false; }
+        showOtaFailedModal(ev.text);
+        break;
+      }
+      case mproxy::EvKind::OtaRebooting: {
+        // Success: wake + a brief toast before the device resets into the new image.
+        _last_input_ms = millis();
+        if (_display_off) { board_set_backlight(_backlight_duty); _display_off = false; }
+        showToast("Update OK " LV_SYMBOL_OK " rebooting...");
+        break;
+      }
     }
   }
 }

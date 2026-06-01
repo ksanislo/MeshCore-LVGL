@@ -66,5 +66,11 @@ public:
   virtual void noteRxSnr(float snr_db, uint32_t hold_ms, uint32_t tau_ms) {
     (void)snr_db; (void)hold_ms; (void)tau_ms;
   }
+  // An OTA firmware update failed (no reboot happened). An on-device UI should make this
+  // loud -- the user may have tapped Update and walked away expecting a reboot. Default no-op.
+  virtual void otaFailed(const char* reason) { (void)reason; }
+  // An OTA succeeded and the device is about to reboot into the new image. An on-device UI
+  // can flash a brief "rebooting" toast so the user isn't surprised by the restart. Default no-op.
+  virtual void otaRebooting() {}
   virtual void loop() = 0;
 };

@@ -100,7 +100,7 @@ struct MeshCmd {
 };
 
 // ---- Events (backend → UI) -------------------------------------------------
-enum class EvKind : uint8_t { Msg, SendResult, Delivered, Telem, MsgCount, LoginResult };
+enum class EvKind : uint8_t { Msg, SendResult, Delivered, Telem, MsgCount, LoginResult, OtaFailed, OtaRebooting };
 
 struct UiEvent {
   EvKind   kind;

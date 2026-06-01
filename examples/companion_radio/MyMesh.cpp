@@ -499,9 +499,12 @@ void MyMesh::getOtaStatus(char* out, size_t cap) {
 // GitHub). v1 is insecure TLS + no signature check -- a SHA/signature gate comes later.
 void MyMesh::otaFromUrl() {
   auto set = [this](const char* m) { strncpy(_ota_status, m, sizeof(_ota_status) - 1); _ota_status[sizeof(_ota_status) - 1] = 0; };
+  // Any failure path: set the status AND fire the UI hook so an on-device modal can warn the
+  // user (we don't reboot on failure, so a walked-away user would otherwise see nothing).
+  auto fail = [this, &set](const char* m) { set(m); if (_ui) _ui->otaFailed(m); };
   const char* url = getNodePrefs()->ota_url;
-  if (!url[0])                         { set("no URL set"); return; }
-  if (WiFi.status() != WL_CONNECTED)   { set("no WiFi"); return; }
+  if (!url[0])                         { fail("no URL set"); return; }
+  if (WiFi.status() != WL_CONNECTED)   { fail("no WiFi"); return; }
 
   bool https = (strncmp(url, "https://", 8) == 0);
 
@@ -536,36 +539,38 @@ void MyMesh::otaFromUrl() {
   WiFiClientSecure tls;
   if (https) tls.setInsecure();        // v1: no cert verification
   HTTPClient http;
-  http.setTimeout(15000);
+  http.setTimeout(30000);              // per-read; generous so a slow/stuttering link (e.g. a
+                                       // dialup->WiFi bridge) doesn't false-fail mid-download
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);   // GitHub asset -> CDN 302
   bool ok = https ? http.begin(tls, url) : http.begin(plain, url);
-  if (!ok)                             { set("connect failed"); return; }
+  if (!ok)                             { fail("connect failed"); return; }
 
   int code = http.GET();
-  if (code != HTTP_CODE_OK)            { http.end(); char b[24]; snprintf(b, sizeof(b), "HTTP %d", code); set(b); return; }
+  if (code != HTTP_CODE_OK)            { http.end(); char b[24]; snprintf(b, sizeof(b), "HTTP %d", code); fail(b); return; }
   int len = http.getSize();            // may be -1 (chunked); Update handles unknown size
   Serial.printf("[OTA] %s, content-length=%d, md5=%s\n", url, len, expected_md5[0] ? expected_md5 : "(none)");
 
   if (!Update.begin(len > 0 ? (size_t)len : UPDATE_SIZE_UNKNOWN)) {
-    http.end(); set("no OTA space"); Serial.printf("[OTA] begin failed: %s\n", Update.errorString()); return;
+    http.end(); fail("no OTA space"); Serial.printf("[OTA] begin failed: %s\n", Update.errorString()); return;
   }
-  if (expected_md5[0]) { Update.setMD5(expected_md5); set("verifying..."); }
-  else                 { set("downloading (unverified)"); }
+  if (expected_md5[0]) Update.setMD5(expected_md5);   // checked inline as it streams; only a
+  set("downloading...");                              // mismatch surfaces a message (at end())
   size_t written = Update.writeStream(*http.getStreamPtr());
   http.end();
   if (len > 0 && written != (size_t)len) {
-    Update.abort(); char b[32]; snprintf(b, sizeof(b), "short: %u/%d", (unsigned)written, len); set(b);
+    Update.abort(); char b[32]; snprintf(b, sizeof(b), "short: %u/%d", (unsigned)written, len); fail(b);
     Serial.printf("[OTA] %s\n", b); return;
   }
   if (!Update.end(true)) {             // true = finalize + set the new image as boot partition
     char b[48];
     if (Update.getError() == UPDATE_ERROR_MD5) snprintf(b, sizeof(b), "checksum mismatch - kept current");
     else                                       snprintf(b, sizeof(b), "verify failed: %s", Update.errorString());
-    set(b); Serial.printf("[OTA] %s\n", b); return;   // boot partition NOT changed -> stay on good image
+    fail(b); Serial.printf("[OTA] %s\n", b); return;  // boot partition NOT changed -> stay on good image
   }
   Serial.printf("[OTA] wrote %u bytes, rebooting into new image\n", (unsigned)written);
   set("rebooting...");
-  delay(300);
+  if (_ui) _ui->otaRebooting();   // let the UI flash a toast (from any screen) before we go
+  delay(1200);                    // give the UI core a moment to render it before the reset
   esp_restart();
 }
 void MyMesh::applyWifiConfig() {

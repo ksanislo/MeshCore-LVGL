@@ -333,8 +333,13 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_ntp_status;      // NTP status label
   lv_obj_t*       _set_preset_status;   // radio-preset update status label
   char            _preset_status_last[40] = "";  // last-seen status (reload table on change)
-  lv_obj_t*       _set_ota_url_ta;      // OTA firmware URL field
+  lv_obj_t*       _set_ota_url_ta;      // OTA firmware URL field (lives on the Node Info screen)
   lv_obj_t*       _set_ota_status;      // OTA status label
+  lv_obj_t*       _set_ota_btn;         // "Update firmware" button (greyed when no IP)
+  lv_obj_t*       _nodeinfo_body;       // Node Info scroll container (for kb raise)
+  lv_obj_t*       _nodeinfo_kb;         // keyboard for the OTA URL field on the Node Info screen
+  lv_obj_t*       _otafail_popup;       // "firmware update failed" modal (backdrop)
+  lv_obj_t*       _otafail_lbl;         // its reason text
   lv_obj_t*       _set_mqtt_en;         // MQTT enable switch
   lv_obj_t*       _set_mqtt_host;       // broker host
   lv_obj_t*       _set_mqtt_port;       // broker port (digits)
@@ -1042,7 +1047,8 @@ public:
       _set_wifi_dhcp(NULL), _set_wifi_dns_ovr(NULL), _set_wifi_ip(NULL), _set_wifi_mask(NULL),
       _set_wifi_gw(NULL), _set_wifi_dns(NULL), _set_wifi_status(NULL),
       _set_ntp_en(NULL), _set_ntp_server(NULL), _set_ntp_status(NULL), _set_preset_status(NULL),
-      _set_ota_url_ta(NULL), _set_ota_status(NULL),
+      _set_ota_url_ta(NULL), _set_ota_status(NULL), _set_ota_btn(NULL), _nodeinfo_body(NULL), _nodeinfo_kb(NULL),
+      _otafail_popup(NULL), _otafail_lbl(NULL),
       _set_mqtt_en(NULL), _set_mqtt_host(NULL), _set_mqtt_port(NULL), _set_mqtt_user(NULL), _set_mqtt_pw(NULL),
       _set_mqtt_topic(NULL), _set_mqtt_tls(NULL), _set_mqtt_rx(NULL), _set_mqtt_tx(NULL), _set_mqtt_status(NULL),
       _set_avatar_dd(NULL), _set_theme_dd(NULL), _set_mention_chk(NULL), _set_hashtag_chk(NULL), _set_chsender_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_mutedef_chk(NULL), _set_kb(NULL),
@@ -1111,6 +1117,9 @@ public:
   void telemetryResponse(const uint8_t* pubkey, const char* from_name, const uint8_t* lpp, uint8_t lpp_len) override;
   void msgDelivered(uint32_t ack) override;
   void noteRxSnr(float snr_db, uint32_t hold_ms, uint32_t tau_ms) override;  // -> signal-meter envelope
+  void otaFailed(const char* reason) override;       // -> OtaFailed event -> wake + modal
+  void otaRebooting() override;                      // -> OtaRebooting event -> wake + toast
+  void showOtaFailedModal(const char* reason);       // build/show the "update failed" modal
   void loginResult(const uint8_t* pubkey, bool ok, uint8_t is_admin, uint16_t keep_alive_secs) override;
   void notify(UIEventType t = UIEventType::none) override;
   void loop() override;
