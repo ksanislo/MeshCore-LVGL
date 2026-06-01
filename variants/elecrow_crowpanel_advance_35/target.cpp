@@ -92,6 +92,7 @@ EnvironmentSensorManager sensors;
 bool board_rtc_valid_at_boot()     { return rtc_clock.validAtBoot(); }
 void board_rtc_arm_hw_write(bool on){ rtc_clock.armHwWrite(on); }
 bool board_rtc_reseed_from_hw()    { return rtc_clock.reseedFromHw(); }
+extern "C" void board_rtc_set_time(uint32_t epoch) { rtc_clock.setCurrentTime(epoch); }
 
 bool radio_init() {
   hspi_mutex_ensure();   // before any radio/SD SPI transaction can take it

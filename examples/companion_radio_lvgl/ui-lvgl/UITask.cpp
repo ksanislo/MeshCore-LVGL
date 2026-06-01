@@ -8,6 +8,7 @@
 #include <esp_heap_caps.h>
 #include <esp_system.h>                 // esp_restart() for the Reboot button
 #include <esp_core_dump.h>              // boot-time crash report (coredump-to-flash is on)
+#include <sys/time.h>                   // settimeofday for the manual set-time field fallback
 #include "SdCard.h"                     // SdSvc + the shared `sd` handle, to save crash reports
 #include <SPIFFS.h>                     // internal fallback for the crash report
 #include "../../companion_radio/RadioPresetStore.h"   // WiFi-updatable region presets (internal flash)
@@ -32,6 +33,14 @@ extern "C" __attribute__((weak)) void board_set_backlight(uint8_t duty) { (void)
 // definition that re-seeds the system clock from the chip (CrowPanel: target.cpp).
 // Others fall back to this no-op, so the periodic sync below simply does nothing.
 __attribute__((weak)) bool board_rtc_reseed_from_hw() { return false; }
+
+// Set the system clock (and the hardware RTC, if any) to a UTC epoch. Called on the UI
+// core (which owns the touch/RTC I2C bus) for the manual "Set time" field. A variant
+// with a hardware RTC writes it through; the weak fallback sets only the MCU clock.
+extern "C" __attribute__((weak)) void board_rtc_set_time(uint32_t epoch) {
+  struct timeval tv = { (time_t)epoch, 0 };
+  settimeofday(&tv, NULL);
+}
 
 static void sanitizeForFont(const char* in, char* out, size_t cap);
 static bool containsCI(const char* hay, const char* needle);
@@ -6321,6 +6330,7 @@ void UITask::showSettingsCategory(int cat) {
   _set_active_pane = _set_pane_body[cat];
   if (cat == CAT_WIFI || cat == CAT_MQTT) refreshNetStatus();   // freshen the status line
   if (cat == CAT_TELEMETRY) refreshGpsStatus();                 // GPS debug line
+  if (cat == CAT_DISPLAY) refreshTimeFields();                  // seed the set-time boxes
   if (_set_active_pane) lv_obj_scroll_to_y(_set_active_pane, 0, LV_ANIM_OFF);
   if (_set_kb) lv_obj_add_flag(_set_kb, LV_OBJ_FLAG_HIDDEN);
 }
@@ -6890,6 +6900,51 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_checkbox_set_text(_set_rtc_chk, "Use hardware RTC");
   lv_obj_set_style_text_color(_set_rtc_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_rtc_chk, set_rtc_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  // Manual set-time: HH : MM (local). Editing either box sets the clock to HH:MM:00; an
+  // AM/PM dropdown shows in 12h mode. The boxes live-tick (refreshTimeFields) except the
+  // one being edited, so the ↻ button -- which just re-applies the shown HH:MM:00 -- zeroes
+  // the seconds of the current minute (tap it when an external reference hits the minute).
+  // Untrusted like BLE, but better than nothing when there's no GPS/NTP/phone.
+  {
+    lv_obj_t* fld = makeField(body, "Set time (local)");
+    lv_obj_t* row = lv_obj_create(fld);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 4, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    auto makeBox = [&](lv_obj_t** slot) {
+      lv_obj_t* ta = lv_textarea_create(row);
+      lv_textarea_set_one_line(ta, true);
+      lv_textarea_set_max_length(ta, 2);
+      lv_textarea_set_accepted_chars(ta, "0123456789");
+      lv_obj_set_width(ta, 46);
+      lv_obj_add_event_cb(ta, set_time_ta_event_cb, LV_EVENT_ALL, NULL);
+      *slot = ta;
+    };
+    auto makeSep = [&]() {
+      lv_obj_t* c = lv_label_create(row);
+      lv_label_set_text(c, ":");
+      lv_obj_set_style_text_color(c, lv_color_hex(FG_HEX), 0);
+    };
+    makeBox(&_set_time_hh); makeSep();
+    makeBox(&_set_time_mm);
+
+    _set_time_ampm = lv_dropdown_create(row);
+    lv_dropdown_set_options(_set_time_ampm, "AM\nPM");
+    lv_obj_set_width(_set_time_ampm, 64);
+    lv_obj_add_event_cb(_set_time_ampm, set_time_ampm_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t* rst = lv_btn_create(row);
+    lv_obj_set_size(rst, 40, 36);
+    lv_obj_add_event_cb(rst, set_time_reset_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* ic = lv_label_create(rst);
+    lv_label_set_text(ic, LV_SYMBOL_REFRESH);   // no stopwatch glyph in the icon font; ↻ = "reset"
+    lv_obj_center(ic);
+  }
 
   addSettingsSection(body, "Appearance");
   // Contact avatar color scheme: our curated palette, or iOS-app parity (same
@@ -8092,6 +8147,81 @@ void UITask::set_rtc_cb(lv_event_t* e) {
   // Turning it on: pull true time from the chip right now (runs on the UI core, which
   // owns the touch/RTC I2C bus). Recovers a clock that was clobbered while RTC use was off.
   if (on && board_rtc_reseed_from_hw()) _instance->showToast("Clock synced from RTC");
+  _instance->refreshTimeFields();   // AM/PM visibility follows the 12h toggle's sibling
+}
+
+// Manual "Set time" field. The boxes hold LOCAL wall time; commit always sets seconds to
+// :00, converts to UTC via tz_offset_minutes, and keeps today's date (time-of-day only).
+// Both editing a box and pressing the ↻ button land here -- the button just re-applies the
+// shown HH:MM:00, zeroing the seconds of the current minute. Writes via the weak
+// board_rtc_set_time hook (UI core = touch/RTC I2C owner), which writes the chip too.
+void UITask::commitManualTime() {
+  if (!_node_prefs || !_set_time_hh) return;
+  int hh = atoi(lv_textarea_get_text(_set_time_hh));
+  int mm = atoi(lv_textarea_get_text(_set_time_mm));
+  if (_node_prefs->clock_12h) {                       // 1..12 + AM/PM -> 0..23
+    bool pm = _set_time_ampm && lv_dropdown_get_selected(_set_time_ampm) == 1;
+    if (hh < 1 || hh > 12) hh = 12;
+    hh %= 12;                                          // 12 -> 0
+    if (pm) hh += 12;
+  }
+  if (hh > 23) hh = 23;
+  if (mm > 59) mm = 59;
+  long tzoff    = (long)_node_prefs->tz_offset_minutes * 60;
+  long localNow = (long)mproxy::rtcSeconds() + tzoff;
+  long dayStart = (localNow / 86400) * 86400;          // local midnight (today)
+  long localNew = dayStart + hh * 3600L + mm * 60L;    // seconds := 00
+  board_rtc_set_time((uint32_t)(localNew - tzoff));    // local -> UTC
+}
+
+// 1 Hz live-tick of the HH/MM boxes the user isn't editing, so the field tracks real time
+// (and the ↻ button has the current minute to re-zero); also drives the AM/PM dropdown's
+// value + visibility from the 12h setting.
+void UITask::refreshTimeFields() {
+  if (!_node_prefs || !_set_time_hh) return;
+  bool h12 = _node_prefs->clock_12h;
+  if (_set_time_ampm) {
+    if (h12) lv_obj_clear_flag(_set_time_ampm, LV_OBJ_FLAG_HIDDEN);
+    else     lv_obj_add_flag(_set_time_ampm, LV_OBJ_FLAG_HIDDEN);
+  }
+  time_t t = (time_t)((long)mproxy::rtcSeconds() + (long)_node_prefs->tz_offset_minutes * 60);
+  struct tm tmv; gmtime_r(&t, &tmv);
+  auto editing = [](lv_obj_t* o) { return (lv_obj_get_state(o) & LV_STATE_FOCUSED) != 0; };
+  char b[4];
+  int dh = tmv.tm_hour;
+  if (h12) { dh %= 12; if (dh == 0) dh = 12; }
+  if (!editing(_set_time_hh)) { snprintf(b, sizeof b, "%02d", dh);          lv_textarea_set_text(_set_time_hh, b); }
+  if (!editing(_set_time_mm)) { snprintf(b, sizeof b, "%02d", tmv.tm_min);  lv_textarea_set_text(_set_time_mm, b); }
+  if (h12 && _set_time_ampm)  lv_dropdown_set_selected(_set_time_ampm, tmv.tm_hour >= 12 ? 1 : 0);
+}
+
+void UITask::set_time_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    _instance->_set_active_ta = ta;
+    lv_keyboard_set_textarea(_instance->_set_kb, ta);
+    lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
+    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_set_kb);
+    _instance->raiseFieldForKb(_instance->_set_active_pane ? _instance->_set_active_pane
+                                                           : _instance->_tab_settings,
+                               _instance->_set_kb, ta);
+  } else if (code == LV_EVENT_DEFOCUSED) {
+    _instance->commitManualTime();
+  }
+}
+
+void UITask::set_time_ampm_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->commitManualTime();
+}
+
+void UITask::set_time_reset_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->commitManualTime();   // re-apply shown HH:MM:00 -> zeroes the current minute's seconds
 }
 
 void UITask::set_avatar_cb(lv_event_t* e) {
@@ -9468,6 +9598,7 @@ void UITask::loop() {
         refreshNetStatus();
       }
       if (_set_active_pane == _set_pane_body[CAT_TELEMETRY]) refreshGpsStatus();
+      if (_set_active_pane == _set_pane_body[CAT_DISPLAY]) refreshTimeFields();  // tick the set-time boxes
     }
   }
 

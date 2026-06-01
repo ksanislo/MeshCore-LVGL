@@ -307,6 +307,9 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_tz_ta;           // UTC offset (hours) for local-time display
   lv_obj_t*       _set_clock_chk;       // 12-hour clock toggle
   lv_obj_t*       _set_rtc_chk;         // "use hardware RTC" toggle (discipline clock from the chip)
+  lv_obj_t*       _set_time_hh;         // manual set-time: hours box
+  lv_obj_t*       _set_time_mm;         // manual set-time: minutes box (seconds aren't shown -- the ↻ button zeroes them)
+  lv_obj_t*       _set_time_ampm;       // manual set-time: AM/PM dropdown (12h mode only)
   lv_obj_t*       _set_autolock_chk;    // auto-lock on sleep toggle
   // Network panes (WiFi + MQTT). Values committed on each pane's Save button.
   lv_obj_t*       _set_wifi_en;         // WiFi enable switch
@@ -811,6 +814,11 @@ private:
   static void set_tz_ta_event_cb(lv_event_t* e);
   static void set_clock_cb(lv_event_t* e);
   static void set_rtc_cb(lv_event_t* e);
+  static void set_time_ta_event_cb(lv_event_t* e);  // HH/MM/SS boxes: kb on focus, commit on defocus
+  static void set_time_ampm_cb(lv_event_t* e);      // AM/PM dropdown change -> commit
+  static void set_time_reset_cb(lv_event_t* e);     // ↻ button -> re-apply shown HH:MM:00 (zero seconds)
+  void        commitManualTime();                   // shown HH:MM -> set clock to HH:MM:00 (local -> UTC)
+  void        refreshTimeFields();                  // live-tick the boxes not being edited
   static void set_autolock_cb(lv_event_t* e);
   static void net_ta_event_cb(lv_event_t* e);   // MQTT text-field keyboard
   static void wifi_ta_event_cb(lv_event_t* e);  // WiFi text field: kb on focus, apply on defocus
@@ -1002,7 +1010,8 @@ public:
       _profile_screen(NULL), _profile_body(NULL), _profile_kb(NULL), _profile_return_screen(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
-      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_rtc_chk(NULL), _set_autolock_chk(NULL),
+      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_rtc_chk(NULL),
+      _set_time_hh(NULL), _set_time_mm(NULL), _set_time_ampm(NULL), _set_autolock_chk(NULL),
       _set_wifi_en(NULL), _set_wifi_ssid(NULL), _set_wifi_pw(NULL),
       _set_wifi_dhcp(NULL), _set_wifi_dns_ovr(NULL), _set_wifi_ip(NULL), _set_wifi_mask(NULL),
       _set_wifi_gw(NULL), _set_wifi_dns(NULL), _set_wifi_status(NULL),
