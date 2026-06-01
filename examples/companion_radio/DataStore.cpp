@@ -313,6 +313,10 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     _prefs.ntp_enabled = 1;                                                                // 182 (default: on)
     _prefs.ntp_server[0] = 0;                                                              // 183 (empty -> pool.ntp.org)
     _prefs.use_rtc_clock = 0xFF;                                                           // 184 (unset -> on)
+    _prefs.sigmeter_snr_min = -12;                                                         // 185 (default)
+    _prefs.sigmeter_snr_max = 6;                                                           // 186 (default)
+    _prefs.sigmeter_hold_s = 30;                                                           // 187 (default)
+    _prefs.sigmeter_decay_s = 100;                                                         // 188 (default)
     file.read((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
     file.read((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
     file.read((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
@@ -352,6 +356,10 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.ntp_enabled, sizeof(_prefs.ntp_enabled));                     // 182
     file.read((uint8_t *)_prefs.ntp_server, sizeof(_prefs.ntp_server));                        // 183
     file.read((uint8_t *)&_prefs.use_rtc_clock, sizeof(_prefs.use_rtc_clock));                 // 184
+    file.read((uint8_t *)&_prefs.sigmeter_snr_min, sizeof(_prefs.sigmeter_snr_min));           // 185
+    file.read((uint8_t *)&_prefs.sigmeter_snr_max, sizeof(_prefs.sigmeter_snr_max));           // 186
+    file.read((uint8_t *)&_prefs.sigmeter_hold_s, sizeof(_prefs.sigmeter_hold_s));             // 187
+    file.read((uint8_t *)&_prefs.sigmeter_decay_s, sizeof(_prefs.sigmeter_decay_s));           // 188
 
     file.close();
   }
@@ -432,6 +440,10 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.ntp_enabled, sizeof(_prefs.ntp_enabled));                     // 182
     file.write((uint8_t *)_prefs.ntp_server, sizeof(_prefs.ntp_server));                        // 183
     file.write((uint8_t *)&_prefs.use_rtc_clock, sizeof(_prefs.use_rtc_clock));                 // 184
+    file.write((uint8_t *)&_prefs.sigmeter_snr_min, sizeof(_prefs.sigmeter_snr_min));           // 185
+    file.write((uint8_t *)&_prefs.sigmeter_snr_max, sizeof(_prefs.sigmeter_snr_max));           // 186
+    file.write((uint8_t *)&_prefs.sigmeter_hold_s, sizeof(_prefs.sigmeter_hold_s));             // 187
+    file.write((uint8_t *)&_prefs.sigmeter_decay_s, sizeof(_prefs.sigmeter_decay_s));           // 188
 
     file.close();
     commitTmp(_fs, "/new_prefs.tmp", "/new_prefs");

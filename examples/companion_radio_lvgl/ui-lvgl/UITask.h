@@ -271,6 +271,9 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _menu_list;
   lv_obj_t*       _toast;
   lv_timer_t*     _toast_timer;   // auto-hide timer; a new toast cancels the pending one
+  lv_obj_t*       _sig_meter;     // header signal-strength meter container
+  lv_obj_t*       _sig_bars[4];   // its 4 bars (low->high)
+  int             _sig_bar_count; // bars currently lit (for hysteresis); -1 = uninit
   lv_obj_t*       _path_return_screen;
 
   lv_obj_t*       _path_screen;
@@ -386,6 +389,13 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _pinset_ta2;
   lv_obj_t*       _pinset_err;
   lv_obj_t*       _pinset_kb;
+  // Signal-meter tuning modal (off the Radio pane). Number fields commit on defocus.
+  lv_obj_t*       _sigmod_popup;
+  lv_obj_t*       _sigmod_kb;
+  lv_obj_t*       _sig_min_ta;
+  lv_obj_t*       _sig_max_ta;
+  lv_obj_t*       _sig_hold_ta;
+  lv_obj_t*       _sig_decay_ta;
   // Lock overlay (keypad PIN entry). Lazily built; _locked gates the whole UI.
   static const int LOCK_PIN_MAX = 6;       // PINs are 4-6 digits
   static const intptr_t LOCK_KEY_CLEAR = -1;
@@ -820,6 +830,13 @@ private:
   static void set_time_reset_cb(lv_event_t* e);     // ↻ button -> re-apply shown HH:MM:00 (zero seconds)
   void        commitManualTime();                   // shown HH:MM -> set clock to HH:MM:00 (local -> UTC)
   void        refreshTimeFields();                  // live-tick the boxes not being edited
+  void        refreshSignalMeter();                 // 1Hz: decay SNR envelope -> header bars (hysteretic)
+  void        buildSignalPopup();                   // lazily build the signal-meter tuning modal
+  void        openSignalMeter();                    // populate from prefs + show
+  void        commitSigMeter();                     // parse the 4 fields -> prefs + pushPrefs
+  static void sig_meter_btn_cb(lv_event_t* e);      // Radio pane button -> openSignalMeter
+  static void sigmod_ta_event_cb(lv_event_t* e);    // field: kb on focus, commit on defocus
+  static void sigmod_dismiss_cb(lv_event_t* e);     // backdrop tap -> hide
   static void set_autolock_cb(lv_event_t* e);
   static void net_ta_event_cb(lv_event_t* e);   // MQTT text-field keyboard
   static void wifi_ta_event_cb(lv_event_t* e);  // WiFi text field: kb on focus, apply on defocus
@@ -1004,7 +1021,8 @@ public:
       _chinfo_active_ta(NULL), _chinfo_return_screen(NULL),
       _cinfo_mode(CINFO_VIEW), _cinfo_addkey_locked(false), _cinfo_haskey(false),
       _cinfo_return_screen(NULL),
-      _menu_popup(NULL), _menu_list(NULL), _toast(NULL), _toast_timer(NULL), _path_return_screen(NULL),
+      _menu_popup(NULL), _menu_list(NULL), _toast(NULL), _toast_timer(NULL),
+      _sig_meter(NULL), _sig_bar_count(-1), _path_return_screen(NULL),
       _path_screen(NULL), _path_size_dd(NULL), _path_ta(NULL), _path_kb(NULL), _path_err(NULL),
       _set_profile_avatar(NULL), _set_profile_avatar_lbl(NULL), _set_profile_name(NULL), _set_profile_key(NULL),
       _prof_hero(NULL), _prof_avatar(NULL), _prof_avatar_lbl(NULL), _prof_name(NULL), _prof_key(NULL),
@@ -1030,6 +1048,7 @@ public:
       _set_gps_chk(NULL), _set_gps_interval_ta(NULL), _set_gps_status(NULL),
       _set_radio_sw(NULL),
       _pinset_popup(NULL), _pinset_ta1(NULL), _pinset_ta2(NULL), _pinset_err(NULL), _pinset_kb(NULL),
+      _sigmod_popup(NULL), _sigmod_kb(NULL), _sig_min_ta(NULL), _sig_max_ta(NULL), _sig_hold_ta(NULL), _sig_decay_ta(NULL),
       _lock_screen(NULL), _lock_err(NULL), _lock_len(0), _locked(false),
       _confirm_popup(NULL), _joinch_popup(NULL), _joinch_lbl(NULL),
       _info_popup(NULL), _info_title_lbl(NULL), _info_body_lbl(NULL),
@@ -1083,6 +1102,7 @@ public:
   void sentMsg(const char* peer, const char* text) override;
   void telemetryResponse(const uint8_t* pubkey, const char* from_name, const uint8_t* lpp, uint8_t lpp_len) override;
   void msgDelivered(uint32_t ack) override;
+  void noteRxSnr(float snr_db, uint32_t hold_ms, uint32_t tau_ms) override;  // -> signal-meter envelope
   void loginResult(const uint8_t* pubkey, bool ok, uint8_t is_admin, uint16_t keep_alive_secs) override;
   void notify(UIEventType t = UIEventType::none) override;
   void loop() override;

@@ -82,4 +82,11 @@ struct NodePrefs {  // persisted to file
   // skip the contact-time bootstrap at boot and periodically re-seed the system
   // clock from it (the chip's crystal outlasts/outperforms the MCU's). 0xFF unset -> on.
   uint8_t  use_rtc_clock;       // 1 = use the hardware RTC, 0 = off (stock bootstrap)
+  // Signal-strength meter: a peak-hold-with-decay envelope over heard-packet SNR drives
+  // header bars. Tunable via Settings > Radio > "Signal meter". Defaulted before read, so
+  // old/short prefs files keep the defaults.
+  int8_t   sigmeter_snr_min;    // dB: SNR at/below the bottom bar threshold (default -12)
+  int8_t   sigmeter_snr_max;    // dB: SNR at/above the top (4th) bar threshold (default 6)
+  uint16_t sigmeter_hold_s;     // s: hold the peak before it decays (default 30)
+  uint16_t sigmeter_decay_s;    // s: linear decay span after the hold (default 100)
 };

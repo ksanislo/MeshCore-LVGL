@@ -525,6 +525,40 @@ bool getNameOverride(const uint8_t* pubkey, char* out, size_t cap) {
 
 const NodePrefs* prefsSnap() { const MeshSnapshot* s = readBuf(); return s ? &s->prefs : nullptr; }
 uint32_t rtcSeconds()        { return the_mesh.getRTCClock()->getCurrentTime(); }
+
+// ---- Signal-strength meter (SNR peak-hold-with-decay) ----------------------
+// Two scalars: the held peak (dB) and when it was last raised. Written on the backend
+// (noteRxSnr), read on the UI (signalLevelDb); a torn read just skews one display frame.
+static const float SIG_FLOOR_DB = -30.0f;   // decays to here (well below the bottom bar) = empty
+static volatile float    s_sig_peak_db = SIG_FLOOR_DB;
+static volatile uint32_t s_sig_peak_ms = 0;
+static volatile bool     s_sig_seen    = false;
+
+// Hold the peak flat for hold_ms, then ramp linearly down to the floor over tau_ms.
+static float sigDecay(float peak, uint32_t elapsed_ms, uint32_t hold_ms, uint32_t tau_ms) {
+  if (elapsed_ms <= hold_ms) return peak;
+  if (tau_ms == 0) return SIG_FLOOR_DB;
+  float frac = (float)(elapsed_ms - hold_ms) / (float)tau_ms;
+  if (frac >= 1.0f) return SIG_FLOOR_DB;
+  return peak - (peak - SIG_FLOOR_DB) * frac;
+}
+
+void noteRxSnr(float snr_db, uint32_t now_ms, uint32_t hold_ms, uint32_t tau_ms) {
+  float cur = s_sig_seen ? sigDecay(s_sig_peak_db, now_ms - s_sig_peak_ms, hold_ms, tau_ms)
+                         : SIG_FLOOR_DB;
+  // Only a stronger-than-current signal raises the meter (and re-arms the hold); weaker
+  // packets don't extend it -- so it stays high only while strong signals keep arriving.
+  if (!s_sig_seen || snr_db > cur) {
+    s_sig_peak_db = snr_db;
+    s_sig_peak_ms = now_ms;
+    s_sig_seen    = true;
+  }
+}
+float signalLevelDb(uint32_t now_ms, uint32_t hold_ms, uint32_t tau_ms) {
+  if (!s_sig_seen) return -127.0f;
+  return sigDecay(s_sig_peak_db, now_ms - s_sig_peak_ms, hold_ms, tau_ms);
+}
+bool signalHasData() { return s_sig_seen; }
 const uint8_t* hookKey()     { return the_mesh.hookKey(); }
 bool hookIsChannel()         { return the_mesh.hookIsChannel(); }
 

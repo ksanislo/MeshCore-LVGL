@@ -158,6 +158,14 @@ int  copyMutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);    // seed the UI's
 int  copyUnmutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);  // seed the UI's explicit-unmuted set at begin()
 uint32_t rtcSeconds();             // live device clock (ESP32 internal RTC; safe cross-core)
 
+// Signal-strength meter: a peak-hold-with-decay envelope over heard-packet SNR. The
+// backend feeds samples from onRecvPacket (noteRxSnr); the UI reads the current decayed
+// level (signalLevelDb) at 1 Hz and quantizes it to bars. hold/tau come from NodePrefs.
+// Two-scalar state, written backend / read UI -- a torn read at worst skews one frame.
+void  noteRxSnr(float snr_db, uint32_t now_ms, uint32_t hold_ms, uint32_t tau_ms);
+float signalLevelDb(uint32_t now_ms, uint32_t hold_ms, uint32_t tau_ms);  // decayed dB; -127 if no data yet
+bool  signalHasData();             // false until the first real sample (cold start = empty bars)
+
 // Valid ONLY inside a mesh callback (backend thread): the conversation key of the
 // message currently handed to the UI. The 5 UITask callbacks run on the backend,
 // so they read these to cook their event before enqueuing it.

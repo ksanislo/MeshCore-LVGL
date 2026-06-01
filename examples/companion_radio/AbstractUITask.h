@@ -60,5 +60,11 @@ public:
     (void)pubkey; (void)ok; (void)is_admin; (void)keep_alive_secs;
   }
   virtual void notify(UIEventType t = UIEventType::none) = 0;
+  // A raw radio reception's SNR (dB), with the signal-meter envelope tuning (ms), so an
+  // on-device UI can drive a signal-strength meter. Called per heard packet on the mesh
+  // thread. Default no-op (non-UI builds ignore it).
+  virtual void noteRxSnr(float snr_db, uint32_t hold_ms, uint32_t tau_ms) {
+    (void)snr_db; (void)hold_ms; (void)tau_ms;
+  }
   virtual void loop() = 0;
 };

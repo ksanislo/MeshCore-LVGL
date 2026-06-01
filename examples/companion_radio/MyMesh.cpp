@@ -298,6 +298,10 @@ uint8_t MyMesh::getExtraAckTransmitCount() const {
 }
 
 void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+  // Feed the on-device signal-strength meter: every real radio reception (incl. acks and
+  // packets not for us) lands here with a true SNR. No-op on non-UI builds.
+  if (_ui) _ui->noteRxSnr(snr, (uint32_t)_prefs.sigmeter_hold_s * 1000, (uint32_t)_prefs.sigmeter_decay_s * 1000);
+
   if (_serial->isConnected() && len + 3 <= MAX_FRAME_SIZE) {
     int i = 0;
     out_frame[i++] = PUSH_CODE_LOG_RX_DATA;
@@ -1180,6 +1184,8 @@ void MyMesh::begin(bool has_display) {
 
   // load persisted prefs
   _prefs.use_rtc_clock = 0xFF;   // default-on for fresh installs (no prefs file); loadPrefs overrides if persisted
+  _prefs.sigmeter_snr_min = -12; _prefs.sigmeter_snr_max = 6;   // signal-meter defaults (fresh installs)
+  _prefs.sigmeter_hold_s = 30;   _prefs.sigmeter_decay_s = 100;
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
 
   // sanitise bad pref values

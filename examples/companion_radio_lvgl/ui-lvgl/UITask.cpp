@@ -376,6 +376,25 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_set_style_text_font(_clock_label, &lv_font_montserrat_14, 0);
   lv_obj_align(_clock_label, LV_ALIGN_RIGHT_MID, -4, 0);
 
+  // Signal-strength meter: 4 bottom-aligned bars just left of the clock. Driven at 1 Hz
+  // from the SNR envelope in loop() -> refreshSignalMeter(); re-anchored to the clock there
+  // (the clock's width changes with the time). Starts empty (all bars dim).
+  _sig_meter = lv_obj_create(header);
+  lv_obj_remove_style_all(_sig_meter);
+  lv_obj_set_size(_sig_meter, 18, 14);
+  lv_obj_clear_flag(_sig_meter, LV_OBJ_FLAG_SCROLLABLE);
+  for (int i = 0; i < 4; i++) {
+    lv_obj_t* b = lv_obj_create(_sig_meter);
+    lv_obj_remove_style_all(b);
+    lv_obj_set_style_radius(b, 1, 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(UI_BORDER), 0);   // dim until lit
+    lv_obj_set_size(b, 3, 4 + i * 3);                           // heights 4,7,10,13
+    lv_obj_align(b, LV_ALIGN_BOTTOM_LEFT, i * 5, 0);            // 3px wide + 2px gap
+    _sig_bars[i] = b;
+  }
+  lv_obj_align_to(_sig_meter, _clock_label, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+
   // ----- tabbed body (tabs pinned to bottom) -----
   _tabview = lv_tabview_create(scr, LV_DIR_BOTTOM, TABBAR_H);
   lv_obj_set_size(_tabview, _screen_w, _screen_h - HEADER_H);
@@ -3540,6 +3559,12 @@ void UITask::msgRead(int msgcount) {
   mproxy::pushEvent(ev);
 }
 
+// Runs on the backend thread (per heard packet). Feed the SNR into the signal-meter
+// envelope; the UI core reads the decayed level each second in loop().
+void UITask::noteRxSnr(float snr_db, uint32_t hold_ms, uint32_t tau_ms) {
+  mproxy::noteRxSnr(snr_db, millis(), hold_ms, tau_ms);
+}
+
 // True if `name` matches a configured channel (vs a contact).
 static bool nameIsChannel(const char* name) {
   if (!name) return false;
@@ -6672,6 +6697,14 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   _set_rxdelay_ta  = makeNumberField(body, "RX delay (s)", set_advnum_ta_event_cb);
   _set_airtime_ta  = makeNumberField(body, "Airtime factor", set_advnum_ta_event_cb);
 
+  // Signal-strength meter tuning lives in its own modal so it doesn't clutter this pane.
+  { lv_obj_t* sb = lv_btn_create(body);
+    lv_obj_set_width(sb, LV_PCT(100));
+    lv_obj_add_event_cb(sb, sig_meter_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* sl = lv_label_create(sb);
+    lv_label_set_text(sl, "Signal meter" LV_SYMBOL_RIGHT);
+    lv_obj_center(sl); }
+
 #if ENV_INCLUDE_GPS
   body = _set_pane_body[CAT_TELEMETRY];   // Telemetry & GPS
   // ===== GPS (optional module on the rear UART plug) =====
@@ -8206,6 +8239,34 @@ void UITask::refreshTimeFields() {
   if (h12 && _set_time_ampm)  lv_dropdown_set_selected(_set_time_ampm, tmv.tm_hour >= 12 ? 1 : 0);
 }
 
+// Map the decayed SNR envelope to 0-4 lit bars and recolor. Thresholds are evenly spaced
+// between snr_min (1st bar) and snr_max (4th bar); a per-bar margin gives hysteresis so the
+// count doesn't flicker at a boundary. Empty (all dim) until the first packet is heard.
+void UITask::refreshSignalMeter() {
+  if (!_sig_meter || !_node_prefs) return;
+  int target = 0;
+  if (mproxy::signalHasData()) {
+    uint32_t hold = (uint32_t)_node_prefs->sigmeter_hold_s * 1000;
+    uint32_t tau  = (uint32_t)_node_prefs->sigmeter_decay_s * 1000;
+    float lvl = mproxy::signalLevelDb(millis(), hold, tau);
+    float lo = _node_prefs->sigmeter_snr_min;
+    float hi = _node_prefs->sigmeter_snr_max;
+    if (hi <= lo) hi = lo + 1;
+    float step   = (hi - lo) / 3.0f;     // 4 bars -> 3 gaps; t_i = lo + i*step, i=0..3
+    float margin = step * 0.4f;          // hysteresis band
+    for (int i = 0; i < 4; i++) {
+      float thr = lo + i * step;
+      // need extra to light a new bar (rising), allow slack before dropping one (falling)
+      float adj = (i + 1 > _sig_bar_count) ? margin : -margin;
+      if (lvl >= thr + adj) target = i + 1;
+    }
+  }
+  if (target == _sig_bar_count) return;
+  _sig_bar_count = target;
+  for (int i = 0; i < 4; i++)
+    lv_obj_set_style_bg_color(_sig_bars[i], lv_color_hex(i < target ? UI_FG_STRONG : UI_BORDER), 0);
+}
+
 void UITask::set_time_ta_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_obj_t* ta = lv_event_get_target(e);
@@ -8698,6 +8759,119 @@ void UITask::pinset_kb_event_cb(lv_event_t* e) {
   if (!_instance) return;
   if (lv_event_get_code(e) == LV_EVENT_READY || lv_event_get_code(e) == LV_EVENT_CANCEL)
     lv_obj_add_flag(_instance->_pinset_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+// ---- Signal-meter tuning modal --------------------------------------------
+void UITask::buildSignalPopup() {
+  if (_sigmod_popup) return;
+  lv_obj_t* card = makeModalCard(&_sigmod_popup, sigmod_dismiss_cb);
+  lv_obj_align(card, LV_ALIGN_TOP_MID, 0, HEADER_H + 8);   // room for the keyboard below
+  lv_obj_add_flag(_sigmod_popup, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t* title = lv_label_create(card);
+  lv_label_set_text(title, "Signal meter");
+  lv_obj_set_style_text_color(title, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(title, fontHeading(), 0);
+
+  lv_obj_t* hint = lv_label_create(card);
+  lv_label_set_text(hint, "Header bars from heard-packet SNR.\nLower=more sensitive; hold/decay set the fade.");
+  lv_obj_set_style_text_color(hint, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
+
+  auto mkfield = [&](const char* cap, lv_obj_t** slot, const char* chars) {
+    lv_obj_t* f = makeField(card, cap);
+    lv_obj_t* ta = makeSelTextarea(f);
+    lv_textarea_set_one_line(ta, true);
+    lv_obj_add_event_cb(ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_textarea_set_max_length(ta, 5);
+    lv_textarea_set_accepted_chars(ta, chars);
+    lv_obj_set_width(ta, LV_PCT(100));
+    lv_obj_add_event_cb(ta, sigmod_ta_event_cb, LV_EVENT_ALL, NULL);
+    *slot = ta;
+  };
+  mkfield("Min SNR (1 bar), dB", &_sig_min_ta, "0123456789-");
+  mkfield("Max SNR (4 bars), dB", &_sig_max_ta, "0123456789-");
+  mkfield("Hold (s)", &_sig_hold_ta, "0123456789");
+  mkfield("Decay (s)", &_sig_decay_ta, "0123456789");
+
+  lv_obj_t* done = lv_btn_create(card);
+  lv_obj_set_width(done, LV_PCT(100));
+  lv_obj_add_event_cb(done, [](lv_event_t* ev) {     // commit + close
+    (void)ev;
+    if (!_instance) return;
+    _instance->commitSigMeter();
+    lv_obj_add_flag(_instance->_sigmod_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(_instance->_sigmod_popup, LV_OBJ_FLAG_HIDDEN);
+  }, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* dl = lv_label_create(done);
+  lv_label_set_text(dl, LV_SYMBOL_OK " Done");
+  lv_obj_center(dl);
+
+  _sigmod_kb = lv_keyboard_create(_sigmod_popup);
+  lv_keyboard_set_mode(_sigmod_kb, LV_KEYBOARD_MODE_NUMBER);
+  lv_obj_add_event_cb(_sigmod_kb, [](lv_event_t* ev) {   // checkmark/cancel hides the kb
+    if (_instance && (lv_event_get_code(ev) == LV_EVENT_READY || lv_event_get_code(ev) == LV_EVENT_CANCEL))
+      lv_obj_add_flag(_instance->_sigmod_kb, LV_OBJ_FLAG_HIDDEN);
+  }, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_sigmod_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::openSignalMeter() {
+  if (!_node_prefs) return;
+  buildSignalPopup();
+  char b[8];
+  snprintf(b, sizeof b, "%d", _node_prefs->sigmeter_snr_min);  lv_textarea_set_text(_sig_min_ta, b);
+  snprintf(b, sizeof b, "%d", _node_prefs->sigmeter_snr_max);  lv_textarea_set_text(_sig_max_ta, b);
+  snprintf(b, sizeof b, "%u", _node_prefs->sigmeter_hold_s);   lv_textarea_set_text(_sig_hold_ta, b);
+  snprintf(b, sizeof b, "%u", _node_prefs->sigmeter_decay_s);  lv_textarea_set_text(_sig_decay_ta, b);
+  lv_obj_add_flag(_sigmod_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(_sigmod_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_sigmod_popup);
+}
+
+void UITask::commitSigMeter() {
+  if (!_node_prefs) return;
+  int mn = atoi(lv_textarea_get_text(_sig_min_ta));
+  int mx = atoi(lv_textarea_get_text(_sig_max_ta));
+  int hd = atoi(lv_textarea_get_text(_sig_hold_ta));
+  int dc = atoi(lv_textarea_get_text(_sig_decay_ta));
+  if (mn < -30) mn = -30;  if (mn > 18) mn = 18;
+  if (mx <= mn) mx = mn + 1;  if (mx > 20) mx = 20;
+  if (hd < 0) hd = 0;  if (hd > 3600) hd = 3600;
+  if (dc < 1) dc = 1;  if (dc > 3600) dc = 3600;
+  _node_prefs->sigmeter_snr_min = (int8_t)mn;
+  _node_prefs->sigmeter_snr_max = (int8_t)mx;
+  _node_prefs->sigmeter_hold_s  = (uint16_t)hd;
+  _node_prefs->sigmeter_decay_s = (uint16_t)dc;
+  pushPrefs();
+}
+
+void UITask::sig_meter_btn_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->openSignalMeter();
+}
+
+void UITask::sigmod_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    lv_keyboard_set_textarea(_instance->_sigmod_kb, ta);
+    lv_keyboard_set_mode(_instance->_sigmod_kb, LV_KEYBOARD_MODE_NUMBER);
+    lv_obj_clear_flag(_instance->_sigmod_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_sigmod_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_sigmod_kb);
+  } else if (code == LV_EVENT_DEFOCUSED) {
+    _instance->commitSigMeter();
+  }
+}
+
+void UITask::sigmod_dismiss_cb(lv_event_t* e) {
+  if (!_instance) return;
+  if (lv_event_get_target(e) != _instance->_sigmod_popup) return;  // only a tap on the backdrop itself
+  _instance->commitSigMeter();
+  lv_obj_add_flag(_instance->_sigmod_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_instance->_sigmod_popup, LV_OBJ_FLAG_HIDDEN);
 }
 
 void UITask::lock_now_cb(lv_event_t* e) {
@@ -9603,6 +9777,10 @@ void UITask::loop() {
         strftime(buf, sizeof(buf), "%H:%M", &tmv);     // e.g. "21:05"
       }
       lv_label_set_text(_clock_label, buf);
+      if (_sig_meter) {   // re-anchor to the (re-sized) clock, then update the bars
+        lv_obj_align_to(_sig_meter, _clock_label, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+        refreshSignalMeter();
+      }
       // Live-refresh the Network status lines (1 Hz) while a Network pane is open.
       if (_set_active_pane == _set_pane_body[CAT_WIFI] ||
           _set_active_pane == _set_pane_body[CAT_MQTT]) {
