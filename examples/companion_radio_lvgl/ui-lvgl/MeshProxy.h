@@ -70,6 +70,7 @@ enum class CmdKind : uint8_t {
   ApplyMqtt,    // copy prefs (mqtt_*) + save + (re)start the MQTT bridge
   SyncNtp,      // kick an immediate NTP clock sync
   UpdatePresets,// fetch the official radio presets over HTTPS -> internal flash
+  OtaUpdate,    // download prefs.ota_url firmware -> OTA partition -> reboot
 };
 
 struct MeshCmd {
@@ -109,6 +110,8 @@ struct UiEvent {
   char     sender[CHAT_PEER_NAME_MAX];
   char     text[CHAT_MSG_TEXT_MAX];
   uint32_t ts;
+  uint8_t  hops;       // incoming flood path length (0xFF = direct/unknown)
+  uint16_t bytes;      // incoming message payload size (diagnostic footer)
   // SendResult (+ Delivered reuses `ack`)
   uint32_t token;
   bool     ok;
@@ -154,6 +157,7 @@ void mqttStatus(char* out, size_t cap);   // human-readable MQTT status for the 
 void wifiIpInfo(char* ip, char* mask, char* gw, char* dns, size_t cap);  // live addressing strings
 void ntpStatus(char* out, size_t cap);   // NTP clock-sync status for the UI
 void presetStatus(char* out, size_t cap);   // radio-preset update status for the UI
+void otaStatus(char* out, size_t cap);       // OTA firmware-update status for the UI
 int  copyMutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);    // seed the UI's explicit-muted set at begin()
 int  copyUnmutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);  // seed the UI's explicit-unmuted set at begin()
 uint32_t rtcSeconds();             // live device clock (ESP32 internal RTC; safe cross-core)

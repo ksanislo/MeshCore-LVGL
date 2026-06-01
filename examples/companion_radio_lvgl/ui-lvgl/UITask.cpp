@@ -1876,10 +1876,10 @@ void UITask::resetKbScroll() {
 
 void UITask::storeAppend(bool outgoing, const char* key, const char* sender,
                          const char* text, uint32_t ts, uint8_t status, uint32_t ack, uint32_t expiry_ms,
-                         uint32_t cli) {
-  _rammsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms, cli);  // always: recent ring
+                         uint32_t cli, uint8_t hops, uint16_t bytes) {
+  _rammsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms, cli, hops, bytes);  // always: recent ring
 #ifdef HAS_SD_CARD
-  if (_msgs == &_sdmsgs) _sdmsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms, cli);
+  if (_msgs == &_sdmsgs) _sdmsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms, cli, hops, bytes);
 #endif
 }
 
@@ -3075,7 +3075,7 @@ void UITask::rebuildChatHistory() {
     bool failed    = m->outgoing && m->status == MSG_STATUS_FAILED;
     bool delivered = m->outgoing && m->status == MSG_STATUS_DELIVERED;
     if (sending || failed || show_time) {
-      char ftxt[40];
+      char ftxt[64];
       if (sending) {
         strcpy(ftxt, "sending");
       } else if (failed) {
@@ -3084,7 +3084,14 @@ void UITask::rebuildChatHistory() {
         char tbuf[12];
         fmtClockTime((uint32_t)((long)m->timestamp + tzoff), tbuf, sizeof(tbuf),
                      _node_prefs && _node_prefs->clock_12h);
-        snprintf(ftxt, sizeof(ftxt), "%s%s", delivered ? LV_SYMBOL_OK " " : "", tbuf);
+        int o = snprintf(ftxt, sizeof(ftxt), "%s%s", delivered ? LV_SYMBOL_OK " " : "", tbuf);
+        // Diagnostic footer for incoming flood (channel) messages: how far it travelled
+        // and how big it was. hops==0xFF means a direct reception, so omit it then.
+        if (!m->outgoing && m->hops != 0xFF && _node_prefs && _node_prefs->show_chat_meta) {
+          snprintf(ftxt + o, sizeof(ftxt) - o,
+                   " " LV_SYMBOL_BULLET " %u hop%s " LV_SYMBOL_BULLET " %u B",
+                   m->hops, m->hops == 1 ? "" : "s", m->bytes);
+        }
       }
       lv_obj_t* tl = lv_label_create(_chat_history);
       lv_label_set_text(tl, ftxt);
@@ -3580,8 +3587,6 @@ static bool nameIsChannel(const char* name) {
 // the backend's hookKey + snapshot, then enqueue; the UI core stores + renders
 // it in drainEvents(). No store/LVGL work here.
 void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
-  (void)path_len;
-
   // For channel messages the wire text is "<sender>: <msg>" and from_name is
   // the channel name. Split out the real sender. For DMs the sender is the
   // contact (from_name) and the text is already clean.
@@ -3608,6 +3613,16 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   strncpy(ev.text,   body   ? body   : "", sizeof(ev.text) - 1);
   ev.ts = mproxy::rtcSeconds();
   ev.msgcount = msgcount;
+  // path_len is the packet's encoded path field: low 6 bits = hop count, bits 6-7 = (hash
+  // size - 1). 0xFF = a direct (non-flood) reception -> no path to report.
+  if (path_len == 0xFF) {
+    ev.hops = 0xFF; ev.bytes = 0;
+  } else {
+    uint8_t cnt = path_len & 0x3F;                      // repeater hops
+    uint8_t sz  = ((path_len >> 6) & 0x3) + 1;          // path-hash size (bytes per hop)
+    ev.hops  = cnt;
+    ev.bytes = (uint16_t)cnt * sz;                      // path field length in bytes
+  }
   mproxy::pushEvent(ev);
 }
 
@@ -6845,6 +6860,23 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_preset_status, lv_color_hex(DIM_HEX), 0);
   lv_label_set_text(_set_preset_status, "");
 
+  // ===== Firmware (OTA over WiFi) =====
+  addSettingsSection(body, "Firmware (OTA)");
+  { lv_obj_t* f = makeField(body, "Firmware URL (.bin)");
+    _set_ota_url_ta = makeSelTextarea(f);
+    lv_textarea_set_one_line(_set_ota_url_ta, true);
+    lv_obj_add_event_cb(_set_ota_url_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_obj_set_width(_set_ota_url_ta, LV_PCT(100));
+    lv_obj_add_event_cb(_set_ota_url_ta, set_ota_url_event_cb, LV_EVENT_ALL, NULL); }
+  { lv_obj_t* sb = lv_btn_create(body); lv_obj_set_width(sb, LV_PCT(100));
+    lv_obj_add_event_cb(sb, ota_update_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* l = lv_label_create(sb); lv_label_set_text(l, LV_SYMBOL_DOWNLOAD " Update firmware"); lv_obj_center(l); }
+  _set_ota_status = lv_label_create(body);
+  lv_label_set_long_mode(_set_ota_status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_set_ota_status, LV_PCT(100));
+  lv_obj_set_style_text_color(_set_ota_status, lv_color_hex(DIM_HEX), 0);
+  lv_label_set_text(_set_ota_status, "");
+
   body = _set_pane_body[CAT_MQTT];   // ===== MQTT bridge =====
   addSettingsSection(body, "MQTT bridge");
   { lv_obj_t* f = makeField(body, "Enabled"); _set_mqtt_en = lv_switch_create(f);
@@ -6926,6 +6958,13 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_dropdown_set_options(_set_screen_dd, "Never\n15 s\n30 s\n1 min\n2 min\n5 min");
   lv_obj_set_width(_set_screen_dd, LV_PCT(100));
   lv_obj_add_event_cb(_set_screen_dd, set_screen_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  // Per-message diagnostics in chat bubbles (incoming flood hops/bytes, and the ack count
+  // once that lands). Off by default to keep bubbles clean; this reveals them.
+  _set_meta_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_meta_chk, "Show metadata in chat");
+  lv_obj_set_style_text_color(_set_meta_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_meta_chk, set_meta_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
   addSettingsSection(body, "Time");
   // Local-time offset for the header clock. Entered in hours (decimals OK for
@@ -7117,6 +7156,10 @@ void UITask::populateSettings() {
   if (_set_rtc_chk) {
     if (_node_prefs->use_rtc_clock != 0) lv_obj_add_state(_set_rtc_chk, LV_STATE_CHECKED);
     else                                 lv_obj_clear_state(_set_rtc_chk, LV_STATE_CHECKED);
+  }
+  if (_set_meta_chk) {
+    if (_node_prefs->show_chat_meta) lv_obj_add_state(_set_meta_chk, LV_STATE_CHECKED);
+    else                             lv_obj_clear_state(_set_meta_chk, LV_STATE_CHECKED);
   }
   if (_set_autolock_chk) {
     if (_node_prefs->auto_lock) lv_obj_add_state(_set_autolock_chk, LV_STATE_CHECKED);
@@ -8183,6 +8226,13 @@ void UITask::set_clock_cb(lv_event_t* e) {
   pushPrefs();
 }
 
+void UITask::set_meta_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  _instance->_node_prefs->show_chat_meta = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
+  pushPrefs();
+  if (_instance->_chat_history) _instance->rebuildChatHistory();   // reflect immediately if a chat is open
+}
+
 void UITask::set_rtc_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
@@ -9006,6 +9056,33 @@ void UITask::presets_update_cb(lv_event_t* e) {
   // 1 Hz Network-pane refresh, which also reloads our RAM table on success.
 }
 
+void UITask::set_ota_url_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    _instance->_set_active_ta = ta;
+    lv_keyboard_set_textarea(_instance->_set_kb, ta);
+    lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_set_kb);
+    if (_instance->_set_active_pane) _instance->raiseFieldForKb(_instance->_set_active_pane, _instance->_set_kb, ta);
+  } else if (code == LV_EVENT_DEFOCUSED && _instance->_node_prefs) {
+    strncpy(_instance->_node_prefs->ota_url, lv_textarea_get_text(ta), sizeof(_instance->_node_prefs->ota_url) - 1);
+    _instance->_node_prefs->ota_url[sizeof(_instance->_node_prefs->ota_url) - 1] = 0;
+    pushPrefs();
+  }
+}
+
+void UITask::ota_update_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance || !_instance->_node_prefs) return;
+  if (!_instance->_node_prefs->ota_url[0]) { _instance->showToast("Set a firmware URL first"); return; }
+  mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::OtaUpdate; mproxy::postCommand(c);
+  _instance->showToast("Downloading firmware...");   // backend blocks then reboots; status line updates at 1 Hz
+}
+
 void UITask::mqtt_save_cb(lv_event_t* e) {
   (void)e;
   if (!_instance || !_instance->_node_prefs) return;
@@ -9077,6 +9154,11 @@ void UITask::refreshNetStatus() {
     _preset_status_last[sizeof(_preset_status_last) - 1] = 0;
   }
   showStatus(_set_preset_status, wifiOn, buf);
+  // OTA: status line, and keep the URL field synced from prefs unless it's being edited.
+  if (_set_ota_url_ta && _set_ota_url_ta != _set_active_ta && _node_prefs)
+    lv_textarea_set_text(_set_ota_url_ta, _node_prefs->ota_url);
+  mproxy::otaStatus(buf, sizeof(buf));
+  showStatus(_set_ota_status, wifiOn, buf);
   // Live addressing into the read-only (disabled) IP fields -- never clobbers an
   // editable field the user is filling in static mode.
   char ip[24], mask[24], gw[24], dns[24];
@@ -9881,7 +9963,8 @@ void UITask::drainEvents() {
     switch (ev.kind) {
       case mproxy::EvKind::Msg: {
         if (ev.msgcount >= 0) _msgcount = ev.msgcount;
-        storeAppend(ev.outgoing, ev.conv_key, ev.sender, ev.text, ev.ts);
+        storeAppend(ev.outgoing, ev.conv_key, ev.sender, ev.text, ev.ts,
+                    MSG_STATUS_NONE, 0, 0, 0, ev.hops, ev.bytes);
         // "Viewing" = the chat screen is the active screen AND it's this conversation
         // (not merely that we last opened it -- you may have navigated back home).
         bool is_channel = strncmp(ev.conv_key, "ch_", 3) == 0;

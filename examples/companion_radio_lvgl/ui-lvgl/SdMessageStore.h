@@ -62,7 +62,8 @@ class SdMessageStore : public MessageStore {
 
   // Append into the linear RAM buffer (drops the oldest when full).
   void pushBuf(bool outgoing, const char* sender, const char* text, uint32_t ts,
-               uint8_t status, uint32_t ack, uint32_t expiry_ms, uint32_t cli = 0) {
+               uint8_t status, uint32_t ack, uint32_t expiry_ms, uint32_t cli = 0,
+               uint8_t hops = 0xFF, uint16_t bytes = 0) {
     if (_count == CAP) {
       for (int i = 1; i < CAP; i++) _buf[i - 1] = _buf[i];
       _count--;
@@ -74,6 +75,8 @@ class SdMessageStore : public MessageStore {
     m.ack = ack;
     m.expiry_ms = expiry_ms;
     m.cli = cli;
+    m.hops = hops;
+    m.bytes = bytes;
     copyBounded(m.peer, _loaded, CHAT_PEER_NAME_MAX);
     copyBounded(m.sender, sender, CHAT_PEER_NAME_MAX);
     copyBounded(m.text, text, CHAT_MSG_TEXT_MAX);
@@ -188,6 +191,7 @@ public:
         m.ack = 0;
         m.expiry_ms = 0;
         m.cli = 0;
+        m.hops = 0xFF; m.bytes = 0;   // not persisted; diagnostics only matter live
         copyBounded(m.peer, key, CHAT_PEER_NAME_MAX);
         copyBounded(m.sender, f_snd, CHAT_PEER_NAME_MAX);
         copyBounded(m.text, f_txt, CHAT_MSG_TEXT_MAX);
@@ -213,7 +217,7 @@ public:
   void append(bool outgoing, const char* peer, const char* sender,
               const char* text, uint32_t ts,
               uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0,
-              uint32_t cli = 0) override {
+              uint32_t cli = 0, uint8_t hops = 0xFF, uint16_t bytes = 0) override {
     if (ensure()) {
       // Build the whole record, then write it in one go and verify every byte
       // landed -- a full card silently short-writes, so check the count.
@@ -244,7 +248,7 @@ public:
       }
     }
     if (strncmp(peer, _loaded, CHAT_PEER_NAME_MAX) == 0)
-      pushBuf(outgoing, sender, text, ts, status, ack, expiry_ms, cli);
+      pushBuf(outgoing, sender, text, ts, status, ack, expiry_ms, cli, hops, bytes);
   }
 
   int messagesFor(const char* peer, const ChatMessage** out, int max) override {

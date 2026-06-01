@@ -7,6 +7,7 @@
   #include <time.h>   // configTime / time() for NTP clock sync
   #include <HTTPClient.h>
   #include <WiFiClientSecure.h>
+  #include <Update.h>            // OTA: write a firmware image to the inactive app partition
   #include "cJSON.h"             // shipped with esp-idf -> zero extra flash
   #include "RadioPresetStore.h"
 #endif
@@ -485,6 +486,56 @@ void MyMesh::updateRadioPresets() {
 void MyMesh::getPresetStatus(char* out, size_t cap) {
   strncpy(out, _preset_status[0] ? _preset_status : "tap to update", cap - 1);
   out[cap - 1] = 0;
+}
+
+void MyMesh::getOtaStatus(char* out, size_t cap) {
+  strncpy(out, _ota_status, cap - 1);
+  out[cap - 1] = 0;
+}
+
+// Pull a firmware .bin from prefs.ota_url and write it to the inactive OTA partition, then
+// reboot into it. Runs on the backend core (has WiFi); blocks for the download (we're about
+// to reboot anyway). Scheme-aware: http:// (plain, for a dev laptop) vs https:// (TLS, e.g.
+// GitHub). v1 is insecure TLS + no signature check -- a SHA/signature gate comes later.
+void MyMesh::otaFromUrl() {
+  auto set = [this](const char* m) { strncpy(_ota_status, m, sizeof(_ota_status) - 1); _ota_status[sizeof(_ota_status) - 1] = 0; };
+  const char* url = getNodePrefs()->ota_url;
+  if (!url[0])                         { set("no URL set"); return; }
+  if (WiFi.status() != WL_CONNECTED)   { set("no WiFi"); return; }
+
+  bool https = (strncmp(url, "https://", 8) == 0);
+  WiFiClient   plain;
+  WiFiClientSecure tls;
+  if (https) tls.setInsecure();        // v1: no cert verification
+  HTTPClient http;
+  http.setTimeout(15000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);   // GitHub asset -> CDN 302
+  bool ok = https ? http.begin(tls, url) : http.begin(plain, url);
+  if (!ok)                             { set("connect failed"); return; }
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK)            { http.end(); char b[24]; snprintf(b, sizeof(b), "HTTP %d", code); set(b); return; }
+  int len = http.getSize();            // may be -1 (chunked); Update handles unknown size
+  Serial.printf("[OTA] %s, content-length=%d\n", url, len);
+
+  if (!Update.begin(len > 0 ? (size_t)len : UPDATE_SIZE_UNKNOWN)) {
+    http.end(); set("no OTA space"); Serial.printf("[OTA] begin failed: %s\n", Update.errorString()); return;
+  }
+  set("downloading...");
+  size_t written = Update.writeStream(*http.getStreamPtr());
+  http.end();
+  if (len > 0 && written != (size_t)len) {
+    Update.abort(); char b[32]; snprintf(b, sizeof(b), "short: %u/%d", (unsigned)written, len); set(b);
+    Serial.printf("[OTA] %s\n", b); return;
+  }
+  if (!Update.end(true)) {             // true = finalize + set the new image as boot partition
+    char b[40]; snprintf(b, sizeof(b), "verify failed: %s", Update.errorString()); set(b);
+    Serial.printf("[OTA] %s\n", b); return;
+  }
+  Serial.printf("[OTA] wrote %u bytes, rebooting into new image\n", (unsigned)written);
+  set("rebooting...");
+  delay(300);
+  esp_restart();
 }
 void MyMesh::applyWifiConfig() {
   // The WiFi stack only exists when we booted in WiFi mode (BLE skipped). If it's
@@ -1186,6 +1237,8 @@ void MyMesh::begin(bool has_display) {
   _prefs.use_rtc_clock = 0xFF;   // default-on for fresh installs (no prefs file); loadPrefs overrides if persisted
   _prefs.sigmeter_snr_min = -12; _prefs.sigmeter_snr_max = 6;   // signal-meter defaults (fresh installs)
   _prefs.sigmeter_hold_s = 30;   _prefs.sigmeter_decay_s = 100;
+  _prefs.show_chat_meta = 0;     // off by default; opt in via Display settings
+  _prefs.ota_url[0] = 0;         // OTA firmware URL (set via Settings)
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
 
   // sanitise bad pref values

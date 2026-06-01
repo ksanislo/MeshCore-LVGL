@@ -317,6 +317,8 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     _prefs.sigmeter_snr_max = 6;                                                           // 186 (default)
     _prefs.sigmeter_hold_s = 30;                                                           // 187 (default)
     _prefs.sigmeter_decay_s = 100;                                                         // 188 (default)
+    _prefs.show_chat_meta = 0;                                                             // 189 (default: off)
+    _prefs.ota_url[0] = 0;                                                                 // 190 (empty)
     file.read((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
     file.read((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
     file.read((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
@@ -360,6 +362,8 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.sigmeter_snr_max, sizeof(_prefs.sigmeter_snr_max));           // 186
     file.read((uint8_t *)&_prefs.sigmeter_hold_s, sizeof(_prefs.sigmeter_hold_s));             // 187
     file.read((uint8_t *)&_prefs.sigmeter_decay_s, sizeof(_prefs.sigmeter_decay_s));           // 188
+    file.read((uint8_t *)&_prefs.show_chat_meta, sizeof(_prefs.show_chat_meta));               // 189
+    file.read((uint8_t *)_prefs.ota_url, sizeof(_prefs.ota_url));                              // 190
 
     file.close();
   }
@@ -444,6 +448,8 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.sigmeter_snr_max, sizeof(_prefs.sigmeter_snr_max));           // 186
     file.write((uint8_t *)&_prefs.sigmeter_hold_s, sizeof(_prefs.sigmeter_hold_s));             // 187
     file.write((uint8_t *)&_prefs.sigmeter_decay_s, sizeof(_prefs.sigmeter_decay_s));           // 188
+    file.write((uint8_t *)&_prefs.show_chat_meta, sizeof(_prefs.show_chat_meta));              // 189
+    file.write((uint8_t *)_prefs.ota_url, sizeof(_prefs.ota_url));                             // 190
 
     file.close();
     commitTmp(_fs, "/new_prefs.tmp", "/new_prefs");

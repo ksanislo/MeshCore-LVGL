@@ -29,6 +29,8 @@ struct ChatMessage {
   uint32_t expiry_ms;  // millis() deadline after which a SENDING msg is FAILED (0 = none)
   uint32_t cli;        // client send-token: correlates an optimistic outgoing bubble
                        // with its async EV_SEND_RESULT (0 = none). RAM-only, not persisted.
+  uint8_t  hops;       // incoming flood path length (0xFF = direct/unknown). RAM-only.
+  uint16_t bytes;      // incoming message payload size, for the diagnostic footer. RAM-only.
 };
 
 class MessageStore {
@@ -44,7 +46,7 @@ public:
   virtual void append(bool outgoing, const char* peer, const char* sender,
                       const char* text, uint32_t ts,
                       uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0,
-                      uint32_t cli = 0) = 0;
+                      uint32_t cli = 0, uint8_t hops = 0xFF, uint16_t bytes = 0) = 0;
 
   // Mark the (most recent) SENDING message with this ack as `status`. Returns true if found.
   virtual bool setStatusByAck(uint32_t ack, uint8_t status) = 0;
@@ -87,7 +89,7 @@ public:
   void append(bool outgoing, const char* peer, const char* sender,
               const char* text, uint32_t ts,
               uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0,
-              uint32_t cli = 0) override {
+              uint32_t cli = 0, uint8_t hops = 0xFF, uint16_t bytes = 0) override {
     ChatMessage& m = _buf[_head];
     m.outgoing = outgoing;
     m.timestamp = ts;
@@ -95,6 +97,8 @@ public:
     m.ack = ack;
     m.expiry_ms = expiry_ms;
     m.cli = cli;
+    m.hops = hops;
+    m.bytes = bytes;
     copyBounded(m.peer, peer, CHAT_PEER_NAME_MAX);
     copyBounded(m.sender, sender, CHAT_PEER_NAME_MAX);
     copyBounded(m.text, text, CHAT_MSG_TEXT_MAX);

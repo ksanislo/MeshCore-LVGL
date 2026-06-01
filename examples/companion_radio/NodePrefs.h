@@ -89,4 +89,6 @@ struct NodePrefs {  // persisted to file
   int8_t   sigmeter_snr_max;    // dB: SNR at/above the top (4th) bar threshold (default 6)
   uint16_t sigmeter_hold_s;     // s: hold the peak before it decays (default 30)
   uint16_t sigmeter_decay_s;    // s: linear decay span after the hold (default 100)
+  uint8_t  show_chat_meta;      // 1 = show per-message diagnostics (hops/bytes, ack count) in chat (default off)
+  char     ota_url[96];         // firmware .bin URL for OTA (dev: http://<laptop>:port/firmware.bin)
 };

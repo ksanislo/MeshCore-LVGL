@@ -125,6 +125,8 @@ public:
   void getNtpStatus(char* out, size_t cap);
   void updateRadioPresets();               // fetch official presets over HTTPS -> flash
   void getPresetStatus(char* out, size_t cap);
+  void otaFromUrl();                       // download a firmware .bin from prefs.ota_url -> OTA slot -> reboot
+  void getOtaStatus(char* out, size_t cap);
 #endif
 #if defined(WITH_MQTT_BRIDGE)
   void applyMqttConfig();                  // push prefs into the shim + (re)start (from UI)
@@ -155,6 +157,7 @@ protected:
   bool _ntp_synced = false;           // NTP has set the RTC at least once
   uint32_t _ntp_next_check_ms = 0;    // next time() poll / re-sync (millis)
   char _preset_status[40] = "";       // last preset-update result, for the UI
+  char _ota_status[48] = "idle";      // last OTA result/progress, for the UI
   void startWifi();
   void stopWifi();
 #endif

@@ -152,7 +152,8 @@ class UITask : public AbstractUITask {
   // the SD store when persistence is active.
   void storeAppend(bool outgoing, const char* key, const char* sender,
                    const char* text, uint32_t ts,
-                   uint8_t status = 0, uint32_t ack = 0, uint32_t expiry_ms = 0, uint32_t cli = 0);
+                   uint8_t status = 0, uint32_t ack = 0, uint32_t expiry_ms = 0, uint32_t cli = 0,
+                   uint8_t hops = 0xFF, uint16_t bytes = 0);
   lv_obj_t*       _chat_screen;
   lv_obj_t*       _chat_title;          // contact name in the chat top bar
   lv_obj_t*       _chat_avatar;         // avatar circle in the chat top bar (branding)
@@ -314,6 +315,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_time_hh;         // manual set-time: hours box
   lv_obj_t*       _set_time_mm;         // manual set-time: minutes box (seconds aren't shown -- the ↻ button zeroes them)
   lv_obj_t*       _set_time_ampm;       // manual set-time: AM/PM dropdown (12h mode only)
+  lv_obj_t*       _set_meta_chk;        // "show metadata in chat" toggle
   lv_obj_t*       _set_autolock_chk;    // auto-lock on sleep toggle
   // Network panes (WiFi + MQTT). Values committed on each pane's Save button.
   lv_obj_t*       _set_wifi_en;         // WiFi enable switch
@@ -331,6 +333,8 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_ntp_status;      // NTP status label
   lv_obj_t*       _set_preset_status;   // radio-preset update status label
   char            _preset_status_last[40] = "";  // last-seen status (reload table on change)
+  lv_obj_t*       _set_ota_url_ta;      // OTA firmware URL field
+  lv_obj_t*       _set_ota_status;      // OTA status label
   lv_obj_t*       _set_mqtt_en;         // MQTT enable switch
   lv_obj_t*       _set_mqtt_host;       // broker host
   lv_obj_t*       _set_mqtt_port;       // broker port (digits)
@@ -825,6 +829,7 @@ private:
   static void set_tz_ta_event_cb(lv_event_t* e);
   static void set_clock_cb(lv_event_t* e);
   static void set_rtc_cb(lv_event_t* e);
+  static void set_meta_cb(lv_event_t* e);           // "show metadata in chat" toggle
   static void set_time_ta_event_cb(lv_event_t* e);  // HH/MM/SS boxes: kb on focus, commit on defocus
   static void set_time_ampm_cb(lv_event_t* e);      // AM/PM dropdown change -> commit
   static void set_time_reset_cb(lv_event_t* e);     // ↻ button -> re-apply shown HH:MM:00 (zero seconds)
@@ -845,6 +850,8 @@ private:
   static void mqtt_save_cb(lv_event_t* e);
   static void ntp_sync_cb(lv_event_t* e);       // "Sync clock now"
   static void presets_update_cb(lv_event_t* e); // "Update radio presets"
+  static void set_ota_url_event_cb(lv_event_t* e); // OTA URL field: kb on focus, commit on defocus
+  static void ota_update_cb(lv_event_t* e);     // "Update firmware" -> post OtaUpdate
   void        wifiApplyFromForm();              // gather WiFi fields -> prefs -> ApplyWifi
   void        updateWifiFieldStates();          // grey/enable IP fields per DHCP/override
   void        refreshNetStatus();               // update status labels + live IP fields
@@ -1030,11 +1037,12 @@ public:
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
       _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_rtc_chk(NULL),
-      _set_time_hh(NULL), _set_time_mm(NULL), _set_time_ampm(NULL), _set_autolock_chk(NULL),
+      _set_time_hh(NULL), _set_time_mm(NULL), _set_time_ampm(NULL), _set_meta_chk(NULL), _set_autolock_chk(NULL),
       _set_wifi_en(NULL), _set_wifi_ssid(NULL), _set_wifi_pw(NULL),
       _set_wifi_dhcp(NULL), _set_wifi_dns_ovr(NULL), _set_wifi_ip(NULL), _set_wifi_mask(NULL),
       _set_wifi_gw(NULL), _set_wifi_dns(NULL), _set_wifi_status(NULL),
       _set_ntp_en(NULL), _set_ntp_server(NULL), _set_ntp_status(NULL), _set_preset_status(NULL),
+      _set_ota_url_ta(NULL), _set_ota_status(NULL),
       _set_mqtt_en(NULL), _set_mqtt_host(NULL), _set_mqtt_port(NULL), _set_mqtt_user(NULL), _set_mqtt_pw(NULL),
       _set_mqtt_topic(NULL), _set_mqtt_tls(NULL), _set_mqtt_rx(NULL), _set_mqtt_tx(NULL), _set_mqtt_status(NULL),
       _set_avatar_dd(NULL), _set_theme_dd(NULL), _set_mention_chk(NULL), _set_hashtag_chk(NULL), _set_chsender_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_mutedef_chk(NULL), _set_kb(NULL),

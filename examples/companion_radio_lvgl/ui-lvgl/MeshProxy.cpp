@@ -347,6 +347,11 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
       mesh.updateRadioPresets();   // HTTPS fetch + write /radio_presets (backend core)
 #endif
       break;
+    case CmdKind::OtaUpdate:
+#if defined(WITH_WIFI) && defined(ESP32)
+      mesh.otaFromUrl();           // download + write OTA partition + reboot (backend core; blocks)
+#endif
+      break;
     case CmdKind::ApplyMqtt:
       *mesh.getNodePrefs() = cmd.prefs;
       mesh.savePrefs();
@@ -464,6 +469,13 @@ void presetStatus(char* out, size_t cap) {
   if (!out || cap == 0) return;
 #if defined(WITH_WIFI) && defined(ESP32)
   if (s_backend) { s_backend->getPresetStatus(out, cap); return; }
+#endif
+  strncpy(out, "n/a", cap - 1); out[cap - 1] = 0;
+}
+void otaStatus(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+#if defined(WITH_WIFI) && defined(ESP32)
+  if (s_backend) { s_backend->getOtaStatus(out, cap); return; }
 #endif
   strncpy(out, "n/a", cap - 1); out[cap - 1] = 0;
 }
