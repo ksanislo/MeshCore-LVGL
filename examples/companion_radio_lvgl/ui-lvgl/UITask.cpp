@@ -3094,6 +3094,12 @@ void UITask::rebuildChatHistory() {
   long last_day = -999999;
   bool first = true;
 
+  // Max bubble width (80% of the chat column). Plain-text bubbles shrink to fit their
+  // content up to this; rich bubbles (cards/links) keep the full width.
+  lv_coord_t chat_w = lv_obj_get_content_width(_chat_history);
+  if (chat_w < 40) chat_w = _screen_w;          // not laid out yet -> fall back to screen width
+  lv_coord_t bubble_cap = chat_w * 80 / 100;
+
   for (int i = 0; i < sn; i++) {
     const ChatMessage* m = shown[i];
     long mday = ((long)m->timestamp + tzoff) / 86400;
@@ -3168,7 +3174,7 @@ void UITask::rebuildChatHistory() {
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* bubble = lv_obj_create(row);
-    lv_obj_set_width(bubble, LV_PCT(80));
+    lv_obj_set_width(bubble, bubble_cap);   // default (rich bodies); plain text refits below
     lv_obj_set_height(bubble, LV_SIZE_CONTENT);
     lv_obj_set_style_pad_all(bubble, 8, 0);
     lv_obj_set_style_border_width(bubble, 0, 0);
@@ -3186,6 +3192,13 @@ void UITask::rebuildChatHistory() {
       renderRichBody(bubble, m, bubble_fg);   // text runs + inline contact card(s) / link chips
     } else {
       addMessageText(bubble, m->text, bubble_fg);
+      // Shrink the bubble to its text so a one-word message isn't full-width. Measure the
+      // text's natural (unwrapped) width and cap at 80%; the PCT(100) label then wraps to it.
+      lv_point_t tsz;
+      lv_txt_get_size(&tsz, m->text, msgFont(), 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+      lv_coord_t bw = tsz.x + 2 * 8 + 2;        // text + bubble h-padding (8 each) + a little slack
+      if (bw > bubble_cap) bw = bubble_cap;
+      lv_obj_set_width(bubble, bw);
       if (m->outgoing && m->status == MSG_STATUS_FAILED) {
         lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);  // tap to resend
         lv_obj_set_user_data(bubble, (void*)m);
