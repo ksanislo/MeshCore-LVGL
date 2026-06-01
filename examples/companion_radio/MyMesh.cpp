@@ -504,6 +504,34 @@ void MyMesh::otaFromUrl() {
   if (WiFi.status() != WL_CONNECTED)   { set("no WiFi"); return; }
 
   bool https = (strncmp(url, "https://", 8) == 0);
+
+  // Fetch the sibling "<url>.md5" first (tiny). If present we hand it to Update.setMD5(),
+  // which verifies the image as it streams and fails Update.end() on mismatch -- so a bad
+  // download never gets switched to. Missing .md5 -> proceed unverified (status flags it).
+  char expected_md5[33] = "";
+  {
+    char murl[128];
+    snprintf(murl, sizeof(murl), "%s.md5", url);
+    WiFiClient mplain; WiFiClientSecure mtls;
+    if (https) mtls.setInsecure();
+    HTTPClient mh; mh.setTimeout(8000);
+    mh.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    if ((https ? mh.begin(mtls, murl) : mh.begin(mplain, murl)) && mh.GET() == HTTP_CODE_OK) {
+      String s = mh.getString();
+      int n = 0;                         // take the first 32 hex chars (bare hash or md5sum-style)
+      for (size_t i = 0; i < s.length() && n < 32; i++) {
+        char c = s[i];
+        if      (c >= '0' && c <= '9') expected_md5[n++] = c;
+        else if (c >= 'a' && c <= 'f') expected_md5[n++] = c;
+        else if (c >= 'A' && c <= 'F') expected_md5[n++] = c - 'A' + 'a';
+        else if (n > 0) break;
+      }
+      expected_md5[n] = 0;
+      if (n != 32) expected_md5[0] = 0;  // not a usable md5
+    }
+    mh.end();
+  }
+
   WiFiClient   plain;
   WiFiClientSecure tls;
   if (https) tls.setInsecure();        // v1: no cert verification
@@ -516,12 +544,13 @@ void MyMesh::otaFromUrl() {
   int code = http.GET();
   if (code != HTTP_CODE_OK)            { http.end(); char b[24]; snprintf(b, sizeof(b), "HTTP %d", code); set(b); return; }
   int len = http.getSize();            // may be -1 (chunked); Update handles unknown size
-  Serial.printf("[OTA] %s, content-length=%d\n", url, len);
+  Serial.printf("[OTA] %s, content-length=%d, md5=%s\n", url, len, expected_md5[0] ? expected_md5 : "(none)");
 
   if (!Update.begin(len > 0 ? (size_t)len : UPDATE_SIZE_UNKNOWN)) {
     http.end(); set("no OTA space"); Serial.printf("[OTA] begin failed: %s\n", Update.errorString()); return;
   }
-  set("downloading...");
+  if (expected_md5[0]) { Update.setMD5(expected_md5); set("verifying..."); }
+  else                 { set("downloading (unverified)"); }
   size_t written = Update.writeStream(*http.getStreamPtr());
   http.end();
   if (len > 0 && written != (size_t)len) {
@@ -529,8 +558,10 @@ void MyMesh::otaFromUrl() {
     Serial.printf("[OTA] %s\n", b); return;
   }
   if (!Update.end(true)) {             // true = finalize + set the new image as boot partition
-    char b[40]; snprintf(b, sizeof(b), "verify failed: %s", Update.errorString()); set(b);
-    Serial.printf("[OTA] %s\n", b); return;
+    char b[48];
+    if (Update.getError() == UPDATE_ERROR_MD5) snprintf(b, sizeof(b), "checksum mismatch - kept current");
+    else                                       snprintf(b, sizeof(b), "verify failed: %s", Update.errorString());
+    set(b); Serial.printf("[OTA] %s\n", b); return;   // boot partition NOT changed -> stay on good image
   }
   Serial.printf("[OTA] wrote %u bytes, rebooting into new image\n", (unsigned)written);
   set("rebooting...");
