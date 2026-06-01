@@ -125,6 +125,7 @@ public:
   void getNtpStatus(char* out, size_t cap);
   void updateRadioPresets();               // fetch official presets over HTTPS -> flash
   void getPresetStatus(char* out, size_t cap);
+  void startOtaTask();                     // spawn otaFromUrl on its own task so it never blocks the mesh
   void otaFromUrl();                       // download a firmware .bin from prefs.ota_url -> OTA slot -> reboot
   void getOtaStatus(char* out, size_t cap);
 #endif
@@ -158,6 +159,8 @@ protected:
   uint32_t _ntp_next_check_ms = 0;    // next time() poll / re-sync (millis)
   char _preset_status[40] = "";       // last preset-update result, for the UI
   char _ota_status[48] = "idle";      // last OTA result/progress, for the UI
+  volatile bool _ota_busy = false;    // an OTA task is running (one at a time)
+  static void otaTaskTramp(void* arg); // FreeRTOS entry -> otaFromUrl() on its own task
   void startWifi();
   void stopWifi();
 #endif

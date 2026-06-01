@@ -349,7 +349,7 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
       break;
     case CmdKind::OtaUpdate:
 #if defined(WITH_WIFI) && defined(ESP32)
-      mesh.otaFromUrl();           // download + write OTA partition + reboot (backend core; blocks)
+      mesh.startOtaTask();         // spawn on its own task -- returns immediately, mesh keeps running
 #endif
       break;
     case CmdKind::ApplyMqtt:

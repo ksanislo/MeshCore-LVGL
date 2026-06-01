@@ -493,10 +493,33 @@ void MyMesh::getOtaStatus(char* out, size_t cap) {
   out[cap - 1] = 0;
 }
 
+// FreeRTOS entry: run the (blocking) download on its own task so the mesh keeps running.
+void MyMesh::otaTaskTramp(void* arg) {
+  MyMesh* self = static_cast<MyMesh*>(arg);
+  self->otaFromUrl();        // blocks here; on success it reboots and never returns
+  self->_ota_busy = false;   // only reached on failure -- free the slot for a retry
+  vTaskDelete(nullptr);      // self-destruct (stack reclaimed)
+}
+
+// Spawn the OTA download on its own task pinned to core 1, off the mesh's core 0 -- a slow
+// (or 30-minute) download must NOT block packet RX, since a missed LoRa packet is gone forever.
+void MyMesh::startOtaTask() {
+  if (_ota_busy) {           // one update at a time
+    strncpy(_ota_status, "already updating", sizeof(_ota_status) - 1); _ota_status[sizeof(_ota_status) - 1] = 0;
+    return;
+  }
+  _ota_busy = true;
+  if (xTaskCreatePinnedToCore(otaTaskTramp, "ota", 16384, this, 1, nullptr, 1) != pdPASS) {
+    _ota_busy = false;
+    strncpy(_ota_status, "task spawn failed", sizeof(_ota_status) - 1); _ota_status[sizeof(_ota_status) - 1] = 0;
+    if (_ui) _ui->otaFailed("task spawn failed");
+  }
+}
+
 // Pull a firmware .bin from prefs.ota_url and write it to the inactive OTA partition, then
-// reboot into it. Runs on the backend core (has WiFi); blocks for the download (we're about
-// to reboot anyway). Scheme-aware: http:// (plain, for a dev laptop) vs https:// (TLS, e.g.
-// GitHub). v1 is insecure TLS + no signature check -- a SHA/signature gate comes later.
+// reboot into it. Runs on its own task (see startOtaTask) so it never blocks the mesh.
+// Scheme-aware: http:// (plain, for a dev laptop) vs https:// (TLS, e.g. GitHub). v1 is
+// insecure TLS + no signature check -- a SHA/signature gate comes later.
 void MyMesh::otaFromUrl() {
   auto set = [this](const char* m) { strncpy(_ota_status, m, sizeof(_ota_status) - 1); _ota_status[sizeof(_ota_status) - 1] = 0; };
   // Any failure path: set the status AND fire the UI hook so an on-device modal can warn the
