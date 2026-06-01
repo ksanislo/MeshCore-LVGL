@@ -270,6 +270,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _menu_popup;
   lv_obj_t*       _menu_list;
   lv_obj_t*       _toast;
+  lv_timer_t*     _toast_timer;   // auto-hide timer; a new toast cancels the pending one
   lv_obj_t*       _path_return_screen;
 
   lv_obj_t*       _path_screen;
@@ -1003,7 +1004,7 @@ public:
       _chinfo_active_ta(NULL), _chinfo_return_screen(NULL),
       _cinfo_mode(CINFO_VIEW), _cinfo_addkey_locked(false), _cinfo_haskey(false),
       _cinfo_return_screen(NULL),
-      _menu_popup(NULL), _menu_list(NULL), _toast(NULL), _path_return_screen(NULL),
+      _menu_popup(NULL), _menu_list(NULL), _toast(NULL), _toast_timer(NULL), _path_return_screen(NULL),
       _path_screen(NULL), _path_size_dd(NULL), _path_ta(NULL), _path_kb(NULL), _path_err(NULL),
       _set_profile_avatar(NULL), _set_profile_avatar_lbl(NULL), _set_profile_name(NULL), _set_profile_key(NULL),
       _prof_hero(NULL), _prof_avatar(NULL), _prof_avatar_lbl(NULL), _prof_name(NULL), _prof_key(NULL),

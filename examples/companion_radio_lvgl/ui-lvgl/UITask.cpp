@@ -3943,6 +3943,7 @@ ContactInfo* UITask::cinfoContact() {
 void UITask::cinfo_toast_timer_cb(lv_timer_t* t) {
   if (_instance && _instance->_toast)
     lv_obj_add_flag(_instance->_toast, LV_OBJ_FLAG_HIDDEN);
+  if (_instance) _instance->_toast_timer = NULL;
   lv_timer_del(t);
 }
 
@@ -3954,13 +3955,23 @@ void UITask::showToast(const char* text) {
     lv_obj_set_style_text_color(_toast, lv_color_hex(UI_FG_STRONG), 0);
     lv_obj_set_style_pad_all(_toast, 8, 0);
     lv_obj_set_style_radius(_toast, 6, 0);
-    lv_obj_align(_toast, LV_ALIGN_BOTTOM_MID, 0, -10);
+    // Cap the width and wrap, so a long message stacks onto a few lines instead of
+    // overflowing a narrow (320px) portrait screen. Short ones still shrink to fit.
+    lv_obj_set_style_max_width(_toast, LV_PCT(90), 0);
+    lv_label_set_long_mode(_toast, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(_toast, LV_TEXT_ALIGN_CENTER, 0);
   }
   lv_label_set_text(_toast, text);
+  lv_obj_align(_toast, LV_ALIGN_BOTTOM_MID, 0, -10);   // re-align: height changes with wrap
   lv_obj_clear_flag(_toast, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(_toast);
-  lv_timer_t* t = lv_timer_create(cinfo_toast_timer_cb, 1500, NULL);
-  lv_timer_set_repeat_count(t, 1);
+  // Stay up long enough to actually read: scale with length. A new toast cancels the
+  // old timer so back-to-back toasts each get their full dwell.
+  if (_toast_timer) { lv_timer_del(_toast_timer); _toast_timer = NULL; }
+  uint32_t ms = 1600 + (uint32_t)strlen(text) * 55;
+  if (ms > 5000) ms = 5000;
+  _toast_timer = lv_timer_create(cinfo_toast_timer_cb, ms, NULL);
+  lv_timer_set_repeat_count(_toast_timer, 1);
 }
 
 // caption label + a column container the caller fills with the value widget
@@ -7351,7 +7362,7 @@ void UITask::set_rot_cb(lv_event_t* e) {
   uint16_t sel = lv_dropdown_get_selected(lv_event_get_target(e));  // 0..3
   _instance->_node_prefs->display_rotation = (uint8_t)(sel + 1);    // 1-based; 0 = unset
   pushPrefs();
-  _instance->showToast("Rotation saved (restart to apply)");
+  _instance->showToast("Rotation saved (restart)");
 }
 
 // Screen-timeout dropdown <-> seconds (index order must match the options string).
@@ -8757,7 +8768,7 @@ void UITask::wifi_enable_cb(lv_event_t* e) {
   if (!_instance) return;
   _instance->wifiApplyFromForm();
   _instance->refreshNetStatus();   // show/hide status lines for the new state
-  _instance->showToast("Reboot to apply - WiFi & Bluetooth can't run together");
+  _instance->showToast("Reboot to switch WiFi/BLE");
 }
 
 void UITask::updateWifiFieldStates() {
@@ -9606,10 +9617,10 @@ void UITask::loop() {
   // Surface SD persistence problems instead of silently dropping history.
   static bool sd_warned = false;
   static uint32_t sd_err_toast_ms = 0;
-  if (!sd_warned && now > 4000) { sd_warned = true; if (!_msgs->ready()) showToast("No SD card - history won't be saved"); }
+  if (!sd_warned && now > 4000) { sd_warned = true; if (!_msgs->ready()) showToast("No SD card: history off"); }
   if (_msgs->takeWriteError() && now - sd_err_toast_ms > 15000) {  // throttle: don't spam per message
     sd_err_toast_ms = now;
-    showToast("SD write failed - message not saved");
+    showToast("SD write failed - not saved");
   }
 #endif
 
