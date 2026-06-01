@@ -342,6 +342,11 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
       mesh.syncNtpNow();
 #endif
       break;
+    case CmdKind::UpdatePresets:
+#if defined(WITH_WIFI) && defined(ESP32)
+      mesh.updateRadioPresets();   // HTTPS fetch + write /radio_presets (backend core)
+#endif
+      break;
     case CmdKind::ApplyMqtt:
       *mesh.getNodePrefs() = cmd.prefs;
       mesh.savePrefs();
@@ -452,6 +457,13 @@ void ntpStatus(char* out, size_t cap) {
   if (!out || cap == 0) return;
 #if defined(WITH_WIFI) && defined(ESP32)
   if (s_backend) { s_backend->getNtpStatus(out, cap); return; }
+#endif
+  strncpy(out, "n/a", cap - 1); out[cap - 1] = 0;
+}
+void presetStatus(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+#if defined(WITH_WIFI) && defined(ESP32)
+  if (s_backend) { s_backend->getPresetStatus(out, cap); return; }
 #endif
   strncpy(out, "n/a", cap - 1); out[cap - 1] = 0;
 }

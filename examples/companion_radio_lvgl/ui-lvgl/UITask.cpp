@@ -10,6 +10,7 @@
 #include <esp_core_dump.h>              // boot-time crash report (coredump-to-flash is on)
 #include "SdCard.h"                     // SdSvc + the shared `sd` handle, to save crash reports
 #include <SPIFFS.h>                     // internal fallback for the crash report
+#include "../../companion_radio/RadioPresetStore.h"   // WiFi-updatable region presets (internal flash)
 #include <ctype.h>                      // tolower (case-insensitive search)
 #include <strings.h>                    // strcasecmp (A-Z contact sort)
 
@@ -37,6 +38,7 @@ extern const lv_font_t meshcore_icons_16;     // generated icon font (FontAwesom
 static void attachSearchIcon(lv_obj_t* ta);    // left-aligned magnifier glyph in a search field
 static void kbAccentDrawCb(lv_event_t* e);     // tint a keyboard's ✓ accept key (attach to any kb)
 static void urlEncode(const char* in, char* out, size_t cap);  // %-encode for meshcore:// links
+static void loadPresetTable();   // seed the radio-preset RAM table (flash override or compiled seed)
 
 // Type ramp: one place that maps a text role to a size (all emoji/unicode-capable).
 // hero=page name, title=screen header, heading=section/dialog title, body=default,
@@ -2177,6 +2179,30 @@ static void appendEscaped(char*& w, char* end, const char* s, size_t len) {
   }
 }
 
+// Append [s,len) as recolored text that survives line wraps: each space-separated
+// word gets its OWN "#RRGGBB word#" span. LVGL recolor is parsed per rendered line,
+// so a colored span split across a wrap loses its color on the 2nd line; emitting
+// per-word spans means a wrap only ever lands between spans (the separating space,
+// drawn in the default color) and every fragment keeps its color. Stays one
+// recolor lv_label, so per-character drag-select/copy is unaffected. Returns false
+// if it ran out of buffer.
+static bool appendRecoloredWords(char*& w, char* end, const char* s, size_t len, uint32_t color) {
+  size_t i = 0;
+  while (i < len) {
+    while (i < len && s[i] == ' ') { if (w < end - 1) *w++ = s[i]; i++; }   // run of spaces (default color)
+    size_t start = i;
+    while (i < len && s[i] != ' ') i++;                                     // one word
+    if (i > start) {
+      int wrote = snprintf(w, end - w, "#%06X ", (unsigned)color);
+      if (wrote < 0 || wrote >= end - w) return false;
+      w += wrote;
+      appendEscaped(w, end, s + start, i - start);
+      if (w < end - 1) *w++ = '#'; else return false;
+    }
+  }
+  return true;
+}
+
 static void addMessageText(lv_obj_t* bubble, const char* text, uint32_t fg) {
   char clean[CHAT_MSG_TEXT_MAX + 8];
   sanitizeForFont(text, clean, sizeof(clean));
@@ -2208,12 +2234,12 @@ static void addMessageText(lv_obj_t* bubble, const char* text, uint32_t fg) {
       if (ul >= sizeof(uname)) ul = sizeof(uname) - 1;
       memcpy(uname, at + 2, ul); uname[ul] = 0;
       uint32_t mc = s_mention_user_colors ? nameColor(uname) : UI_ACCENT;
-      // "#RRGGBB @name#" -- closing '#' is always followed by plain text/end.
-      int wrote = snprintf(w, end - w, "#%06X @", (unsigned)mc);
-      if (wrote < 0 || wrote >= end - w) break;
-      w += wrote;
-      appendEscaped(w, end, at + 2, atclose - (at + 2));   // username
-      if (w < end - 1) *w++ = '#';
+      // Per-word colored spans so the color survives a wrap inside a multi-word name.
+      // "@" + the (possibly multi-word) username, all in the mention color.
+      char tagged[CHAT_PEER_NAME_MAX + 1];
+      int tl = snprintf(tagged, sizeof(tagged), "@%.*s", (int)(atclose - (at + 2)), at + 2);
+      if (tl < 0) tl = 0; if (tl > (int)sizeof(tagged) - 1) tl = sizeof(tagged) - 1;
+      if (!appendRecoloredWords(w, end, tagged, tl, mc)) break;
       p = atclose + 1;
     } else {
       // Color the tag by the channel's own color (toggle), else the theme accent.
@@ -2222,14 +2248,10 @@ static void addMessageText(lv_obj_t* bubble, const char* text, uint32_t fg) {
       memcpy(cname, tok + 1, cl); cname[cl] = 0;
       uint32_t hc = s_hashtag_channel_colors ? nameColor(cname) : UI_ACCENT;
       // A literal '#' can't live inside a recolor span (it closes the color), so
-      // render the '#' in the default color, then the name in the tag color:
-      // "##" (literal '#') + "#RRGGBB name#".
+      // render the '#' in the default color, then the name as per-word colored spans
+      // (color survives a wrap inside a multi-word tag).
       appendEscaped(w, end, "#", 1);                       // -> "##" = one literal '#'
-      int wrote = snprintf(w, end - w, "#%06X ", (unsigned)hc);
-      if (wrote < 0 || wrote >= end - w) break;
-      w += wrote;
-      appendEscaped(w, end, tok + 1, htend - (tok + 1));   // the tag name (without '#')
-      if (w < end - 1) *w++ = '#';
+      if (!appendRecoloredWords(w, end, tok + 1, htend - (tok + 1), hc)) break;
       p = htend;
     }
   }
@@ -3368,6 +3390,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _node_prefs = &_node_prefs_store;
   _last_snap_version = mproxy::snapshotVersion();
   _instance = this;
+  loadPresetTable();   // seed radio presets (compiled list, or the flash override if present)
 
 #ifdef HAS_SD_CARD
   // Pick the initial store from the setting (default on). The Settings toggle
@@ -5429,6 +5452,12 @@ void UITask::openNewChannelPrefilled(const char* name, const uint8_t* secret, in
 // name "Public"; when public, derives the key from the name and shows it read-only.
 void UITask::refreshNewChannelHero() {
   if (!_newchan_hero_nm) return;
+  // Reentrancy guard: this writes _newchan_key_ta via lv_textarea_set_text, which
+  // fires VALUE_CHANGED -> newchan_ta_event_cb -> back here. Without the guard that
+  // recurses until the loopTask stack overflows (crash on the Public checkbox).
+  static bool s_in_refresh = false;
+  if (s_in_refresh) return;
+  s_in_refresh = true;
   const char* name = lv_textarea_get_text(_newchan_name_ta);
   bool pub = _newchan_public_chk && lv_obj_has_state(_newchan_public_chk, LV_STATE_CHECKED);
 
@@ -5455,6 +5484,7 @@ void UITask::refreshNewChannelHero() {
   } else {
     lv_label_set_text(_newchan_hero_key, pub ? "(enter a name)" : "(enter a key)");
   }
+  s_in_refresh = false;
 }
 
 void UITask::newchan_public_cb(lv_event_t* e) {
@@ -6094,9 +6124,12 @@ static void addSettingsSection(lv_obj_t* body, const char* title) {
 }
 
 // Official MeshCore region presets, embedded from https://api.meshcore.nz/api/v1/config
-// (suggested_radio_settings). Refresh from that endpoint if the list changes upstream.
-struct RadioPreset { const char* title; float freq; float bw; uint8_t sf; uint8_t cr; };
-static const RadioPreset RADIO_PRESETS[] = {
+// (suggested_radio_settings) as an offline SEED. On WiFi builds an updated list can be
+// fetched + saved to internal flash (/radio_presets); loadPresetTable() then overrides
+// this seed at startup / after an update. title is a fixed buffer so loaded entries own
+// their string.
+struct RadioPreset { char title[RADIO_PRESET_TITLE_LEN]; float freq; float bw; uint8_t sf; uint8_t cr; };
+static const RadioPreset RADIO_PRESETS_SEED[] = {
   {"Australia",               915.800f, 250.0f, 10, 5},
   {"Australia (Narrow)",      916.575f,  62.5f,  7, 8},
   {"Australia (Mid)",         915.075f, 125.0f,  9, 5},
@@ -6116,7 +6149,30 @@ static const RadioPreset RADIO_PRESETS[] = {
   {"Vietnam (Narrow)",        920.250f,  62.5f,  8, 5},
   {"Vietnam (Deprecated)",    920.250f, 250.0f, 11, 5},
 };
-static const int RADIO_PRESETS_N = sizeof(RADIO_PRESETS) / sizeof(RADIO_PRESETS[0]);
+static const int RADIO_PRESETS_SEED_N = sizeof(RADIO_PRESETS_SEED) / sizeof(RADIO_PRESETS_SEED[0]);
+
+// Live (overridable) preset table. Seeded from the compiled list; replaced by the flash
+// file when present. RadioPresetRec and RadioPreset share field layout (title[32]+
+// freq+bw+sf+cr), so a loaded record copies straight in.
+static RadioPreset RADIO_PRESETS[RADIO_PRESET_MAX];
+static int         RADIO_PRESETS_N = 0;
+
+static void loadPresetTable() {
+  RadioPresetRec recs[RADIO_PRESET_MAX];
+  int n = loadRadioPresets(recs, RADIO_PRESET_MAX);   // 0 if no/invalid flash file
+  if (n > 0) {
+    for (int i = 0; i < n; i++) {
+      strncpy(RADIO_PRESETS[i].title, recs[i].title, RADIO_PRESET_TITLE_LEN - 1);
+      RADIO_PRESETS[i].title[RADIO_PRESET_TITLE_LEN - 1] = 0;
+      RADIO_PRESETS[i].freq = recs[i].freq; RADIO_PRESETS[i].bw = recs[i].bw;
+      RADIO_PRESETS[i].sf = recs[i].sf;     RADIO_PRESETS[i].cr = recs[i].cr;
+    }
+    RADIO_PRESETS_N = n;
+  } else {
+    for (int i = 0; i < RADIO_PRESETS_SEED_N; i++) RADIO_PRESETS[i] = RADIO_PRESETS_SEED[i];
+    RADIO_PRESETS_N = RADIO_PRESETS_SEED_N;
+  }
+}
 
 // Valid LoRa bandwidths (kHz); index maps 1:1 to the bandwidth dropdown options.
 static const float BW_OPTS[] = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125.0f, 250.0f, 500.0f};
@@ -6259,6 +6315,7 @@ void UITask::showSettingsCategory(int cat) {
   lv_obj_clear_flag(_set_pane[cat], LV_OBJ_FLAG_HIDDEN);
   _set_active_pane = _set_pane_body[cat];
   if (cat == CAT_WIFI || cat == CAT_MQTT) refreshNetStatus();   // freshen the status line
+  if (cat == CAT_TELEMETRY) refreshGpsStatus();                 // GPS debug line
   if (_set_active_pane) lv_obj_scroll_to_y(_set_active_pane, 0, LV_ANIM_OFF);
   if (_set_kb) lv_obj_add_flag(_set_kb, LV_OBJ_FLAG_HIDDEN);
 }
@@ -6598,6 +6655,14 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_gps_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_gps_chk, set_gps_cb, LV_EVENT_VALUE_CHANGED, NULL);
   _set_gps_interval_ta = makeNumberField(body, "GPS interval (s)", set_advnum_ta_event_cb);
+  // Live GPS debug line (module detected / fix / satellites / coords), refreshed at 1 Hz
+  // while this pane is open. sensors.loop() runs on this (UI/core-1) loop, so reading
+  // the location provider here is in-thread.
+  _set_gps_status = lv_label_create(body);
+  lv_label_set_long_mode(_set_gps_status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_set_gps_status, LV_PCT(100));
+  lv_obj_set_style_text_color(_set_gps_status, lv_color_hex(DIM_HEX), 0);
+  lv_label_set_text(_set_gps_status, "");
 #endif
 
   body = _set_pane_body[CAT_NOTIFY];   // Notifications
@@ -6645,6 +6710,12 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   // Auto-applies as you edit (enable, then SSID/password on defocus) -- no Save button.
   { lv_obj_t* f = makeField(body, "Enabled"); _set_wifi_en = lv_switch_create(f);
     lv_obj_add_event_cb(_set_wifi_en, wifi_enable_cb, LV_EVENT_VALUE_CHANGED, NULL); }
+  // Live status, right under the switch; hidden while WiFi is off.
+  _set_wifi_status = lv_label_create(body);
+  lv_label_set_long_mode(_set_wifi_status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_set_wifi_status, LV_PCT(100));
+  lv_obj_set_style_text_color(_set_wifi_status, lv_color_hex(DIM_HEX), 0);
+  lv_label_set_text(_set_wifi_status, "");
   { lv_obj_t* f = makeField(body, "Network (SSID)");
     _set_wifi_ssid = makeSelTextarea(f);
     lv_textarea_set_one_line(_set_wifi_ssid, true); lv_obj_add_event_cb(_set_wifi_ssid, UITask::ta_done_cb, LV_EVENT_READY, NULL);
@@ -6681,15 +6752,50 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_wifi_dns_ovr, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_wifi_dns_ovr, wifi_apply_cb, LV_EVENT_VALUE_CHANGED, NULL);
   _set_wifi_dns = ipField("DNS");
-  _set_wifi_status = lv_label_create(body);
-  lv_label_set_long_mode(_set_wifi_status, LV_LABEL_LONG_WRAP);
-  lv_obj_set_width(_set_wifi_status, LV_PCT(100));
-  lv_obj_set_style_text_color(_set_wifi_status, lv_color_hex(DIM_HEX), 0);
-  lv_label_set_text(_set_wifi_status, "");
+
+  // NTP clock sync (uses the WiFi connection; SNTP is free with the WiFi stack).
+  addSettingsSection(body, "Clock (NTP)");
+  _set_ntp_en = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_ntp_en, "Sync clock from NTP");
+  lv_obj_set_style_text_color(_set_ntp_en, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_ntp_en, wifi_apply_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  { lv_obj_t* f = makeField(body, "NTP server");
+    _set_ntp_server = makeSelTextarea(f);
+    lv_textarea_set_one_line(_set_ntp_server, true); lv_obj_add_event_cb(_set_ntp_server, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_textarea_set_placeholder_text(_set_ntp_server, "pool.ntp.org");
+    lv_textarea_set_max_length(_set_ntp_server, 47);
+    lv_obj_set_width(_set_ntp_server, LV_PCT(100));
+    lv_obj_add_event_cb(_set_ntp_server, wifi_ta_event_cb, LV_EVENT_ALL, NULL); }
+  { lv_obj_t* sb = lv_btn_create(body); lv_obj_set_width(sb, LV_PCT(100));
+    lv_obj_add_event_cb(sb, ntp_sync_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* l = lv_label_create(sb); lv_label_set_text(l, LV_SYMBOL_REFRESH " Sync clock now"); lv_obj_center(l); }
+  _set_ntp_status = lv_label_create(body);
+  lv_label_set_long_mode(_set_ntp_status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_set_ntp_status, LV_PCT(100));
+  lv_obj_set_style_text_color(_set_ntp_status, lv_color_hex(DIM_HEX), 0);
+  lv_label_set_text(_set_ntp_status, "");
+
+  // Radio presets: fetch the official region list over WiFi -> internal flash.
+  addSettingsSection(body, "Radio presets");
+  { lv_obj_t* sb = lv_btn_create(body); lv_obj_set_width(sb, LV_PCT(100));
+    lv_obj_add_event_cb(sb, presets_update_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* l = lv_label_create(sb); lv_label_set_text(l, LV_SYMBOL_DOWNLOAD " Update radio presets"); lv_obj_center(l); }
+  _set_preset_status = lv_label_create(body);
+  lv_label_set_long_mode(_set_preset_status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_set_preset_status, LV_PCT(100));
+  lv_obj_set_style_text_color(_set_preset_status, lv_color_hex(DIM_HEX), 0);
+  lv_label_set_text(_set_preset_status, "");
 
   body = _set_pane_body[CAT_MQTT];   // ===== MQTT bridge =====
   addSettingsSection(body, "MQTT bridge");
-  { lv_obj_t* f = makeField(body, "Enabled"); _set_mqtt_en = lv_switch_create(f); }
+  { lv_obj_t* f = makeField(body, "Enabled"); _set_mqtt_en = lv_switch_create(f);
+    lv_obj_add_event_cb(_set_mqtt_en, mqtt_save_cb, LV_EVENT_VALUE_CHANGED, NULL); }
+  // Live status, right under the switch; hidden while MQTT is off.
+  _set_mqtt_status = lv_label_create(body);
+  lv_label_set_long_mode(_set_mqtt_status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_set_mqtt_status, LV_PCT(100));
+  lv_obj_set_style_text_color(_set_mqtt_status, lv_color_hex(DIM_HEX), 0);
+  lv_label_set_text(_set_mqtt_status, "");
   { lv_obj_t* f = makeField(body, "Broker host");
     _set_mqtt_host = makeSelTextarea(f);
     lv_textarea_set_one_line(_set_mqtt_host, true); lv_obj_add_event_cb(_set_mqtt_host, UITask::ta_done_cb, LV_EVENT_READY, NULL);
@@ -6734,11 +6840,6 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   { lv_obj_t* sb = lv_btn_create(body); lv_obj_set_width(sb, LV_PCT(100));
     lv_obj_add_event_cb(sb, mqtt_save_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t* l = lv_label_create(sb); lv_label_set_text(l, LV_SYMBOL_OK " Save & connect"); lv_obj_center(l); }
-  _set_mqtt_status = lv_label_create(body);
-  lv_label_set_long_mode(_set_mqtt_status, LV_LABEL_LONG_WRAP);
-  lv_obj_set_width(_set_mqtt_status, LV_PCT(100));
-  lv_obj_set_style_text_color(_set_mqtt_status, lv_color_hex(DIM_HEX), 0);
-  lv_label_set_text(_set_mqtt_status, "");
 
   body = _set_pane_body[CAT_DISPLAY];   // Display & Time
   // ===== Display =====
@@ -8489,6 +8590,7 @@ void UITask::wifi_apply_cb(lv_event_t* e) {
   if (!_instance) return;
   _instance->updateWifiFieldStates();
   _instance->wifiApplyFromForm();
+  _instance->refreshNetStatus();   // NTP-enable toggle shows/hides its status line
 }
 
 // WiFi enable toggled: saves the pref, but switching WiFi<->BLE only takes effect on
@@ -8497,6 +8599,7 @@ void UITask::wifi_enable_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
   _instance->wifiApplyFromForm();
+  _instance->refreshNetStatus();   // show/hide status lines for the new state
   _instance->showToast("Reboot to apply - WiFi & Bluetooth can't run together");
 }
 
@@ -8552,6 +8655,15 @@ void UITask::ntp_sync_cb(lv_event_t* e) {
   _instance->showToast("Syncing clock...");
 }
 
+void UITask::presets_update_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::UpdatePresets; mproxy::postCommand(c);
+  _instance->showToast("Fetching radio presets...");
+  // The backend fetch is synchronous on its core; the status line updates via the
+  // 1 Hz Network-pane refresh, which also reloads our RAM table on success.
+}
+
 void UITask::mqtt_save_cb(lv_event_t* e) {
   (void)e;
   if (!_instance || !_instance->_node_prefs) return;
@@ -8571,13 +8683,58 @@ void UITask::mqtt_save_cb(lv_event_t* e) {
   p->mqtt_publish_tx = lv_obj_has_state(_instance->_set_mqtt_tx, LV_STATE_CHECKED) ? 1 : 0;
   mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::ApplyMqtt; c.prefs = *p; mproxy::postCommand(c);
   lv_obj_add_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+  _instance->refreshNetStatus();   // show/hide the status line for the new state
   _instance->showToast(p->mqtt_enabled ? "MQTT connecting..." : "MQTT off");
+}
+
+void UITask::refreshGpsStatus() {
+#if ENV_INCLUDE_GPS
+  if (!_set_gps_status) return;
+  char buf[96];
+  if (!_node_prefs || !_node_prefs->gps_enabled) {
+    strcpy(buf, "GPS: disabled (enable + reboot)");
+  } else {
+    LocationProvider* gps = _sensors ? _sensors->getLocationProvider() : nullptr;
+    if (!gps) {
+      strcpy(buf, "GPS: not available");
+    } else if (gps->isValid()) {
+      snprintf(buf, sizeof(buf), "GPS: fix, %ld sats  %.5f, %.5f",
+               gps->satellitesCount(), gps->getLatitude() / 1e6, gps->getLongitude() / 1e6);
+    } else {
+      // No fix yet. Satellites seen means the module is detected and talking; 0 for
+      // a long time usually means no module / wrong wiring (see the not-detected toast).
+      snprintf(buf, sizeof(buf), "GPS: searching... (%ld sats)", gps->satellitesCount());
+    }
+  }
+  lv_label_set_text(_set_gps_status, buf);
+#endif
 }
 
 void UITask::refreshNetStatus() {
   char buf[96];
-  if (_set_wifi_status) { mproxy::wifiStatus(buf, sizeof(buf)); lv_label_set_text(_set_wifi_status, buf); }
-  if (_set_mqtt_status) { mproxy::mqttStatus(buf, sizeof(buf)); lv_label_set_text(_set_mqtt_status, buf); }
+  // Each status line shows only while its feature is switched on (and NTP only when
+  // WiFi is on too, since it needs the link). Hidden lines collapse out of the layout.
+  auto showStatus = [](lv_obj_t* lbl, bool on, const char* text) {
+    if (!lbl) return;
+    if (on) { lv_label_set_text(lbl, text); lv_obj_clear_flag(lbl, LV_OBJ_FLAG_HIDDEN); }
+    else    { lv_obj_add_flag(lbl, LV_OBJ_FLAG_HIDDEN); }
+  };
+  bool wifiOn = _set_wifi_en && lv_obj_has_state(_set_wifi_en, LV_STATE_CHECKED);
+  bool mqttOn = _set_mqtt_en && lv_obj_has_state(_set_mqtt_en, LV_STATE_CHECKED);
+  bool ntpOn  = wifiOn && _set_ntp_en && lv_obj_has_state(_set_ntp_en, LV_STATE_CHECKED);
+  if (wifiOn) mproxy::wifiStatus(buf, sizeof(buf)); showStatus(_set_wifi_status, wifiOn, buf);
+  if (mqttOn) mproxy::mqttStatus(buf, sizeof(buf)); showStatus(_set_mqtt_status, mqttOn, buf);
+  if (ntpOn)  mproxy::ntpStatus(buf, sizeof(buf));  showStatus(_set_ntp_status, ntpOn, buf);
+  if (wifiOn) {
+    mproxy::presetStatus(buf, sizeof(buf));
+    // When a fetch just succeeded, reload our RAM table from flash so the Preset
+    // picker reflects the new list without a reboot (once per result string).
+    if (strncmp(buf, "updated:", 8) == 0 && strcmp(buf, _preset_status_last) != 0)
+      loadPresetTable();
+    strncpy(_preset_status_last, buf, sizeof(_preset_status_last) - 1);
+    _preset_status_last[sizeof(_preset_status_last) - 1] = 0;
+  }
+  showStatus(_set_preset_status, wifiOn, buf);
   // Live addressing into the read-only (disabled) IP fields -- never clobbers an
   // editable field the user is filling in static mode.
   char ip[24], mask[24], gw[24], dns[24];
@@ -8587,7 +8744,6 @@ void UITask::refreshNetStatus() {
   };
   fillRO(_set_wifi_ip, ip); fillRO(_set_wifi_mask, mask);
   fillRO(_set_wifi_gw, gw); fillRO(_set_wifi_dns, dns);
-  if (_set_ntp_status) { mproxy::ntpStatus(buf, sizeof(buf)); lv_label_set_text(_set_ntp_status, buf); }
 }
 
 // Refresh the row of PIN dots: as many dots as the stored PIN is long, the first
@@ -9269,6 +9425,12 @@ void UITask::loop() {
         strftime(buf, sizeof(buf), "%H:%M", &tmv);     // e.g. "21:05"
       }
       lv_label_set_text(_clock_label, buf);
+      // Live-refresh the Network status lines (1 Hz) while a Network pane is open.
+      if (_set_active_pane == _set_pane_body[CAT_WIFI] ||
+          _set_active_pane == _set_pane_body[CAT_MQTT]) {
+        refreshNetStatus();
+      }
+      if (_set_active_pane == _set_pane_body[CAT_TELEMETRY]) refreshGpsStatus();
     }
   }
 
@@ -9280,6 +9442,21 @@ void UITask::loop() {
   if (_msgs->takeWriteError() && now - sd_err_toast_ms > 15000) {  // throttle: don't spam per message
     sd_err_toast_ms = now;
     showToast("SD write failed - message not saved");
+  }
+#endif
+
+#if ENV_INCLUDE_GPS
+  // One-shot "GPS not detected" banner: if GPS is enabled but after a generous
+  // window the module has produced nothing (no fix and no satellites seen), warn so
+  // the user knows it's not wired/powered -- a GPS free-runs NMEA the moment it has
+  // power, so silence past this point means the ESP isn't hearing it. (12s: a cold
+  // module can take several seconds to emit its first sentence.)
+  static bool gps_warned = false;
+  if (!gps_warned && now > 12000 && _node_prefs && _node_prefs->gps_enabled) {
+    gps_warned = true;
+    LocationProvider* gps = _sensors ? _sensors->getLocationProvider() : nullptr;
+    bool heard = gps && (gps->isValid() || gps->satellitesCount() > 0);
+    if (!heard) showToast("GPS not detected");
   }
 #endif
 

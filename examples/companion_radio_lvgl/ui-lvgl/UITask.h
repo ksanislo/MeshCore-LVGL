@@ -321,6 +321,8 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_ntp_en;          // NTP enable checkbox
   lv_obj_t*       _set_ntp_server;      // NTP server field
   lv_obj_t*       _set_ntp_status;      // NTP status label
+  lv_obj_t*       _set_preset_status;   // radio-preset update status label
+  char            _preset_status_last[40] = "";  // last-seen status (reload table on change)
   lv_obj_t*       _set_mqtt_en;         // MQTT enable switch
   lv_obj_t*       _set_mqtt_host;       // broker host
   lv_obj_t*       _set_mqtt_port;       // broker port (digits)
@@ -371,6 +373,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_airtime_ta;      // airtime budget factor
   lv_obj_t*       _set_gps_chk;         // enable optional UART GPS (reboot to apply)
   lv_obj_t*       _set_gps_interval_ta; // GPS auto-update interval (seconds)
+  lv_obj_t*       _set_gps_status;      // live GPS debug line (detected/fix/sats/coords)
   lv_obj_t*       _set_radio_sw;        // LoRa radio on/off (off = safe to detach antenna)
   // Set-PIN dialog (two boxes, must match). Lazily built.
   lv_obj_t*       _pinset_popup;
@@ -813,9 +816,11 @@ private:
   static void wifi_enable_cb(lv_event_t* e);    // WiFi enable toggled -> apply + reboot prompt
   static void mqtt_save_cb(lv_event_t* e);
   static void ntp_sync_cb(lv_event_t* e);       // "Sync clock now"
+  static void presets_update_cb(lv_event_t* e); // "Update radio presets"
   void        wifiApplyFromForm();              // gather WiFi fields -> prefs -> ApplyWifi
   void        updateWifiFieldStates();          // grey/enable IP fields per DHCP/override
   void        refreshNetStatus();               // update status labels + live IP fields
+  void        refreshGpsStatus();               // update the GPS debug line
   static void set_avatar_cb(lv_event_t* e);
   static void set_theme_cb(lv_event_t* e);
   static void theme_async_cb(void* unused);   // deferred theme rebuild (lv_async_call)
@@ -999,7 +1004,7 @@ public:
       _set_wifi_en(NULL), _set_wifi_ssid(NULL), _set_wifi_pw(NULL),
       _set_wifi_dhcp(NULL), _set_wifi_dns_ovr(NULL), _set_wifi_ip(NULL), _set_wifi_mask(NULL),
       _set_wifi_gw(NULL), _set_wifi_dns(NULL), _set_wifi_status(NULL),
-      _set_ntp_en(NULL), _set_ntp_server(NULL), _set_ntp_status(NULL),
+      _set_ntp_en(NULL), _set_ntp_server(NULL), _set_ntp_status(NULL), _set_preset_status(NULL),
       _set_mqtt_en(NULL), _set_mqtt_host(NULL), _set_mqtt_port(NULL), _set_mqtt_user(NULL), _set_mqtt_pw(NULL),
       _set_mqtt_topic(NULL), _set_mqtt_tls(NULL), _set_mqtt_rx(NULL), _set_mqtt_tx(NULL), _set_mqtt_status(NULL),
       _set_avatar_dd(NULL), _set_theme_dd(NULL), _set_mention_chk(NULL), _set_hashtag_chk(NULL), _set_chsender_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_mutedef_chk(NULL), _set_kb(NULL),
@@ -1010,7 +1015,7 @@ public:
       _set_telem_base_dd(NULL), _set_telem_loc_dd(NULL), _set_telem_env_dd(NULL),
       _set_autoadd_chk(NULL), _set_autoadd_hops_dd(NULL), _set_rxboost_chk(NULL),
       _set_multiack_ta(NULL), _set_rxdelay_ta(NULL), _set_airtime_ta(NULL),
-      _set_gps_chk(NULL), _set_gps_interval_ta(NULL),
+      _set_gps_chk(NULL), _set_gps_interval_ta(NULL), _set_gps_status(NULL),
       _set_radio_sw(NULL),
       _pinset_popup(NULL), _pinset_ta1(NULL), _pinset_ta2(NULL), _pinset_err(NULL), _pinset_kb(NULL),
       _lock_screen(NULL), _lock_err(NULL), _lock_len(0), _locked(false),

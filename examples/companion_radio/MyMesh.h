@@ -123,6 +123,8 @@ public:
   void applyNtpConfig();                   // (re)arm NTP from prefs (from UI)
   void syncNtpNow();                       // kick an immediate NTP request
   void getNtpStatus(char* out, size_t cap);
+  void updateRadioPresets();               // fetch official presets over HTTPS -> flash
+  void getPresetStatus(char* out, size_t cap);
 #endif
 #if defined(WITH_MQTT_BRIDGE)
   void applyMqttConfig();                  // push prefs into the shim + (re)start (from UI)
@@ -152,6 +154,7 @@ protected:
   bool _wifi_was_up = false;          // edge-detect link-up to (re)arm NTP
   bool _ntp_synced = false;           // NTP has set the RTC at least once
   uint32_t _ntp_next_check_ms = 0;    // next time() poll / re-sync (millis)
+  char _preset_status[40] = "";       // last preset-update result, for the UI
   void startWifi();
   void stopWifi();
 #endif

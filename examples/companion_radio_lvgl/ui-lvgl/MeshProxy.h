@@ -69,6 +69,7 @@ enum class CmdKind : uint8_t {
   ApplyWifi,    // copy prefs (wifi_*) + save + (re)connect WiFi (+ re-arm NTP)
   ApplyMqtt,    // copy prefs (mqtt_*) + save + (re)start the MQTT bridge
   SyncNtp,      // kick an immediate NTP clock sync
+  UpdatePresets,// fetch the official radio presets over HTTPS -> internal flash
 };
 
 struct MeshCmd {
@@ -152,6 +153,7 @@ void wifiStatus(char* out, size_t cap);   // human-readable WiFi status for the 
 void mqttStatus(char* out, size_t cap);   // human-readable MQTT status for the UI
 void wifiIpInfo(char* ip, char* mask, char* gw, char* dns, size_t cap);  // live addressing strings
 void ntpStatus(char* out, size_t cap);   // NTP clock-sync status for the UI
+void presetStatus(char* out, size_t cap);   // radio-preset update status for the UI
 int  copyMutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);    // seed the UI's explicit-muted set at begin()
 int  copyUnmutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);  // seed the UI's explicit-unmuted set at begin()
 uint32_t rtcSeconds();             // live device clock (ESP32 internal RTC; safe cross-core)

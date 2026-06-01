@@ -5,6 +5,10 @@
 #include <helpers/MeshPSRAM.h>
 #if defined(WITH_WIFI) && defined(ESP32)
   #include <time.h>   // configTime / time() for NTP clock sync
+  #include <HTTPClient.h>
+  #include <WiFiClientSecure.h>
+  #include "cJSON.h"             // shipped with esp-idf -> zero extra flash
+  #include "RadioPresetStore.h"
 #endif
 
 #define CMD_APP_START                 1
@@ -409,6 +413,64 @@ void MyMesh::getNtpStatus(char* out, size_t cap) {
   if (!getNodePrefs()->ntp_enabled) { strncpy(out, "off", cap - 1); out[cap - 1] = 0; return; }
   if (_ntp_synced) { strncpy(out, "clock synced", cap - 1); out[cap - 1] = 0; }
   else             { strncpy(out, "waiting for time...", cap - 1); out[cap - 1] = 0; }
+}
+
+// Fetch the official region presets over HTTPS and persist them to internal flash so
+// they override the compiled-in seed table. Runs on the backend core (has WiFi). The
+// numeric fields arrive as strings in suggested_radio_settings.entries[].
+void MyMesh::updateRadioPresets() {
+  auto fail = [this](const char* m) { strncpy(_preset_status, m, sizeof(_preset_status) - 1); _preset_status[sizeof(_preset_status) - 1] = 0; };
+  if (WiFi.status() != WL_CONNECTED) { fail("no WiFi"); return; }
+
+  WiFiClientSecure client;
+  client.setInsecure();                 // v1: no cert verification (matches MqttBridge)
+  HTTPClient http;
+  http.setTimeout(8000);
+  if (!http.begin(client, "https://api.meshcore.nz/api/v1/config")) { fail("connect failed"); return; }
+  int code = http.GET();
+  if (code != 200) { http.end(); char b[40]; snprintf(b, sizeof(b), "HTTP %d", code); fail(b); return; }
+  String body = http.getString();
+  http.end();
+
+  cJSON* root = cJSON_Parse(body.c_str());
+  if (!root) { fail("bad JSON"); return; }
+  // Real shape: root.config.suggested_radio_settings.entries[]
+  cJSON* cfg = cJSON_GetObjectItem(root, "config");
+  cJSON* entries = cJSON_GetObjectItem(cJSON_GetObjectItem(cfg, "suggested_radio_settings"), "entries");
+  if (!cJSON_IsArray(entries)) { cJSON_Delete(root); fail("no entries"); return; }
+
+  static RadioPresetRec recs[RADIO_PRESET_MAX];   // static: keep it off the task stack
+  int n = 0;
+  cJSON* e = nullptr;
+  cJSON_ArrayForEach(e, entries) {
+    if (n >= RADIO_PRESET_MAX) break;
+    cJSON* title = cJSON_GetObjectItem(e, "title");
+    cJSON* freq  = cJSON_GetObjectItem(e, "frequency");
+    cJSON* bw    = cJSON_GetObjectItem(e, "bandwidth");
+    cJSON* sf    = cJSON_GetObjectItem(e, "spreading_factor");
+    cJSON* cr    = cJSON_GetObjectItem(e, "coding_rate");
+    if (!cJSON_IsString(title) || !cJSON_IsString(freq) || !cJSON_IsString(bw) ||
+        !cJSON_IsString(sf) || !cJSON_IsString(cr)) continue;
+    RadioPresetRec& r = recs[n];
+    memset(&r, 0, sizeof(r));
+    strncpy(r.title, title->valuestring, RADIO_PRESET_TITLE_LEN - 1);
+    r.freq = atof(freq->valuestring);
+    r.bw   = atof(bw->valuestring);
+    r.sf   = (uint8_t)atoi(sf->valuestring);
+    r.cr   = (uint8_t)atoi(cr->valuestring);
+    if (r.freq <= 0 || r.bw <= 0 || r.sf < 5 || r.sf > 12 || r.cr < 5 || r.cr > 8) continue;  // sanity
+    n++;
+  }
+  cJSON_Delete(root);
+
+  if (n == 0) { fail("no valid presets"); return; }
+  if (!saveRadioPresets(recs, n)) { fail("flash write failed"); return; }
+  snprintf(_preset_status, sizeof(_preset_status), "updated: %d presets", n);
+}
+
+void MyMesh::getPresetStatus(char* out, size_t cap) {
+  strncpy(out, _preset_status[0] ? _preset_status : "tap to update", cap - 1);
+  out[cap - 1] = 0;
 }
 void MyMesh::applyWifiConfig() {
   // The WiFi stack only exists when we booted in WiFi mode (BLE skipped). If it's
