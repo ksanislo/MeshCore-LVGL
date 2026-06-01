@@ -6880,7 +6880,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
 
   // Category launcher rows -> each drills into the matching pane.
   // (The owner hero above is the Profile entry -> pane 0, so no separate row.)
-  makeCategoryRow(_set_launcher, LV_SYMBOL_LIST,  "About",           "Device status, version, firmware update", CAT_ABOUT);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_LIST,  "About",           "Status, version, firmware update",     CAT_ABOUT);
   makeCategoryRow(_set_launcher, LV_SYMBOL_WIFI,  "Radio & Routing", "Frequency, power, presets, mesh",      CAT_RADIO);
   makeCategoryRow(_set_launcher, LV_SYMBOL_GPS,   "Telemetry & GPS", "Telemetry sharing, GPS module",        CAT_TELEMETRY);
   makeCategoryRow(_set_launcher, LV_SYMBOL_BELL,  "Notifications",   "New-message alerts & sound",           CAT_NOTIFY);
