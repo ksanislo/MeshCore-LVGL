@@ -2308,7 +2308,8 @@ static const lv_font_t* fontCaption() { return withEmoji(&lv_font_montserrat_12)
 // Channel.derivePskFromHashtag(): PSK = SHA256("#" + name)[0:16] (AES-128), and
 // the on-air channel id = SHA256(psk)[0]. `name` is the bare tag (no '#').
 static void deriveHashtagPsk(const char* name, uint8_t psk[16]) {
-  char buf[80];
+  if (name) while (*name == '#') name++;   // the tag is the bare name; a typed leading '#' would
+  char buf[80];                            // otherwise hash "##name" -> a different (wrong) channel
   snprintf(buf, sizeof(buf), "#%s", name ? name : "");
   mesh::Utils::sha256(psk, 16, (const uint8_t*)buf, (int)strlen(buf));
 }
@@ -5795,7 +5796,10 @@ bool UITask::createChannelFromForm() {
              || isPublicName(name);
 
   if (pub) {
-    // Key derived from the name (Public -> legacy PSK, else SHA256("#"+name)).
+    // A public/#hashtag channel's key + name come from the BARE tag, exactly like tapping a
+    // #hashtag in chat. Strip any leading '#' the user typed so we don't store "#general" here
+    // while the chip path stores "general" -- same channel, two names (and a missed dedup).
+    { char* nm = name; while (*nm == '#') nm++; if (nm != name) memmove(name, nm, strlen(nm) + 1); }
     if (!name[0]) { fail("Enter a channel name"); return false; }
     uint8_t psk[16]; derivePublicChannelKey(name, psk);
     memcpy(secret, psk, 16); len = 16;
