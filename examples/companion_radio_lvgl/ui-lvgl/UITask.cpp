@@ -5803,6 +5803,7 @@ static lv_obj_t* attachClearX(lv_obj_t* ta) {
   lv_obj_set_style_text_color(x, lv_color_hex(DIM_HEX), 0);
   lv_obj_add_flag(x, LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN);
   lv_obj_align(x, LV_ALIGN_RIGHT_MID, 18, 0);            // flush to the edge, in the padding
+  lv_obj_set_ext_click_area(x, 12);                      // finger-sized hit zone (glyph is tiny)
   lv_obj_set_user_data(x, ta);
   lv_obj_set_user_data(ta, x);
   lv_obj_add_event_cb(x, clearx_click_cb, LV_EVENT_CLICKED, NULL);
@@ -5817,14 +5818,24 @@ lv_obj_t* UITask::attachInlineEye(lv_obj_t* ta) {
   // makeSelTextarea already added a clear ✕ at the right edge; make room for both and
   // shift the ✕ left so the eye sits at the far right.
   lv_obj_t* clearx = (lv_obj_t*)lv_obj_get_user_data(ta);
-  lv_obj_set_style_pad_right(ta, clearx ? 40 : 20, 0);
-  if (clearx) lv_obj_align(clearx, LV_ALIGN_RIGHT_MID, -2, 0);
+  // The eye must be FLOATING like the clear-✕ -- otherwise its overflow into the
+  // right padding makes the textarea scrollable (phantom scrollbar + a gap). Offsets
+  // are from the content edge (box edge - pad_right); positive = toward the edge.
+  // Reserve a wide right pad so the eye sits flush-right and the ✕ is well clear of
+  // it, and give each a ~font-height hit zone (the glyphs are tiny -> hard to tap).
+  lv_obj_set_style_pad_right(ta, clearx ? 56 : 28, 0);
+  if (clearx) {
+    lv_obj_align(clearx, LV_ALIGN_RIGHT_MID, 22, 0);    // ✕ ~30px left of the eye
+    lv_obj_set_ext_click_area(clearx, 12);
+  }
   lv_obj_t* eye = lv_label_create(ta);
   lv_label_set_text(eye, LV_SYMBOL_EYE_CLOSE);          // closed = currently hidden
   lv_obj_set_style_text_font(eye, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_color(eye, lv_color_hex(DIM_HEX), 0);
-  lv_obj_align(eye, LV_ALIGN_RIGHT_MID, 18, 0);         // nudged into the padding, flush to the edge
+  lv_obj_add_flag(eye, LV_OBJ_FLAG_FLOATING);           // ignored by layout/scroll
+  lv_obj_align(eye, LV_ALIGN_RIGHT_MID, 52, 0);         // flush to the right edge
   lv_obj_add_flag(eye, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_ext_click_area(eye, 12);                   // ~30px hit zone (glyph is tiny)
   lv_obj_set_user_data(eye, ta);
   lv_obj_add_event_cb(eye, pw_eye_cb, LV_EVENT_CLICKED, NULL);
   return eye;
