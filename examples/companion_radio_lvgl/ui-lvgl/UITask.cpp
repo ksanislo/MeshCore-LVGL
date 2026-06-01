@@ -6247,6 +6247,7 @@ void UITask::showSettingsCategory(int cat) {
   for (int i = 0; i < CAT_COUNT; i++) if (_set_pane[i]) lv_obj_add_flag(_set_pane[i], LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(_set_pane[cat], LV_OBJ_FLAG_HIDDEN);
   _set_active_pane = _set_pane_body[cat];
+  if (cat == CAT_WIFI || cat == CAT_MQTT) refreshNetStatus();   // freshen the status line
   if (_set_active_pane) lv_obj_scroll_to_y(_set_active_pane, 0, LV_ANIM_OFF);
   if (_set_kb) lv_obj_add_flag(_set_kb, LV_OBJ_FLAG_HIDDEN);
 }
@@ -6473,6 +6474,8 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   makeCategoryRow(_set_launcher, LV_SYMBOL_BELL,  "Notifications",   "New-message alerts & sound",           CAT_NOTIFY);
   makeCategoryRow(_set_launcher, LV_SYMBOL_IMAGE, "Display & Time",  "Brightness, rotation, clock, avatars", CAT_DISPLAY);
   makeCategoryRow(_set_launcher, LV_SYMBOL_POWER, "Power & Lock",    "LoRa radio, PIN lock, reboot",         CAT_POWER);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_WIFI,  "WiFi",            "Connect to a WiFi network",            CAT_WIFI);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_UPLOAD,"MQTT",            "Virtual-radio bridge to a broker",     CAT_MQTT);
   makeCategoryRow(_set_launcher, LV_SYMBOL_LIST,  "About",           "Device status & telemetry",           CAT_ABOUT);
 
   // Profile is a full-screen detail page (built below), not an in-tab pane; the
@@ -6482,6 +6485,8 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   makeSettingsPane(CAT_NOTIFY,    "Notifications");
   makeSettingsPane(CAT_DISPLAY,   "Display & Time");
   makeSettingsPane(CAT_POWER,     "Power & Lock");
+  makeSettingsPane(CAT_WIFI,      "WiFi");
+  makeSettingsPane(CAT_MQTT,      "MQTT");
 
   // Owner profile is its own full-screen contact page (see buildProfileScreen);
   // built here so its fields are populated by populateSettings() below.
@@ -6623,6 +6628,106 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_t* lockl = lv_label_create(lockb);
   lv_label_set_text(lockl, LV_SYMBOL_SETTINGS " Lock screen");
   lv_obj_center(lockl);
+
+  body = _set_pane_body[CAT_WIFI];   // ===== WiFi =====
+  addSettingsSection(body, "WiFi");
+  // Auto-applies as you edit (enable, then SSID/password on defocus) -- no Save button.
+  { lv_obj_t* f = makeField(body, "Enabled"); _set_wifi_en = lv_switch_create(f);
+    lv_obj_add_event_cb(_set_wifi_en, wifi_enable_cb, LV_EVENT_VALUE_CHANGED, NULL); }
+  { lv_obj_t* f = makeField(body, "Network (SSID)");
+    _set_wifi_ssid = makeSelTextarea(f);
+    lv_textarea_set_one_line(_set_wifi_ssid, true); lv_obj_add_event_cb(_set_wifi_ssid, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_textarea_set_max_length(_set_wifi_ssid, 32);
+    lv_obj_set_width(_set_wifi_ssid, LV_PCT(100));
+    lv_obj_add_event_cb(_set_wifi_ssid, wifi_ta_event_cb, LV_EVENT_ALL, NULL); }
+  { lv_obj_t* f = makeField(body, "Password");
+    _set_wifi_pw = makeSelTextarea(f);
+    lv_textarea_set_one_line(_set_wifi_pw, true); lv_obj_add_event_cb(_set_wifi_pw, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_textarea_set_max_length(_set_wifi_pw, 63);
+    lv_obj_set_width(_set_wifi_pw, LV_PCT(100));
+    lv_obj_add_event_cb(_set_wifi_pw, wifi_ta_event_cb, LV_EVENT_ALL, NULL);
+    attachInlineEye(_set_wifi_pw); }
+  _set_wifi_dhcp = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_wifi_dhcp, "DHCP (automatic)");
+  lv_obj_set_style_text_color(_set_wifi_dhcp, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_wifi_dhcp, wifi_apply_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  // IP / netmask / gateway: editable when static; greyed + live values under DHCP.
+  auto ipField = [&](const char* lbl) -> lv_obj_t* {
+    lv_obj_t* f = makeField(body, lbl);
+    lv_obj_t* ta = makeSelTextarea(f);
+    lv_textarea_set_one_line(ta, true); lv_obj_add_event_cb(ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_textarea_set_accepted_chars(ta, "0123456789.");
+    lv_textarea_set_max_length(ta, 15);
+    lv_obj_set_width(ta, LV_PCT(100));
+    lv_obj_add_event_cb(ta, wifi_ta_event_cb, LV_EVENT_ALL, NULL);
+    return ta;
+  };
+  _set_wifi_ip   = ipField("IP address");
+  _set_wifi_mask = ipField("Netmask");
+  _set_wifi_gw   = ipField("Gateway");
+  _set_wifi_dns_ovr = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_wifi_dns_ovr, "Custom DNS (override DHCP)");
+  lv_obj_set_style_text_color(_set_wifi_dns_ovr, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_wifi_dns_ovr, wifi_apply_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  _set_wifi_dns = ipField("DNS");
+  _set_wifi_status = lv_label_create(body);
+  lv_label_set_long_mode(_set_wifi_status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_set_wifi_status, LV_PCT(100));
+  lv_obj_set_style_text_color(_set_wifi_status, lv_color_hex(DIM_HEX), 0);
+  lv_label_set_text(_set_wifi_status, "");
+
+  body = _set_pane_body[CAT_MQTT];   // ===== MQTT bridge =====
+  addSettingsSection(body, "MQTT bridge");
+  { lv_obj_t* f = makeField(body, "Enabled"); _set_mqtt_en = lv_switch_create(f); }
+  { lv_obj_t* f = makeField(body, "Broker host");
+    _set_mqtt_host = makeSelTextarea(f);
+    lv_textarea_set_one_line(_set_mqtt_host, true); lv_obj_add_event_cb(_set_mqtt_host, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_textarea_set_max_length(_set_mqtt_host, 63);
+    lv_obj_set_width(_set_mqtt_host, LV_PCT(100));
+    lv_obj_add_event_cb(_set_mqtt_host, net_ta_event_cb, LV_EVENT_ALL, NULL); }
+  { lv_obj_t* f = makeField(body, "Port (0 = default)");
+    _set_mqtt_port = makeSelTextarea(f);
+    lv_textarea_set_one_line(_set_mqtt_port, true); lv_obj_add_event_cb(_set_mqtt_port, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_textarea_set_accepted_chars(_set_mqtt_port, "0123456789");
+    lv_textarea_set_max_length(_set_mqtt_port, 5);
+    lv_obj_set_width(_set_mqtt_port, LV_PCT(100));
+    lv_obj_add_event_cb(_set_mqtt_port, net_ta_event_cb, LV_EVENT_ALL, NULL); }
+  { lv_obj_t* f = makeField(body, "User (optional)");
+    _set_mqtt_user = makeSelTextarea(f);
+    lv_textarea_set_one_line(_set_mqtt_user, true); lv_obj_add_event_cb(_set_mqtt_user, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_textarea_set_max_length(_set_mqtt_user, 31);
+    lv_obj_set_width(_set_mqtt_user, LV_PCT(100));
+    lv_obj_add_event_cb(_set_mqtt_user, net_ta_event_cb, LV_EVENT_ALL, NULL); }
+  { lv_obj_t* f = makeField(body, "Password (optional)");
+    _set_mqtt_pw = makeSelTextarea(f);
+    lv_textarea_set_one_line(_set_mqtt_pw, true); lv_obj_add_event_cb(_set_mqtt_pw, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_textarea_set_max_length(_set_mqtt_pw, 63);
+    lv_obj_set_width(_set_mqtt_pw, LV_PCT(100));
+    lv_obj_add_event_cb(_set_mqtt_pw, net_ta_event_cb, LV_EVENT_ALL, NULL);
+    attachInlineEye(_set_mqtt_pw); }
+  { lv_obj_t* f = makeField(body, "Topic prefix (optional)");
+    _set_mqtt_topic = makeSelTextarea(f);
+    lv_textarea_set_one_line(_set_mqtt_topic, true); lv_obj_add_event_cb(_set_mqtt_topic, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_textarea_set_max_length(_set_mqtt_topic, 47);
+    lv_obj_set_width(_set_mqtt_topic, LV_PCT(100));
+    lv_obj_add_event_cb(_set_mqtt_topic, net_ta_event_cb, LV_EVENT_ALL, NULL); }
+  _set_mqtt_tls = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_mqtt_tls, "TLS (insecure - no cert check)");
+  lv_obj_set_style_text_color(_set_mqtt_tls, lv_color_hex(FG_HEX), 0);
+  _set_mqtt_rx = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_mqtt_rx, "Publish heard packets (/rx)");
+  lv_obj_set_style_text_color(_set_mqtt_rx, lv_color_hex(FG_HEX), 0);
+  _set_mqtt_tx = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_mqtt_tx, "Publish sent packets (/tx)");
+  lv_obj_set_style_text_color(_set_mqtt_tx, lv_color_hex(FG_HEX), 0);
+  { lv_obj_t* sb = lv_btn_create(body); lv_obj_set_width(sb, LV_PCT(100));
+    lv_obj_add_event_cb(sb, mqtt_save_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* l = lv_label_create(sb); lv_label_set_text(l, LV_SYMBOL_OK " Save & connect"); lv_obj_center(l); }
+  _set_mqtt_status = lv_label_create(body);
+  lv_label_set_long_mode(_set_mqtt_status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_set_mqtt_status, LV_PCT(100));
+  lv_obj_set_style_text_color(_set_mqtt_status, lv_color_hex(DIM_HEX), 0);
+  lv_label_set_text(_set_mqtt_status, "");
 
   body = _set_pane_body[CAT_DISPLAY];   // Display & Time
   // ===== Display =====
@@ -6789,6 +6894,35 @@ void UITask::populateSettings() {
     if (_node_prefs->auto_lock) lv_obj_add_state(_set_autolock_chk, LV_STATE_CHECKED);
     else                        lv_obj_clear_state(_set_autolock_chk, LV_STATE_CHECKED);
   }
+  // Network panes (WiFi + MQTT)
+  auto setSw = [](lv_obj_t* sw, bool on) { if (sw) { if (on) lv_obj_add_state(sw, LV_STATE_CHECKED); else lv_obj_clear_state(sw, LV_STATE_CHECKED); } };
+  setSw(_set_wifi_en, _node_prefs->wifi_enabled);
+  if (_set_wifi_ssid) lv_textarea_set_text(_set_wifi_ssid, _node_prefs->wifi_ssid);
+  if (_set_wifi_pw)   lv_textarea_set_text(_set_wifi_pw, _node_prefs->wifi_password);
+  setSw(_set_wifi_dhcp, _node_prefs->wifi_dhcp);
+  setSw(_set_wifi_dns_ovr, _node_prefs->wifi_dns_override);
+  { auto setIp = [](lv_obj_t* ta, uint32_t v) {
+      if (!ta) return;
+      if (v) { IPAddress a(v); lv_textarea_set_text(ta, a.toString().c_str()); } else lv_textarea_set_text(ta, "");
+    };
+    setIp(_set_wifi_ip, _node_prefs->wifi_ip);
+    setIp(_set_wifi_mask, _node_prefs->wifi_netmask);
+    setIp(_set_wifi_gw, _node_prefs->wifi_gateway);
+    setIp(_set_wifi_dns, _node_prefs->wifi_dns);
+  }
+  setSw(_set_ntp_en, _node_prefs->ntp_enabled);
+  if (_set_ntp_server) lv_textarea_set_text(_set_ntp_server, _node_prefs->ntp_server);
+  updateWifiFieldStates();
+  setSw(_set_mqtt_en, _node_prefs->mqtt_enabled);
+  if (_set_mqtt_host) lv_textarea_set_text(_set_mqtt_host, _node_prefs->mqtt_host);
+  if (_set_mqtt_port) { char pb[8]; snprintf(pb, sizeof(pb), "%u", (unsigned)_node_prefs->mqtt_port); lv_textarea_set_text(_set_mqtt_port, pb); }
+  if (_set_mqtt_user)  lv_textarea_set_text(_set_mqtt_user, _node_prefs->mqtt_user);
+  if (_set_mqtt_pw)    lv_textarea_set_text(_set_mqtt_pw, _node_prefs->mqtt_password);
+  if (_set_mqtt_topic) lv_textarea_set_text(_set_mqtt_topic, _node_prefs->mqtt_topic_prefix);
+  setSw(_set_mqtt_tls, _node_prefs->mqtt_tls);
+  setSw(_set_mqtt_rx,  _node_prefs->mqtt_publish_rx);
+  setSw(_set_mqtt_tx,  _node_prefs->mqtt_publish_tx);
+  refreshNetStatus();
   if (_set_avatar_dd) lv_dropdown_set_selected(_set_avatar_dd, _node_prefs->avatar_palette ? 1 : 0);
   if (_set_theme_dd) {   // re-list (picks up SD themes) + select the active one
     char opts[768]; int sel = 0;
@@ -8301,6 +8435,148 @@ void UITask::set_autolock_cb(lv_event_t* e) {
   pushPrefs();
   if (on && (!_instance->_node_prefs->lock_pin[0] || strlen(_instance->_node_prefs->lock_pin) < 4))
     _instance->showToast("Set a PIN to use auto-lock");
+}
+
+// Shared keyboard handler for the WiFi/MQTT text fields (raises the settings kb in
+// the active pane). Port accepts digits only via its accepted-chars filter.
+void UITask::net_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    _instance->_set_active_ta = ta;
+    lv_keyboard_set_textarea(_instance->_set_kb, ta);
+    lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_set_kb);
+    if (_instance->_set_active_pane) _instance->raiseFieldForKb(_instance->_set_active_pane, _instance->_set_kb, ta);
+  }
+}
+
+// WiFi text field: show the keyboard on focus; apply on defocus (auto-commit).
+void UITask::wifi_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    _instance->_set_active_ta = ta;
+    lv_keyboard_set_textarea(_instance->_set_kb, ta);
+    lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_set_kb);
+    if (_instance->_set_active_pane) _instance->raiseFieldForKb(_instance->_set_active_pane, _instance->_set_kb, ta);
+  } else if (code == LV_EVENT_DEFOCUSED) {
+    _instance->wifiApplyFromForm();
+  }
+}
+
+// WiFi DHCP / DNS-override toggled: restyle the IP fields + apply.
+void UITask::wifi_apply_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->updateWifiFieldStates();
+  _instance->wifiApplyFromForm();
+}
+
+// WiFi enable toggled: saves the pref, but switching WiFi<->BLE only takes effect on
+// reboot (they can't share RAM), so prompt for one.
+void UITask::wifi_enable_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  _instance->wifiApplyFromForm();
+  _instance->showToast("Reboot to apply - WiFi & Bluetooth can't run together");
+}
+
+void UITask::updateWifiFieldStates() {
+  bool dhcp = _set_wifi_dhcp && lv_obj_has_state(_set_wifi_dhcp, LV_STATE_CHECKED);
+  bool ovr  = _set_wifi_dns_ovr && lv_obj_has_state(_set_wifi_dns_ovr, LV_STATE_CHECKED);
+  auto en = [](lv_obj_t* ta, bool on) {
+    if (!ta) return;
+    if (on) lv_obj_clear_state(ta, LV_STATE_DISABLED); else lv_obj_add_state(ta, LV_STATE_DISABLED);
+  };
+  en(_set_wifi_ip,   !dhcp);
+  en(_set_wifi_mask, !dhcp);
+  en(_set_wifi_gw,   !dhcp);
+  en(_set_wifi_dns,  !dhcp || ovr);   // DNS editable when static, or override-on under DHCP
+}
+
+void UITask::wifiApplyFromForm() {
+  if (!_node_prefs) return;
+  NodePrefs* p = _node_prefs;
+  p->wifi_enabled = lv_obj_has_state(_set_wifi_en, LV_STATE_CHECKED) ? 1 : 0;
+  strncpy(p->wifi_ssid, lv_textarea_get_text(_set_wifi_ssid), sizeof(p->wifi_ssid) - 1);
+  p->wifi_ssid[sizeof(p->wifi_ssid) - 1] = 0;
+  strncpy(p->wifi_password, lv_textarea_get_text(_set_wifi_pw), sizeof(p->wifi_password) - 1);
+  p->wifi_password[sizeof(p->wifi_password) - 1] = 0;
+  p->wifi_dhcp = lv_obj_has_state(_set_wifi_dhcp, LV_STATE_CHECKED) ? 1 : 0;
+  p->wifi_dns_override = lv_obj_has_state(_set_wifi_dns_ovr, LV_STATE_CHECKED) ? 1 : 0;
+  auto parseIp = [](lv_obj_t* ta) -> uint32_t {
+    IPAddress a; const char* t = lv_textarea_get_text(ta);
+    if (t && t[0] && a.fromString(t)) return (uint32_t)a;
+    return 0;
+  };
+  if (!p->wifi_dhcp) {                 // static: take all four from the form
+    p->wifi_ip = parseIp(_set_wifi_ip);
+    p->wifi_netmask = parseIp(_set_wifi_mask);
+    p->wifi_gateway = parseIp(_set_wifi_gw);
+    p->wifi_dns = parseIp(_set_wifi_dns);
+  } else if (p->wifi_dns_override) {   // DHCP but custom DNS
+    p->wifi_dns = parseIp(_set_wifi_dns);
+  }
+  // NTP (shares this page + the ApplyWifi commit)
+  if (_set_ntp_en) p->ntp_enabled = lv_obj_has_state(_set_ntp_en, LV_STATE_CHECKED) ? 1 : 0;
+  if (_set_ntp_server) {
+    strncpy(p->ntp_server, lv_textarea_get_text(_set_ntp_server), sizeof(p->ntp_server) - 1);
+    p->ntp_server[sizeof(p->ntp_server) - 1] = 0;
+  }
+  mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::ApplyWifi; c.prefs = *p; mproxy::postCommand(c);
+}
+
+void UITask::ntp_sync_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::SyncNtp; mproxy::postCommand(c);
+  _instance->showToast("Syncing clock...");
+}
+
+void UITask::mqtt_save_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance || !_instance->_node_prefs) return;
+  NodePrefs* p = _instance->_node_prefs;
+  p->mqtt_enabled = lv_obj_has_state(_instance->_set_mqtt_en, LV_STATE_CHECKED) ? 1 : 0;
+  strncpy(p->mqtt_host, lv_textarea_get_text(_instance->_set_mqtt_host), sizeof(p->mqtt_host) - 1);
+  p->mqtt_host[sizeof(p->mqtt_host) - 1] = 0;
+  p->mqtt_port = (uint16_t)atoi(lv_textarea_get_text(_instance->_set_mqtt_port));
+  strncpy(p->mqtt_user, lv_textarea_get_text(_instance->_set_mqtt_user), sizeof(p->mqtt_user) - 1);
+  p->mqtt_user[sizeof(p->mqtt_user) - 1] = 0;
+  strncpy(p->mqtt_password, lv_textarea_get_text(_instance->_set_mqtt_pw), sizeof(p->mqtt_password) - 1);
+  p->mqtt_password[sizeof(p->mqtt_password) - 1] = 0;
+  strncpy(p->mqtt_topic_prefix, lv_textarea_get_text(_instance->_set_mqtt_topic), sizeof(p->mqtt_topic_prefix) - 1);
+  p->mqtt_topic_prefix[sizeof(p->mqtt_topic_prefix) - 1] = 0;
+  p->mqtt_tls        = lv_obj_has_state(_instance->_set_mqtt_tls, LV_STATE_CHECKED) ? 1 : 0;
+  p->mqtt_publish_rx = lv_obj_has_state(_instance->_set_mqtt_rx, LV_STATE_CHECKED) ? 1 : 0;
+  p->mqtt_publish_tx = lv_obj_has_state(_instance->_set_mqtt_tx, LV_STATE_CHECKED) ? 1 : 0;
+  mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::ApplyMqtt; c.prefs = *p; mproxy::postCommand(c);
+  lv_obj_add_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+  _instance->showToast(p->mqtt_enabled ? "MQTT connecting..." : "MQTT off");
+}
+
+void UITask::refreshNetStatus() {
+  char buf[96];
+  if (_set_wifi_status) { mproxy::wifiStatus(buf, sizeof(buf)); lv_label_set_text(_set_wifi_status, buf); }
+  if (_set_mqtt_status) { mproxy::mqttStatus(buf, sizeof(buf)); lv_label_set_text(_set_mqtt_status, buf); }
+  // Live addressing into the read-only (disabled) IP fields -- never clobbers an
+  // editable field the user is filling in static mode.
+  char ip[24], mask[24], gw[24], dns[24];
+  mproxy::wifiIpInfo(ip, mask, gw, dns, 24);
+  auto fillRO = [](lv_obj_t* ta, const char* v) {
+    if (ta && lv_obj_has_state(ta, LV_STATE_DISABLED)) lv_textarea_set_text(ta, v);
+  };
+  fillRO(_set_wifi_ip, ip); fillRO(_set_wifi_mask, mask);
+  fillRO(_set_wifi_gw, gw); fillRO(_set_wifi_dns, dns);
+  if (_set_ntp_status) { mproxy::ntpStatus(buf, sizeof(buf)); lv_label_set_text(_set_ntp_status, buf); }
 }
 
 // Refresh the row of PIN dots: as many dots as the stored PIN is long, the first

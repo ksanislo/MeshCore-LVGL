@@ -329,6 +329,26 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
         esp_restart();
       }
       break;
+    case CmdKind::ApplyWifi:
+      *mesh.getNodePrefs() = cmd.prefs;
+      mesh.savePrefs();
+#if defined(WITH_WIFI) && defined(ESP32)
+      mesh.applyWifiConfig();
+      mesh.applyNtpConfig();      // pick up ntp_enabled / server changes
+#endif
+      break;
+    case CmdKind::SyncNtp:
+#if defined(WITH_WIFI) && defined(ESP32)
+      mesh.syncNtpNow();
+#endif
+      break;
+    case CmdKind::ApplyMqtt:
+      *mesh.getNodePrefs() = cmd.prefs;
+      mesh.savePrefs();
+#if defined(WITH_MQTT_BRIDGE)
+      mesh.applyMqttConfig();
+#endif
+      break;
     case CmdKind::RemoveChannel: {
       ChannelDetails ch;
       for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
@@ -412,6 +432,35 @@ bool exportPrivKey(uint8_t out[64]) {
   if (!s_backend) return false;
   s_backend->exportPrivateKey(out);
   return true;
+}
+
+void wifiStatus(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+#if defined(WITH_WIFI) && defined(ESP32)
+  if (s_backend) { s_backend->getWifiStatus(out, cap); return; }
+#endif
+  strncpy(out, "n/a", cap - 1); out[cap - 1] = 0;
+}
+void mqttStatus(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+#if defined(WITH_MQTT_BRIDGE)
+  if (s_backend) { s_backend->getMqttStatus(out, cap); return; }
+#endif
+  strncpy(out, "n/a", cap - 1); out[cap - 1] = 0;
+}
+void ntpStatus(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+#if defined(WITH_WIFI) && defined(ESP32)
+  if (s_backend) { s_backend->getNtpStatus(out, cap); return; }
+#endif
+  strncpy(out, "n/a", cap - 1); out[cap - 1] = 0;
+}
+void wifiIpInfo(char* ip, char* mask, char* gw, char* dns, size_t cap) {
+  if (cap == 0) return;
+  if (ip) ip[0] = 0; if (mask) mask[0] = 0; if (gw) gw[0] = 0; if (dns) dns[0] = 0;
+#if defined(WITH_WIFI) && defined(ESP32)
+  if (s_backend) s_backend->getWifiIpInfo(ip, mask, gw, dns, cap);
+#endif
 }
 int  getNumContacts()       { const MeshSnapshot* s = readBuf(); return s ? s->contact_count : 0; }
 

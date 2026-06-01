@@ -66,6 +66,9 @@ enum class CmdKind : uint8_t {
   RemoveChannel,// delete a channel: path = its 32-byte secret (identity)
   AdvertFlood,  // self-advert, flooded (Advert is zero-hop)
   ImportKey,    // replace our identity: path = the new 64-byte private key; reboots on success
+  ApplyWifi,    // copy prefs (wifi_*) + save + (re)connect WiFi (+ re-arm NTP)
+  ApplyMqtt,    // copy prefs (mqtt_*) + save + (re)start the MQTT bridge
+  SyncNtp,      // kick an immediate NTP clock sync
 };
 
 struct MeshCmd {
@@ -145,6 +148,10 @@ void getStats(NodeStats& out);     // latest node/radio counters (display-only, 
 bool getNameOverride(const uint8_t* pubkey, char* out, size_t cap);
 const NodePrefs* prefsSnap();      // current published prefs (UI seeds its working copy from this)
 bool exportPrivKey(uint8_t out[64]);   // copy our 64-byte private key out (UI key export)
+void wifiStatus(char* out, size_t cap);   // human-readable WiFi status for the UI
+void mqttStatus(char* out, size_t cap);   // human-readable MQTT status for the UI
+void wifiIpInfo(char* ip, char* mask, char* gw, char* dns, size_t cap);  // live addressing strings
+void ntpStatus(char* out, size_t cap);   // NTP clock-sync status for the UI
 int  copyMutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);    // seed the UI's explicit-muted set at begin()
 int  copyUnmutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);  // seed the UI's explicit-unmuted set at begin()
 uint32_t rtcSeconds();             // live device clock (ESP32 internal RTC; safe cross-core)

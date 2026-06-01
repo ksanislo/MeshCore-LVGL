@@ -292,6 +292,26 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     _prefs.notify_mute_default = 0;                                                        // 161 (default: opt-out)
     _prefs.channel_sender_colors = 1;                                                      // 162 (default: on)
     _prefs.auto_lock = 0;                                                                  // 163 (default: manual lock only)
+    _prefs.wifi_enabled = 0;                                                               // 164 (default: off)
+    _prefs.wifi_ssid[0] = 0;                                                               // 165
+    _prefs.wifi_password[0] = 0;                                                           // 166
+    _prefs.mqtt_enabled = 0;                                                               // 167 (default: off)
+    _prefs.mqtt_host[0] = 0;                                                               // 168
+    _prefs.mqtt_port = 0;                                                                  // 169 (0 = protocol default)
+    _prefs.mqtt_user[0] = 0;                                                               // 170
+    _prefs.mqtt_password[0] = 0;                                                           // 171
+    _prefs.mqtt_topic_prefix[0] = 0;                                                       // 172
+    _prefs.mqtt_tls = 0;                                                                   // 173
+    _prefs.mqtt_publish_rx = 1;                                                            // 174 (default: dump RX)
+    _prefs.mqtt_publish_tx = 0;                                                            // 175
+    _prefs.wifi_dhcp = 1;                                                                  // 176 (default: DHCP on)
+    _prefs.wifi_dns_override = 0;                                                          // 177
+    _prefs.wifi_ip = 0;                                                                    // 178
+    _prefs.wifi_netmask = 0;                                                               // 179
+    _prefs.wifi_gateway = 0;                                                               // 180
+    _prefs.wifi_dns = 0;                                                                   // 181
+    _prefs.ntp_enabled = 1;                                                                // 182 (default: on)
+    _prefs.ntp_server[0] = 0;                                                              // 183 (empty -> pool.ntp.org)
     file.read((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
     file.read((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
     file.read((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
@@ -310,6 +330,26 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.notify_mute_default, sizeof(_prefs.notify_mute_default));     // 161
     file.read((uint8_t *)&_prefs.channel_sender_colors, sizeof(_prefs.channel_sender_colors)); // 162
     file.read((uint8_t *)&_prefs.auto_lock, sizeof(_prefs.auto_lock));                         // 163
+    file.read((uint8_t *)&_prefs.wifi_enabled, sizeof(_prefs.wifi_enabled));                   // 164
+    file.read((uint8_t *)_prefs.wifi_ssid, sizeof(_prefs.wifi_ssid));                          // 165
+    file.read((uint8_t *)_prefs.wifi_password, sizeof(_prefs.wifi_password));                  // 166
+    file.read((uint8_t *)&_prefs.mqtt_enabled, sizeof(_prefs.mqtt_enabled));                   // 167
+    file.read((uint8_t *)_prefs.mqtt_host, sizeof(_prefs.mqtt_host));                          // 168
+    file.read((uint8_t *)&_prefs.mqtt_port, sizeof(_prefs.mqtt_port));                         // 169
+    file.read((uint8_t *)_prefs.mqtt_user, sizeof(_prefs.mqtt_user));                          // 170
+    file.read((uint8_t *)_prefs.mqtt_password, sizeof(_prefs.mqtt_password));                  // 171
+    file.read((uint8_t *)_prefs.mqtt_topic_prefix, sizeof(_prefs.mqtt_topic_prefix));          // 172
+    file.read((uint8_t *)&_prefs.mqtt_tls, sizeof(_prefs.mqtt_tls));                           // 173
+    file.read((uint8_t *)&_prefs.mqtt_publish_rx, sizeof(_prefs.mqtt_publish_rx));             // 174
+    file.read((uint8_t *)&_prefs.mqtt_publish_tx, sizeof(_prefs.mqtt_publish_tx));             // 175
+    file.read((uint8_t *)&_prefs.wifi_dhcp, sizeof(_prefs.wifi_dhcp));                         // 176
+    file.read((uint8_t *)&_prefs.wifi_dns_override, sizeof(_prefs.wifi_dns_override));         // 177
+    file.read((uint8_t *)&_prefs.wifi_ip, sizeof(_prefs.wifi_ip));                             // 178
+    file.read((uint8_t *)&_prefs.wifi_netmask, sizeof(_prefs.wifi_netmask));                   // 179
+    file.read((uint8_t *)&_prefs.wifi_gateway, sizeof(_prefs.wifi_gateway));                   // 180
+    file.read((uint8_t *)&_prefs.wifi_dns, sizeof(_prefs.wifi_dns));                           // 181
+    file.read((uint8_t *)&_prefs.ntp_enabled, sizeof(_prefs.ntp_enabled));                     // 182
+    file.read((uint8_t *)_prefs.ntp_server, sizeof(_prefs.ntp_server));                        // 183
 
     file.close();
   }
@@ -369,6 +409,26 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.notify_mute_default, sizeof(_prefs.notify_mute_default));     // 161
     file.write((uint8_t *)&_prefs.channel_sender_colors, sizeof(_prefs.channel_sender_colors)); // 162
     file.write((uint8_t *)&_prefs.auto_lock, sizeof(_prefs.auto_lock));                         // 163
+    file.write((uint8_t *)&_prefs.wifi_enabled, sizeof(_prefs.wifi_enabled));                   // 164
+    file.write((uint8_t *)_prefs.wifi_ssid, sizeof(_prefs.wifi_ssid));                          // 165
+    file.write((uint8_t *)_prefs.wifi_password, sizeof(_prefs.wifi_password));                  // 166
+    file.write((uint8_t *)&_prefs.mqtt_enabled, sizeof(_prefs.mqtt_enabled));                   // 167
+    file.write((uint8_t *)_prefs.mqtt_host, sizeof(_prefs.mqtt_host));                          // 168
+    file.write((uint8_t *)&_prefs.mqtt_port, sizeof(_prefs.mqtt_port));                         // 169
+    file.write((uint8_t *)_prefs.mqtt_user, sizeof(_prefs.mqtt_user));                          // 170
+    file.write((uint8_t *)_prefs.mqtt_password, sizeof(_prefs.mqtt_password));                  // 171
+    file.write((uint8_t *)_prefs.mqtt_topic_prefix, sizeof(_prefs.mqtt_topic_prefix));          // 172
+    file.write((uint8_t *)&_prefs.mqtt_tls, sizeof(_prefs.mqtt_tls));                           // 173
+    file.write((uint8_t *)&_prefs.mqtt_publish_rx, sizeof(_prefs.mqtt_publish_rx));             // 174
+    file.write((uint8_t *)&_prefs.mqtt_publish_tx, sizeof(_prefs.mqtt_publish_tx));             // 175
+    file.write((uint8_t *)&_prefs.wifi_dhcp, sizeof(_prefs.wifi_dhcp));                         // 176
+    file.write((uint8_t *)&_prefs.wifi_dns_override, sizeof(_prefs.wifi_dns_override));         // 177
+    file.write((uint8_t *)&_prefs.wifi_ip, sizeof(_prefs.wifi_ip));                             // 178
+    file.write((uint8_t *)&_prefs.wifi_netmask, sizeof(_prefs.wifi_netmask));                   // 179
+    file.write((uint8_t *)&_prefs.wifi_gateway, sizeof(_prefs.wifi_gateway));                   // 180
+    file.write((uint8_t *)&_prefs.wifi_dns, sizeof(_prefs.wifi_dns));                           // 181
+    file.write((uint8_t *)&_prefs.ntp_enabled, sizeof(_prefs.ntp_enabled));                     // 182
+    file.write((uint8_t *)_prefs.ntp_server, sizeof(_prefs.ntp_server));                        // 183
 
     file.close();
     commitTmp(_fs, "/new_prefs.tmp", "/new_prefs");

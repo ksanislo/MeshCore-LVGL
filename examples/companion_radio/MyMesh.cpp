@@ -3,6 +3,9 @@
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
 #include <helpers/MeshPSRAM.h>
+#if defined(WITH_WIFI) && defined(ESP32)
+  #include <time.h>   // configTime / time() for NTP clock sync
+#endif
 
 #define CMD_APP_START                 1
 #define CMD_SEND_TXT_MSG              2
@@ -292,6 +295,149 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
     _serial->writeFrame(out_frame, i);
   }
 }
+
+// ---- WiFi + MQTT bridge (guarded; inert on non-WiFi companion builds) -------
+#if defined(WITH_MQTT_BRIDGE)
+void MyMesh::logRx(mesh::Packet* pkt, int len, float score) {
+  cmqtt::publishRx(pkt, (int8_t)_radio->getLastRSSI(), (int8_t)(_radio->getLastSNR() * 4));
+}
+void MyMesh::logTx(mesh::Packet* pkt, int len) {
+  cmqtt::publishTx(pkt);
+}
+void MyMesh::applyMqttConfig() {
+  const NodePrefs* p = getNodePrefs();
+  cmqtt::setConfig(p->mqtt_enabled, p->mqtt_host, p->mqtt_port, p->mqtt_user,
+                   p->mqtt_password, p->mqtt_topic_prefix, p->mqtt_tls,
+                   p->mqtt_publish_rx, p->mqtt_publish_tx);
+  cmqtt::begin();
+}
+void MyMesh::getMqttStatus(char* out, size_t cap) { cmqtt::status(out, cap); }
+void MyMesh::mqttLoop() {
+  // MQTT only runs in WiFi mode (WiFi is brought up by wifiLoop). Lazy-init the
+  // bridge once, then pump it. No-op outside WiFi mode.
+  if (!getNodePrefs()->wifi_enabled) return;
+  static bool inited = false;
+  if (!inited) {
+    inited = true;
+    cmqtt::init(_mgr, getRTCClock(), self_id.pub_key, PUB_KEY_SIZE);
+    applyMqttConfig();
+  }
+  cmqtt::loop();
+}
+#endif  // WITH_MQTT_BRIDGE
+
+#if defined(WITH_WIFI) && defined(ESP32)
+void MyMesh::startWifi() {
+  if (_wifi_started) return;
+  const NodePrefs* p = getNodePrefs();
+  if (!p->wifi_ssid[0]) return;             // nothing configured
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  if (!p->wifi_dhcp) {
+    // Static: WiFi.config(ip, gateway, subnet, dns).
+    WiFi.config(IPAddress(p->wifi_ip), IPAddress(p->wifi_gateway),
+                IPAddress(p->wifi_netmask), IPAddress(p->wifi_dns));
+  } else if (p->wifi_dns_override && p->wifi_dns) {
+    // DHCP for address, but a user-supplied DNS: zero ip/gw/subnet keeps DHCP,
+    // dns1 is forced to the override.
+    WiFi.config(IPAddress((uint32_t)0), IPAddress((uint32_t)0),
+                IPAddress((uint32_t)0), IPAddress(p->wifi_dns));
+  }
+  WiFi.begin(p->wifi_ssid, p->wifi_password);
+  _wifi_started = true;
+}
+// Live addressing for the UI (current values, whether DHCP-assigned or static).
+void MyMesh::getWifiIpInfo(char* ip, char* mask, char* gw, char* dns, size_t cap) {
+  bool up = (WiFi.status() == WL_CONNECTED);
+  auto put = [&](char* d, IPAddress a) { strncpy(d, up ? a.toString().c_str() : "", cap - 1); d[cap - 1] = 0; };
+  put(ip, WiFi.localIP());
+  put(mask, WiFi.subnetMask());
+  put(gw, WiFi.gatewayIP());
+  put(dns, WiFi.dnsIP());
+}
+void MyMesh::stopWifi() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  _wifi_started = false;
+}
+
+// Per-backend-tick WiFi owner (independent of MQTT): bring WiFi up once in WiFi
+// mode, then drive NTP -- arm SNTP when the link comes up, and push the resolved
+// time into the RTC. SNTP is part of the WiFi/lwIP stack, so no extra RAM/lib.
+void MyMesh::wifiLoop() {
+  if (!getNodePrefs()->wifi_enabled) return;
+  if (!_wifi_started) { startWifi(); return; }
+
+  bool up = (WiFi.status() == WL_CONNECTED);
+
+  // On the rising edge of connectivity, (re)arm NTP if enabled.
+  if (up && !_wifi_was_up) applyNtpConfig();
+  _wifi_was_up = up;
+
+  // Adopt NTP time when it resolves (and re-check periodically so a long uptime
+  // stays corrected). configTime() leaves the system clock at epoch 0 until the
+  // first packet arrives, so we wait for a plausibly-real value (> 2021-01-01).
+  if (up && getNodePrefs()->ntp_enabled) {
+    uint32_t now_ms = millis();
+    if (_ntp_next_check_ms == 0 || now_ms >= _ntp_next_check_ms) {
+      time_t t = time(nullptr);
+      if (t > 1609459200) {                 // 2021-01-01: SNTP has set the clock
+        getRTCClock()->setCurrentTime((uint32_t)t);
+        _ntp_synced = true;
+        _ntp_next_check_ms = now_ms + 3600000UL;   // re-check hourly once synced
+      } else {
+        _ntp_next_check_ms = now_ms + 2000;        // not resolved yet; poll soon
+      }
+    }
+  }
+}
+
+void MyMesh::applyNtpConfig() {
+  if (!getNodePrefs()->ntp_enabled) return;
+  const char* server = getNodePrefs()->ntp_server[0] ? getNodePrefs()->ntp_server
+                                                     : "pool.ntp.org";
+  configTime(0, 0, server);                 // UTC; tz_offset_minutes handles local display
+  _ntp_next_check_ms = millis() + 1000;     // start polling for a resolved time
+}
+
+void MyMesh::syncNtpNow() {
+  _ntp_synced = false;
+  applyNtpConfig();
+}
+
+void MyMesh::getNtpStatus(char* out, size_t cap) {
+  if (!getNodePrefs()->ntp_enabled) { strncpy(out, "off", cap - 1); out[cap - 1] = 0; return; }
+  if (_ntp_synced) { strncpy(out, "clock synced", cap - 1); out[cap - 1] = 0; }
+  else             { strncpy(out, "waiting for time...", cap - 1); out[cap - 1] = 0; }
+}
+void MyMesh::applyWifiConfig() {
+  // The WiFi stack only exists when we booted in WiFi mode (BLE skipped). If it's
+  // not up, a runtime toggle can't start it -- the new pref is saved and takes
+  // effect on the next reboot. Live edits (SSID/pass/IP) only reconnect here.
+  if (!_wifi_started) return;
+  if (!getNodePrefs()->wifi_enabled) { stopWifi(); return; }
+  // Force a fresh association without a full WIFI_OFF cycle (which can leave the
+  // driver wedged so a re-connect never associates).
+  _wifi_started = false;
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.disconnect(false, true);   // drop any stale AP config, keep the radio on
+  startWifi();
+}
+void MyMesh::getWifiStatus(char* out, size_t cap) {
+  if (!getNodePrefs()->wifi_enabled) { strncpy(out, "off", cap - 1); out[cap - 1] = 0; return; }
+  wl_status_t st = WiFi.status();
+  if (st == WL_CONNECTED) {
+    snprintf(out, cap, "connected %s (%d dBm)", WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+  } else {
+    // Surface the raw status + free heap so failures are diagnosable: st 1=SSID not
+    // found, 4=auth fail, 6=disconnected, 255=driver never inited (usually OOM).
+    snprintf(out, cap, "connecting (st=%d heap=%uK%s)", (int)st,
+             (unsigned)(ESP.getFreeHeap() / 1024), _wifi_started ? "" : ", not started");
+  }
+}
+#endif  // WITH_WIFI
 
 bool MyMesh::isAutoAddEnabled() const {
   return (_prefs.manual_add_contacts & 1) == 0;

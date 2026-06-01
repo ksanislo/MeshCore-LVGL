@@ -61,6 +61,19 @@ struct NodePrefs { // persisted to file
   uint8_t rx_boosted_gain; // power settings
   uint8_t path_hash_mode;   // which path mode to use when sending
   uint8_t loop_detect;
+  // MQTT bridge settings (read by helpers/bridges/MqttBridge; only populated on
+  // builds with WITH_MQTT_BRIDGE -- e.g. the companion feeds these via its shim).
+  uint8_t  mqtt_enabled;        // boolean
+  char     mqtt_host[64];       // broker hostname / IP
+  uint16_t mqtt_port;           // 0 = protocol default (1883 plain / 8883 TLS)
+  char     mqtt_user[32];       // optional, empty = anonymous
+  char     mqtt_password[64];   // optional
+  char     mqtt_client_id[24];  // empty = auto-derive from pubkey
+  char     mqtt_topic_prefix[48]; // empty = "meshcore/<client_id>"
+  uint8_t  mqtt_tls;            // boolean; insecure-mode TLS
+  uint8_t  mqtt_publish_tx;     // publish post-forward TX bytes to <prefix>/tx
+  uint8_t  mqtt_publish_rx;     // publish heard RX bytes to <prefix>/rx
+  char     mqtt_subscribe[80];  // subscribe pattern; empty = "<prefix>/rf"
 };
 
 class CommonCLICallbacks {

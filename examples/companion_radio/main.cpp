@@ -65,6 +65,12 @@ static uint32_t _atoi(const char* sp) {
   #elif defined(BLE_PIN_CODE)
     #include <helpers/esp32/SerialBLEInterface.h>
     SerialBLEInterface serial_interface;
+    #if defined(WITH_WIFI)
+      // WiFi and BLE can't coexist on this chip, so in WiFi mode we never start the
+      // BLE stack and drive the companion frame protocol over USB serial instead.
+      #include <helpers/ArduinoSerialInterface.h>
+      ArduinoSerialInterface usb_serial;
+    #endif
   #elif defined(SERIAL_RX)
     #include <helpers/ArduinoSerialInterface.h>
     ArduinoSerialInterface serial_interface;
@@ -231,20 +237,40 @@ void setup() {
     #endif
   );
 
-#ifdef WIFI_SSID
+#if defined(WITH_WIFI)
+  // WiFi and BLE can't coexist on this chip. In WiFi mode skip the BLE stack
+  // entirely (frees the RAM esp_wifi_init needs) and drive the companion frame
+  // protocol over USB serial instead, so _serial is a real, begun interface (the
+  // mesh loop calls checkRecvFrame()/writeFrame() unconditionally). Toggling WiFi
+  // needs a reboot to switch stacks.
+  if (the_mesh.getNodePrefs()->wifi_enabled) {
+    usb_serial.begin(Serial);
+    the_mesh.startInterface(usb_serial);
+  } else {
+  #if defined(BLE_PIN_CODE)
+    serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
+  #else
+    serial_interface.begin(Serial);
+  #endif
+    the_mesh.startInterface(serial_interface);
+  }
+#elif defined(WIFI_SSID)
   board.setInhibitSleep(true);   // prevent sleep when WiFi is active
   WiFi.begin(WIFI_SSID, WIFI_PWD);
   serial_interface.begin(TCP_PORT);
+  the_mesh.startInterface(serial_interface);
 #elif defined(BLE_PIN_CODE)
   serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
+  the_mesh.startInterface(serial_interface);
 #elif defined(SERIAL_RX)
   companion_serial.setPins(SERIAL_RX, SERIAL_TX);
   companion_serial.begin(115200);
   serial_interface.begin(companion_serial);
+  the_mesh.startInterface(serial_interface);
 #else
   serial_interface.begin(Serial);
-#endif
   the_mesh.startInterface(serial_interface);
+#endif
 #else
   #error "need to define filesystem"
 #endif
@@ -302,6 +328,12 @@ static void meshTask(void*) {
       the_mesh.loop();                  // process mesh; the 5 callbacks enqueue events
     mproxy::publishIfChanged(the_mesh); // republish the snapshot if anything changed
     mproxy::updateStats(the_mesh);      // refresh live node-info counters (display-only)
+#if defined(WITH_WIFI) && defined(ESP32)
+    the_mesh.wifiLoop();                // WiFi connect + NTP clock sync (WiFi mode)
+#endif
+#if defined(WITH_MQTT_BRIDGE)
+    the_mesh.mqttLoop();                // MQTT bridge poll (WiFi mode)
+#endif
     vTaskDelay(1);                      // yield a tick so idle/watchdog run
   }
 }

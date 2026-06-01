@@ -49,6 +49,12 @@ public:
   uint8_t path[MAX_PATH_SIZE];
   uint8_t payload[MAX_PACKET_PAYLOAD];
   int8_t _snr;
+  // True when a Bridge (MQTT/RS232/ESPNow) injected this packet via
+  // BridgeBase::handleReceivedPacket(). Reset in the constructor and in
+  // readFrom()/tryParsePacket() (RF packets are never bridge-injected); set
+  // to true by the bridge layer after readFrom() succeeds. Reserved for
+  // selective forwarding (REPEAT_BRIDGE); the companion doesn't forward today.
+  bool _from_bridge_inject;
 
   /**
    * \brief calculate the hash of payload + type

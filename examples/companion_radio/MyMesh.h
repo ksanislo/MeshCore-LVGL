@@ -26,6 +26,12 @@
 #include "DataStore.h"
 #include "NodePrefs.h"
 #include "NodeStats.h"
+#if defined(WITH_WIFI) && defined(ESP32)
+  #include <WiFi.h>
+#endif
+#if defined(WITH_MQTT_BRIDGE)
+  #include "CompanionMqtt.h"   // plain shim; does NOT pull in CommonCLI's NodePrefs
+#endif
 
 #include <RTClib.h>
 #include <helpers/ArduinoHelpers.h>
@@ -109,6 +115,20 @@ public:
   void handleCmdFrame(size_t len);
   bool advert();
   void enterCLIRescue();
+#if defined(WITH_WIFI) && defined(ESP32)
+  void wifiLoop();                         // WiFi-mode init + reconnect + NTP (from meshTask)
+  void applyWifiConfig();                  // (re)connect per current prefs (from UI)
+  void getWifiStatus(char* out, size_t cap);
+  void getWifiIpInfo(char* ip, char* mask, char* gw, char* dns, size_t cap);  // live addressing
+  void applyNtpConfig();                   // (re)arm NTP from prefs (from UI)
+  void syncNtpNow();                       // kick an immediate NTP request
+  void getNtpStatus(char* out, size_t cap);
+#endif
+#if defined(WITH_MQTT_BRIDGE)
+  void applyMqttConfig();                  // push prefs into the shim + (re)start (from UI)
+  void getMqttStatus(char* out, size_t cap);
+  void mqttLoop();                         // MQTT bridge poll (from meshTask)
+#endif
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
 
@@ -127,6 +147,18 @@ protected:
   void sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt, uint32_t delay_millis=0) override;
 
   void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override;
+#if defined(WITH_WIFI) && defined(ESP32)
+  bool _wifi_started = false;
+  bool _wifi_was_up = false;          // edge-detect link-up to (re)arm NTP
+  bool _ntp_synced = false;           // NTP has set the RTC at least once
+  uint32_t _ntp_next_check_ms = 0;    // next time() poll / re-sync (millis)
+  void startWifi();
+  void stopWifi();
+#endif
+#if defined(WITH_MQTT_BRIDGE)
+  void logRx(mesh::Packet* pkt, int len, float score) override;  // -> publish /rx
+  void logTx(mesh::Packet* pkt, int len) override;               // -> publish /tx
+#endif
   bool isAutoAddEnabled() const override;
   bool shouldAutoAddContactType(uint8_t type) const override;
   bool shouldOverwriteWhenFull() const override;

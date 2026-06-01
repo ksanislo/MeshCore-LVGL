@@ -307,6 +307,30 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_tz_ta;           // UTC offset (hours) for local-time display
   lv_obj_t*       _set_clock_chk;       // 12-hour clock toggle
   lv_obj_t*       _set_autolock_chk;    // auto-lock on sleep toggle
+  // Network panes (WiFi + MQTT). Values committed on each pane's Save button.
+  lv_obj_t*       _set_wifi_en;         // WiFi enable switch
+  lv_obj_t*       _set_wifi_ssid;       // SSID textarea
+  lv_obj_t*       _set_wifi_pw;         // password textarea (eye-toggle)
+  lv_obj_t*       _set_wifi_dhcp;       // DHCP checkbox (default on)
+  lv_obj_t*       _set_wifi_dns_ovr;    // override DNS even on DHCP
+  lv_obj_t*       _set_wifi_ip;         // static / live IP
+  lv_obj_t*       _set_wifi_mask;       // static / live netmask
+  lv_obj_t*       _set_wifi_gw;         // static / live gateway
+  lv_obj_t*       _set_wifi_dns;        // DNS (static, or override)
+  lv_obj_t*       _set_wifi_status;     // live status label
+  lv_obj_t*       _set_ntp_en;          // NTP enable checkbox
+  lv_obj_t*       _set_ntp_server;      // NTP server field
+  lv_obj_t*       _set_ntp_status;      // NTP status label
+  lv_obj_t*       _set_mqtt_en;         // MQTT enable switch
+  lv_obj_t*       _set_mqtt_host;       // broker host
+  lv_obj_t*       _set_mqtt_port;       // broker port (digits)
+  lv_obj_t*       _set_mqtt_user;       // user
+  lv_obj_t*       _set_mqtt_pw;         // password (eye-toggle)
+  lv_obj_t*       _set_mqtt_topic;      // topic prefix
+  lv_obj_t*       _set_mqtt_tls;        // TLS checkbox
+  lv_obj_t*       _set_mqtt_rx;         // publish RX checkbox
+  lv_obj_t*       _set_mqtt_tx;         // publish TX checkbox
+  lv_obj_t*       _set_mqtt_status;     // live status label
   lv_obj_t*       _set_avatar_dd;       // contact avatar color scheme (Default / iOS app)
   lv_obj_t*       _set_theme_dd;        // UI color theme picker (built-ins + SD /themes)
   lv_obj_t*       _set_mention_chk;     // chat: color @mentions by user color
@@ -323,7 +347,7 @@ class UITask : public AbstractUITask {
   // is a sentinel launcher row that opens Node Info instead of an in-tab pane.
   enum SettingsCat {
     CAT_PROFILE = 0, CAT_RADIO, CAT_TELEMETRY, CAT_NOTIFY,
-    CAT_DISPLAY, CAT_POWER, CAT_COUNT,
+    CAT_DISPLAY, CAT_POWER, CAT_WIFI, CAT_MQTT, CAT_COUNT,
     CAT_ABOUT = 100,
   };
   lv_obj_t*       _set_launcher;             // Settings category launcher (profile hero + rows)
@@ -783,6 +807,15 @@ private:
   static void set_tz_ta_event_cb(lv_event_t* e);
   static void set_clock_cb(lv_event_t* e);
   static void set_autolock_cb(lv_event_t* e);
+  static void net_ta_event_cb(lv_event_t* e);   // MQTT text-field keyboard
+  static void wifi_ta_event_cb(lv_event_t* e);  // WiFi text field: kb on focus, apply on defocus
+  static void wifi_apply_cb(lv_event_t* e);     // WiFi DHCP/override changed -> apply
+  static void wifi_enable_cb(lv_event_t* e);    // WiFi enable toggled -> apply + reboot prompt
+  static void mqtt_save_cb(lv_event_t* e);
+  static void ntp_sync_cb(lv_event_t* e);       // "Sync clock now"
+  void        wifiApplyFromForm();              // gather WiFi fields -> prefs -> ApplyWifi
+  void        updateWifiFieldStates();          // grey/enable IP fields per DHCP/override
+  void        refreshNetStatus();               // update status labels + live IP fields
   static void set_avatar_cb(lv_event_t* e);
   static void set_theme_cb(lv_event_t* e);
   static void theme_async_cb(void* unused);   // deferred theme rebuild (lv_async_call)
@@ -962,7 +995,14 @@ public:
       _profile_screen(NULL), _profile_body(NULL), _profile_kb(NULL), _profile_return_screen(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
-      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_autolock_chk(NULL), _set_avatar_dd(NULL), _set_theme_dd(NULL), _set_mention_chk(NULL), _set_hashtag_chk(NULL), _set_chsender_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_mutedef_chk(NULL), _set_kb(NULL),
+      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_autolock_chk(NULL),
+      _set_wifi_en(NULL), _set_wifi_ssid(NULL), _set_wifi_pw(NULL),
+      _set_wifi_dhcp(NULL), _set_wifi_dns_ovr(NULL), _set_wifi_ip(NULL), _set_wifi_mask(NULL),
+      _set_wifi_gw(NULL), _set_wifi_dns(NULL), _set_wifi_status(NULL),
+      _set_ntp_en(NULL), _set_ntp_server(NULL), _set_ntp_status(NULL),
+      _set_mqtt_en(NULL), _set_mqtt_host(NULL), _set_mqtt_port(NULL), _set_mqtt_user(NULL), _set_mqtt_pw(NULL),
+      _set_mqtt_topic(NULL), _set_mqtt_tls(NULL), _set_mqtt_rx(NULL), _set_mqtt_tx(NULL), _set_mqtt_status(NULL),
+      _set_avatar_dd(NULL), _set_theme_dd(NULL), _set_mention_chk(NULL), _set_hashtag_chk(NULL), _set_chsender_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_mutedef_chk(NULL), _set_kb(NULL),
       _set_active_ta(NULL),
       _set_launcher(NULL), _set_pane{}, _set_pane_body{}, _set_active_pane(NULL),
       _set_key_ta(NULL),

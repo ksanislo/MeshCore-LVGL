@@ -8,6 +8,7 @@ Packet::Packet() {
   header = 0;
   path_len = 0;
   payload_len = 0;
+  _from_bridge_inject = false;
 }
 
 bool Packet::isValidPathLen(uint8_t path_len) {
@@ -63,6 +64,9 @@ uint8_t Packet::writeTo(uint8_t dest[]) const {
 }
 
 bool Packet::readFrom(const uint8_t src[], uint8_t len) {
+  // Pool-recycled packets may carry stale flag state; reset before populating.
+  _from_bridge_inject = false;
+
   uint8_t i = 0;
   header = src[i++];
   if (hasTransportCodes()) {

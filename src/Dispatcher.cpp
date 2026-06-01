@@ -146,6 +146,10 @@ void Dispatcher::loop() {
 }
 
 bool Dispatcher::tryParsePacket(Packet* pkt, const uint8_t* raw, int len) {
+  // Pool-recycled packets may carry stale flag state; reset before populating.
+  // (RF-received packets are by definition NOT bridge-injected.)
+  pkt->_from_bridge_inject = false;
+
   int i = 0;
 
   pkt->header = raw[i++];

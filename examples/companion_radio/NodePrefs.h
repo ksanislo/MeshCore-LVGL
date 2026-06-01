@@ -54,4 +54,28 @@ struct NodePrefs {  // persisted to file
   uint8_t  notify_mute_default;   // notifications: 1 = muted by default (opt-in per conv), 0 = opt-out (default)
   uint8_t  channel_sender_colors; // channel chat: brand+color each sender's name in the bubble (1=on default, 0=off -> dim)
   uint8_t  auto_lock;             // 1 = auto-lock on screen sleep (needs a PIN set); 0 = manual lock only (default)
+  // WiFi + MQTT bridge (ESP32 WiFi builds; pushed into the MQTT shim at apply-time).
+  // All default off/empty so a fresh node has no network activity until opted in.
+  uint8_t  wifi_enabled;          // 1 = connect to WiFi on boot / when applied
+  char     wifi_ssid[33];         // 32-char SSID + NUL
+  char     wifi_password[64];     // up to 63-char WPA2 PSK + NUL
+  uint8_t  mqtt_enabled;          // 1 = run the MQTT bridge (needs WiFi)
+  char     mqtt_host[64];         // broker hostname / IP
+  uint16_t mqtt_port;             // 0 = protocol default (1883 plain / 8883 TLS)
+  char     mqtt_user[32];         // optional; empty = anonymous
+  char     mqtt_password[64];     // optional
+  char     mqtt_topic_prefix[48]; // empty = "meshcore/<auto-client-id>"
+  uint8_t  mqtt_tls;              // 1 = TLS (insecure, no cert check)
+  uint8_t  mqtt_publish_rx;       // publish heard packets to <prefix>/rx (default on)
+  uint8_t  mqtt_publish_tx;       // publish sent packets to <prefix>/tx (default off)
+  // WiFi addressing
+  uint8_t  wifi_dhcp;            // 1 = DHCP (default), 0 = static IP
+  uint8_t  wifi_dns_override;    // 1 = use wifi_dns even when on DHCP
+  uint32_t wifi_ip;             // static IPv4 (IPAddress raw, host order); 0 = unset
+  uint32_t wifi_netmask;
+  uint32_t wifi_gateway;
+  uint32_t wifi_dns;
+  // NTP clock sync (WiFi mode only; SNTP is built into the WiFi stack, no extra RAM)
+  uint8_t  ntp_enabled;         // 1 = sync the RTC from NTP on connect (default on)
+  char     ntp_server[48];      // empty = "pool.ntp.org"
 };
