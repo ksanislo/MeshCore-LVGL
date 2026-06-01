@@ -181,7 +181,12 @@ static void sb_update(lv_obj_t* content, lv_obj_t* thumb) {
   lv_obj_set_pos(thumb, lv_obj_get_x(content) + lv_obj_get_width(content) - lv_obj_get_width(thumb) - 2,
                  lv_obj_get_y(content) + ty);
 }
+// "Actively scrolling (incl. post-flick momentum) until this millis()". LV_EVENT_SCROLL
+// fires on every scroll step -- including each inertia frame -- so momentum keeps re-arming
+// this; it lapses ~200ms after the list comes to rest. loop() defers heavy rebuilds until then.
+static uint32_t s_scroll_until_ms = 0;
 static void sb_scroll_cb(lv_event_t* e) {
+  if (lv_event_get_code(e) == LV_EVENT_SCROLL) s_scroll_until_ms = millis() + 200;
   sb_update(lv_event_get_target(e), (lv_obj_t*)lv_event_get_user_data(e));
 }
 static void sb_drag_cb(lv_event_t* e) {
@@ -2917,6 +2922,7 @@ static void fmtDateLabel(uint32_t local_secs, long now_day, char* out, size_t ca
 }
 
 void UITask::rebuildChatHistory() {
+  _chat_pending = false;   // any rebuild path satisfies a pending incoming-message refresh
   if (!_chat_history) return;
   lv_obj_clean(_chat_history);
   _sending_lbl = NULL;  // old label just got deleted; re-set if a sending msg renders
@@ -10009,15 +10015,20 @@ void UITask::loop() {
   // doesn't jank the scroll. Switching to a tab services it within one frame.
   // Tabs: 0 = Contacts, 1 = Channels, 2 = Settings. _contacts_dirty is the
   // message-store "latest" re-sort (independent of the snapshot).
-  // ...but never mid-gesture: a heavy rebuild while a finger is down hitches the scroll/tap
-  // (and steals the frame's touch poll). The pending flags persist, so it rebuilds the moment
-  // the finger lifts. This is the cheap fix for "touch gets flaky while actively using it."
-  if (!_touch_down && lv_scr_act() == _home_screen && _tabview) {
-    int tab = (int)lv_tabview_get_tab_act(_tabview);
-    if (tab == 0 && (_contacts_pending || _contacts_dirty) && now - _contacts_rebuilt_ms >= 800) {
+  // Service pending rebuilds whenever the user isn't actively interacting -- but NOT only when
+  // the list's tab is in front. Deferring-until-shown kept off-screen lists stale and caused a
+  // one-frame "pop" on tab/screen switch; now they stay fresh and the don't-rebuild-while-
+  // interacting gate keeps it smooth (an off-screen rebuild is invisible on a static screen and
+  // deferred during a scroll). "Interacting" = finger down OR a flick still freewheeling.
+  bool interacting = _touch_down || (int32_t)(s_scroll_until_ms - now) > 0;
+  if (!interacting) {
+    if (_chat_pending && _chat_screen && lv_scr_act() == _chat_screen)
+      rebuildChatHistory();   // clears _chat_pending
+    if ((_contacts_pending || _contacts_dirty) && now - _contacts_rebuilt_ms >= 800) {
       _contacts_pending = false;
       rebuildContactsList();   // also clears _contacts_dirty + sets _contacts_rebuilt_ms
-    } else if (tab == 1 && _channels_pending) {
+    }
+    if (_channels_pending) {
       _channels_pending = false;
       rebuildChannelsList();
     }
@@ -10052,7 +10063,7 @@ void UITask::drainEvents() {
         bool is_channel = strncmp(ev.conv_key, "ch_", 3) == 0;
         bool viewing = _chat_screen && lv_scr_act() == _chat_screen &&
                        strncmp(ev.conv_key, _chat_key, CHAT_PEER_NAME_MAX) == 0;
-        if (viewing) rebuildChatHistory();
+        if (viewing) _chat_pending = true;   // defer the heavy rebuild past any active scroll (loop services it)
         if (!ev.outgoing) {
           bool muted = effectiveMuted(ev.conv_key);   // explicit choice, else mute-by-default
           if (!viewing) markUnread(ev.conv_key);   // unread mark only for chats you're not in

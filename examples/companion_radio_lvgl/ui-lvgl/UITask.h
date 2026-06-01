@@ -69,6 +69,7 @@ class UITask : public AbstractUITask {
   uint32_t        _contacts_rebuilt_ms; // last rebuild time
   bool            _contacts_pending;    // snapshot changed -> rebuild contacts when its tab is shown
   bool            _channels_pending;    // snapshot changed -> rebuild channels when its tab is shown
+  bool            _chat_pending;        // msg arrived for the open chat -> rebuild when the finger lifts
 
   // Notifications. _unread_keys is an in-RAM set of conv-keys (pubkey/secret hex)
   // with at least one message arrived-but-not-viewed; cleared when the chat opens.
@@ -1004,7 +1005,7 @@ public:
       _cfilt_filt_grp(NULL), _contacts_order(1), _contacts_filt(0),
       _channels_list(NULL), _status_label(NULL),
       _contacts_dirty(false), _contacts_rebuilt_ms(0),
-      _contacts_pending(false), _channels_pending(false),
+      _contacts_pending(false), _channels_pending(false), _chat_pending(false),
       _unread_count(0), _muted_count(0), _unmuted_count(0), _banner(NULL), _banner_avatar(NULL), _banner_avatar_lbl(NULL),
       _banner_title(NULL), _banner_body(NULL), _banner_timer(NULL),
       _pending_chime(UIEventType::none),
