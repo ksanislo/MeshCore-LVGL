@@ -3250,8 +3250,8 @@ void UITask::rebuildChatHistory() {
         // and how big it was. hops==0xFF means a direct reception, so omit it then.
         if (!m->outgoing && m->hops != 0xFF && _node_prefs && _node_prefs->show_chat_meta) {
           snprintf(ftxt + o, sizeof(ftxt) - o,
-                   " " LV_SYMBOL_BULLET " %u hop%s " LV_SYMBOL_BULLET " %u B",
-                   m->hops, m->hops == 1 ? "" : "s", m->bytes);
+                   " " LV_SYMBOL_BULLET " %u hop%s " LV_SYMBOL_BULLET " %u byte%s",
+                   m->hops, m->hops == 1 ? "" : "s", m->bytes, m->bytes == 1 ? "" : "s");
         }
       }
       lv_obj_t* tl = lv_label_create(_chat_history);

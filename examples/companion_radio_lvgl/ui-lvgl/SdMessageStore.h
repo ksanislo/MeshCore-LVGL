@@ -108,6 +108,22 @@ class SdMessageStore : public MessageStore {
     }
   }
 
+  // Split the post-sender remainder "text[\thops\tbytes]" -> text + optional metadata.
+  // Text is tab-free (copySanitized), so the first tab cleanly ends it; older records
+  // (no metadata fields) leave hops/bytes at their unset defaults. In-place: nulls `rest`.
+  static void splitTail(char* rest, char** out_txt, uint8_t* out_hops, uint16_t* out_bytes) {
+    *out_txt = rest ? rest : (char*)"";
+    *out_hops = 0xFF; *out_bytes = 0;
+    if (!rest) return;
+    char* tab = strchr(rest, '\t');
+    if (!tab) return;                         // old record: all remainder is text
+    *tab = 0;
+    char* hp = tab + 1;
+    char* tab2 = strchr(hp, '\t');
+    if (tab2) { *tab2 = 0; *out_bytes = (uint16_t)atoi(tab2 + 1); }
+    *out_hops = (uint8_t)atoi(hp);
+  }
+
   // Parse one record line into the RAM buffer.
   void parseInto(char* line) {
     char* save = nullptr;
@@ -115,11 +131,12 @@ class SdMessageStore : public MessageStore {
     char* f_dir = strtok_r(nullptr, "\t", &save);
     char* f_st  = strtok_r(nullptr, "\t", &save);
     char* f_snd = strtok_r(nullptr, "\t", &save);
-    char* f_txt = save ? save : (char*)"";   // remainder = text (may contain nothing)
     if (!f_ts || !f_dir || !f_st || !f_snd) return;
+    char* f_txt; uint8_t hops; uint16_t bytes;
+    splitTail(save, &f_txt, &hops, &bytes);  // remainder = text (+ optional hops/bytes)
     uint8_t status = (uint8_t)atoi(f_st);
     if (status == MSG_STATUS_SENDING) status = MSG_STATUS_NONE;  // not in-flight across reboot
-    pushBuf(atoi(f_dir) != 0, f_snd, f_txt, (uint32_t)strtoul(f_ts, nullptr, 10), status, 0, 0, 0);
+    pushBuf(atoi(f_dir) != 0, f_snd, f_txt, (uint32_t)strtoul(f_ts, nullptr, 10), status, 0, 0, 0, hops, bytes);
   }
 
 public:
@@ -179,8 +196,9 @@ public:
         char* f_dir = strtok_r(nullptr, "\t", &save);
         char* f_st  = strtok_r(nullptr, "\t", &save);
         char* f_snd = strtok_r(nullptr, "\t", &save);
-        char* f_txt = save ? save : (char*)"";
         if (!f_ts || !f_dir || !f_st || !f_snd) continue;
+        char* f_txt; uint8_t hops; uint16_t bytes;
+        splitTail(save, &f_txt, &hops, &bytes);   // text (+ optional hops/bytes)
         uint32_t ts = (uint32_t)strtoul(f_ts, nullptr, 10);
         if (!ts) continue;
         if (rn == cap && ts <= recent[0].timestamp) continue;
@@ -191,7 +209,7 @@ public:
         m.ack = 0;
         m.expiry_ms = 0;
         m.cli = 0;
-        m.hops = 0xFF; m.bytes = 0;   // not persisted; diagnostics only matter live
+        m.hops = hops; m.bytes = bytes;
         copyBounded(m.peer, key, CHAT_PEER_NAME_MAX);
         copyBounded(m.sender, f_snd, CHAT_PEER_NAME_MAX);
         copyBounded(m.text, f_txt, CHAT_MSG_TEXT_MAX);
@@ -203,7 +221,8 @@ public:
     }  // release the bus before appending into the RAM ring
 
     for (int i = 0; i < rn; i++)
-      dst->append(recent[i].outgoing, recent[i].peer, recent[i].sender, recent[i].text, recent[i].timestamp);
+      dst->append(recent[i].outgoing, recent[i].peer, recent[i].sender, recent[i].text, recent[i].timestamp,
+                  MSG_STATUS_NONE, 0, 0, 0, recent[i].hops, recent[i].bytes);
     free(recent);
   }
 
@@ -221,13 +240,15 @@ public:
     if (ensure()) {
       // Build the whole record, then write it in one go and verify every byte
       // landed -- a full card silently short-writes, so check the count.
-      char rec[CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 48];
+      char rec[CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 64];
       int o = snprintf(rec, sizeof(rec), "%lu\t%d\t%u\t",
                        (unsigned long)ts, outgoing ? 1 : 0, (unsigned)status);
       o += copySanitized(rec + o, sizeof(rec) - o, sender);
       if (o < (int)sizeof(rec) - 1) rec[o++] = '\t';
       o += copySanitized(rec + o, sizeof(rec) - o, text);
-      if (o < (int)sizeof(rec) - 1) rec[o++] = '\n';
+      // Trailing hops/bytes so the chat metadata footer survives a reload (text is tab-free,
+      // so these stay cleanly separable; older records without them default to unset on read).
+      o += snprintf(rec + o, sizeof(rec) - o, "\t%u\t%u\n", (unsigned)hops, (unsigned)bytes);
 
       char path[64];
       keyPath(peer, path, sizeof(path));

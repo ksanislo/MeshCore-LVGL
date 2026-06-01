@@ -113,7 +113,8 @@ public:
     for (int k = 0; k < _count; k++) {
       int i = (_head - _count + k + CAP) % CAP;
       if (_buf[i].timestamp >= since_ts)
-        dst->append(_buf[i].outgoing, _buf[i].peer, _buf[i].sender, _buf[i].text, _buf[i].timestamp);
+        dst->append(_buf[i].outgoing, _buf[i].peer, _buf[i].sender, _buf[i].text, _buf[i].timestamp,
+                    MSG_STATUS_NONE, 0, 0, 0, _buf[i].hops, _buf[i].bytes);
     }
   }
 
