@@ -106,7 +106,9 @@ void UITask::touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     return;
   }
   uint16_t tx = 0, ty = 0;
-  if (_instance->_lgfx->getTouch(&tx, &ty)) {
+  bool down = _instance->_lgfx->getTouch(&tx, &ty);
+  _instance->_touch_down = down;            // physical finger state -> loop() defers heavy rebuilds while down
+  if (down) {
     _instance->_last_input_ms = millis();   // reset the idle-off timer
     if (_instance->_display_off) {
       // Wake the backlight and swallow the ENTIRE wake gesture (until the finger
@@ -10007,7 +10009,10 @@ void UITask::loop() {
   // doesn't jank the scroll. Switching to a tab services it within one frame.
   // Tabs: 0 = Contacts, 1 = Channels, 2 = Settings. _contacts_dirty is the
   // message-store "latest" re-sort (independent of the snapshot).
-  if (lv_scr_act() == _home_screen && _tabview) {
+  // ...but never mid-gesture: a heavy rebuild while a finger is down hitches the scroll/tap
+  // (and steals the frame's touch poll). The pending flags persist, so it rebuilds the moment
+  // the finger lifts. This is the cheap fix for "touch gets flaky while actively using it."
+  if (!_touch_down && lv_scr_act() == _home_screen && _tabview) {
     int tab = (int)lv_tabview_get_tab_act(_tabview);
     if (tab == 0 && (_contacts_pending || _contacts_dirty) && now - _contacts_rebuilt_ms >= 800) {
       _contacts_pending = false;
