@@ -309,6 +309,12 @@ void setup() {
 
 #ifdef MESH_PROXY
   s_ui_ready = true;   // UI is up: release the core-0 mesh backend to start running
+  // Watchdog the UI loop (core 1). The task WDT only watches core-0 idle, so a *soft* hang
+  // here (LVGL spin/deadlock, interrupts still on) would otherwise leave the device half-alive
+  // -- mesh running, UI frozen, no reboot. enableLoopWDT() subscribes this loop task and auto-
+  // feeds it each loop(); a >5s stall now panics+reboots. Safe: loop() is only UI+sensors here
+  // (the mesh is on core 0, the OTA download on its own task), all well under the 5s timeout.
+  enableLoopWDT();
 #endif
 }
 
