@@ -7842,6 +7842,76 @@ static uint32_t markupToLogical(const char* markup, uint32_t char_id) {
   return loff;
 }
 
+// Inverse of markupToLogical: map a LOGICAL offset (visible-codepoint index) to a MARKUP
+// char-id (codepoint index including recolor command chars) -- the index space that
+// lv_label_get_letter_pos expects. Returns the markup char-id of the loff-th visible char.
+static uint32_t logicalToMarkup(const char* markup, uint32_t loff) {
+  uint8_t st = TCMD_WAIT;
+  uint32_t cid = 0, l = 0;
+  const char* p = markup;
+  while (*p) {
+    unsigned char c0 = (unsigned char)*p;
+    uint32_t step = (c0 >= 0xF0) ? 4 : (c0 >= 0xE0) ? 3 : (c0 >= 0xC0) ? 2 : 1;
+    if (!selTxtIsCmd(st, (char)c0)) { if (l == loff) return cid; l++; }
+    cid++;
+    p += step;
+  }
+  return cid;
+}
+
+// Hit-test a tap against each chip's padded on-screen rectangle (full line height +
+// slop), so the whole "@name"/"#tag" cell -- not just the glyph ink -- is the target.
+// abs_pt is in screen coords. Returns true + kind + bare name of the chip under it.
+static bool chipUnderPoint(lv_obj_t* lbl, const char* src, lv_point_t abs_pt,
+                           bool* is_hashtag, char* name, size_t cap) {
+  const char* markup = lv_label_get_text(lbl);
+  lv_area_t a; lv_obj_get_coords(lbl, &a);
+  lv_coord_t rx = (lv_coord_t)(abs_pt.x - a.x1), ry = (lv_coord_t)(abs_pt.y - a.y1);
+  const lv_font_t* font = lv_obj_get_style_text_font(lbl, LV_PART_MAIN);
+  lv_coord_t lh = lv_font_get_line_height(font);
+  lv_coord_t ls = lv_obj_get_style_text_line_space(lbl, LV_PART_MAIN);
+  const lv_coord_t PADX = 6, PADY = (lv_coord_t)(ls / 2 + 4);   // grow the target past the glyphs
+
+  const char* p = src; uint32_t loff = 0;
+  while (*p) {
+    const char* at = strstr(p, "@[");
+    const char* atclose = at ? strchr(at + 2, ']') : nullptr;
+    if (at && !atclose) at = nullptr;
+    const char* htend = nullptr;
+    const char* ht = findHashtag(p, src, &htend);
+    const char* tok = at; bool mention = (at != nullptr);
+    if (ht && (!tok || ht < tok)) { tok = ht; mention = false; }
+    if (!tok) break;
+    loff += cpCount(p, tok);                              // plain run before the chip
+    const char* nm_s = mention ? at + 2 : tok + 1;
+    const char* nm_e = mention ? atclose : htend;
+    uint32_t toklen = 1 + cpCount(nm_s, nm_e);            // "@name"/"#tag" visible length
+
+    lv_point_t plo, phi;
+    lv_label_get_letter_pos(lbl, logicalToMarkup(markup, loff), &plo);          // chip left
+    lv_label_get_letter_pos(lbl, logicalToMarkup(markup, loff + toklen), &phi); // just past chip
+    bool hit;
+    if (plo.y == phi.y) {                                 // single line (the common case)
+      hit = (rx >= plo.x - PADX && rx <= phi.x + PADX &&
+             ry >= plo.y - PADY && ry <= plo.y + lh + PADY);
+    } else {                                              // chip wrapped across lines
+      bool onStart = (ry >= plo.y - PADY && ry <= plo.y + lh + PADY && rx >= plo.x - PADX);
+      bool onEnd   = (ry >= phi.y - PADY && ry <= phi.y + lh + PADY && rx <= phi.x + PADX);
+      bool between = (ry > plo.y + lh && ry < phi.y);
+      hit = onStart || onEnd || between;
+    }
+    if (hit) {
+      size_t n = (size_t)(nm_e - nm_s); if (n > cap - 1) n = cap - 1;
+      memcpy(name, nm_s, n); name[n] = 0;
+      *is_hashtag = !mention;
+      return true;
+    }
+    loff += toklen;
+    p = mention ? atclose + 1 : htend;
+  }
+  return false;
+}
+
 // Find the chip (mention / hashtag) covering logical offset `off` in the source
 // text. Logical text = plain 1:1, "@[name]" shown as "@name", "#name" as "#name".
 // Returns true + kind + the bare name (no @/#).
@@ -8352,9 +8422,15 @@ void UITask::sel_event_cb(lv_event_t* e) {
       // the exact chip under the finger (per-chip, no picker).
       const char* src = (const char*)lv_obj_get_user_data(target);
       if (src) {
-        uint32_t off = markupToLogical(lv_label_get_text(target), labelCharAt(target, p));
         bool is_hashtag; char nm[CHAT_PEER_NAME_MAX];
-        if (tokenAtLogical(src, off, &is_hashtag, nm, sizeof(nm))) {
+        // Prefer the padded full-cell rectangle (forgiving target); fall back to the exact
+        // char-cell under the finger so a direct hit always resolves even at a rect edge.
+        bool got = chipUnderPoint(target, src, p, &is_hashtag, nm, sizeof(nm));
+        if (!got) {
+          uint32_t off = markupToLogical(lv_label_get_text(target), labelCharAt(target, p));
+          got = tokenAtLogical(src, off, &is_hashtag, nm, sizeof(nm));
+        }
+        if (got) {
           _instance->resolveChip(is_hashtag ? CHIP_HASHTAG : CHIP_MENTION, nm);
           lv_event_stop_bubbling(e);   // don't also fire the bubble's resend handler
           break;
