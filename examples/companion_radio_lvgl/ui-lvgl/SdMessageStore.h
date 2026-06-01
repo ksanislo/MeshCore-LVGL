@@ -52,12 +52,35 @@ class SdMessageStore : public MessageStore {
     snprintf(out + o, cap - o, ".log");
   }
 
-  // Copy src into dst (bounded), turning tabs/newlines into spaces (field-safe).
-  static int copySanitized(char* dst, int cap, const char* src) {
+  // Copy src into dst (bounded), backslash-escaping the structural chars so the line/TSV
+  // format stays unambiguous while preserving the original text byte-for-byte (a tab or a
+  // multi-line message survives a reload). \t -> "\t", \n -> "\n", \r -> "\r", \ -> "\\".
+  static int copyEscaped(char* dst, int cap, const char* src) {
     int o = 0;
-    for (const char* p = src ? src : ""; *p && o < cap - 1; p++)
-      dst[o++] = (*p == '\t' || *p == '\n' || *p == '\r') ? ' ' : *p;
+    for (const char* p = src ? src : ""; *p && o < cap - 2; p++) {
+      char c = *p, e = 0;
+      if      (c == '\\') e = '\\';
+      else if (c == '\t') e = 't';
+      else if (c == '\n') e = 'n';
+      else if (c == '\r') e = 'r';
+      if (e) { dst[o++] = '\\'; dst[o++] = e; }
+      else   { dst[o++] = c; }
+    }
     return o;
+  }
+
+  // Reverse copyEscaped in place (result is always <= input length). Unknown escapes pass
+  // the escaped char through literally. Records written before escaping have no backslashes,
+  // so this is a no-op on them (backward compatible).
+  static void unescape(char* s) {
+    char* w = s;
+    for (char* r = s; *r; r++) {
+      if (*r == '\\' && r[1]) {
+        r++;
+        *w++ = (*r == 't') ? '\t' : (*r == 'n') ? '\n' : (*r == 'r') ? '\r' : *r;
+      } else *w++ = *r;
+    }
+    *w = 0;
   }
 
   // Append into the linear RAM buffer (drops the oldest when full).
@@ -97,7 +120,7 @@ class SdMessageStore : public MessageStore {
     SdSvc::Lock lk;
     FsFile f = sd.open(path, O_RDONLY);
     if (f.isOpen()) {
-      char line[CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 32];
+      char line[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 48];  // 2x: escaping can double text
       while (f.available()) {
         int len = f.readBytesUntil('\n', line, sizeof(line) - 1);
         if (len <= 0) continue;
@@ -109,8 +132,9 @@ class SdMessageStore : public MessageStore {
   }
 
   // Split the post-sender remainder "text[\thops\tbytes]" -> text + optional metadata.
-  // Text is tab-free (copySanitized), so the first tab cleanly ends it; older records
-  // (no metadata fields) leave hops/bytes at their unset defaults. In-place: nulls `rest`.
+  // The stored text is escaped (no raw tabs), so the first raw tab cleanly ends it; older
+  // records (no metadata fields) leave hops/bytes at their unset defaults. In-place: nulls
+  // `rest`. The caller unescapes the returned text.
   static void splitTail(char* rest, char** out_txt, uint8_t* out_hops, uint16_t* out_bytes) {
     *out_txt = rest ? rest : (char*)"";
     *out_hops = 0xFF; *out_bytes = 0;
@@ -134,6 +158,7 @@ class SdMessageStore : public MessageStore {
     if (!f_ts || !f_dir || !f_st || !f_snd) return;
     char* f_txt; uint8_t hops; uint16_t bytes;
     splitTail(save, &f_txt, &hops, &bytes);  // remainder = text (+ optional hops/bytes)
+    unescape(f_snd); unescape(f_txt);        // restore any tabs/newlines in the original
     uint8_t status = (uint8_t)atoi(f_st);
     if (status == MSG_STATUS_SENDING) status = MSG_STATUS_NONE;  // not in-flight across reboot
     pushBuf(atoi(f_dir) != 0, f_snd, f_txt, (uint32_t)strtoul(f_ts, nullptr, 10), status, 0, 0, 0, hops, bytes);
@@ -176,7 +201,7 @@ public:
     FsFile dir = sd.open("/chat", O_RDONLY);
     FsFile f;
     char name[80];
-    char line[CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 32];
+    char line[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 48];  // 2x: escaping can double text
     while (dir.isOpen() && f.openNext(&dir, O_RDONLY)) {
       if (f.isDir()) { f.close(); continue; }
       f.getName(name, sizeof(name));
@@ -199,6 +224,7 @@ public:
         if (!f_ts || !f_dir || !f_st || !f_snd) continue;
         char* f_txt; uint8_t hops; uint16_t bytes;
         splitTail(save, &f_txt, &hops, &bytes);   // text (+ optional hops/bytes)
+        unescape(f_snd); unescape(f_txt);         // restore any tabs/newlines in the original
         uint32_t ts = (uint32_t)strtoul(f_ts, nullptr, 10);
         if (!ts) continue;
         if (rn == cap && ts <= recent[0].timestamp) continue;
@@ -240,12 +266,12 @@ public:
     if (ensure()) {
       // Build the whole record, then write it in one go and verify every byte
       // landed -- a full card silently short-writes, so check the count.
-      char rec[CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 64];
+      char rec[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 64];  // 2x: escaping can double text
       int o = snprintf(rec, sizeof(rec), "%lu\t%d\t%u\t",
                        (unsigned long)ts, outgoing ? 1 : 0, (unsigned)status);
-      o += copySanitized(rec + o, sizeof(rec) - o, sender);
+      o += copyEscaped(rec + o, sizeof(rec) - o, sender);
       if (o < (int)sizeof(rec) - 1) rec[o++] = '\t';
-      o += copySanitized(rec + o, sizeof(rec) - o, text);
+      o += copyEscaped(rec + o, sizeof(rec) - o, text);
       // Trailing hops/bytes so the chat metadata footer survives a reload (text is tab-free,
       // so these stay cleanly separable; older records without them default to unset on read).
       o += snprintf(rec + o, sizeof(rec) - o, "\t%u\t%u\n", (unsigned)hops, (unsigned)bytes);
