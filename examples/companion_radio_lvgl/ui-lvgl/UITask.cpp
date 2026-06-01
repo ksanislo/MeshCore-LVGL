@@ -2185,6 +2185,7 @@ static void sanitizeForFont(const char* in, char* out, size_t cap) {
   size_t o = 0;
   auto emit = [&](const char* s) { while (*s && o + 1 < cap) out[o++] = *s++; };
   while (*p && o + 1 < cap) {
+    if (p[0] == 0x01) { p++; continue; }             // strip our recolor-command byte (anti-injection)
     if (p[0] == 0xE2 && p[1] == 0x80) {              // U+2000..U+203F block
       if (p[2] == 0x8D) { p += 3; continue; }        // ZWJ (emoji sequences) -> drop
       const char* rep = nullptr;
@@ -2353,13 +2354,11 @@ static void msglabel_free_cb(lv_event_t* e) {
   if (p) lv_mem_free(p);
 }
 
-// Append [s,len) to the markup writer, escaping '#' -> '##'. `w` advances; never
-// overruns `end` (leaves room for a trailing NUL).
+// Append [s,len) to the markup writer. The recolor command char is \x01 (not '#'), and
+// sanitizeForFont strips \x01 from input, so no character needs escaping -- a literal '#'
+// (e.g. a #hashtag) now passes through as plain text and can sit inside a color span.
 static void appendEscaped(char*& w, char* end, const char* s, size_t len) {
-  for (size_t i = 0; i < len && w < end - 2; i++) {
-    if (s[i] == '#') { *w++ = '#'; *w++ = '#'; }
-    else             { *w++ = s[i]; }
-  }
+  for (size_t i = 0; i < len && w < end - 1; i++) *w++ = s[i];
 }
 
 // Append [s,len) as recolored text that survives line wraps: each space-separated
@@ -2376,11 +2375,11 @@ static bool appendRecoloredWords(char*& w, char* end, const char* s, size_t len,
     size_t start = i;
     while (i < len && s[i] != ' ') i++;                                     // one word
     if (i > start) {
-      int wrote = snprintf(w, end - w, "#%06X ", (unsigned)color);
+      int wrote = snprintf(w, end - w, "\x01%06X ", (unsigned)color);
       if (wrote < 0 || wrote >= end - w) return false;
       w += wrote;
       appendEscaped(w, end, s + start, i - start);
-      if (w < end - 1) *w++ = '#'; else return false;
+      if (w < end - 1) *w++ = '\x01'; else return false;
     }
   }
   return true;
@@ -2390,9 +2389,9 @@ static void addMessageText(lv_obj_t* bubble, const char* text, uint32_t fg) {
   char clean[CHAT_MSG_TEXT_MAX + 8];
   sanitizeForFont(text, clean, sizeof(clean));
 
-  // Build recolor markup. Worst case mixes '#' doubling (2x) with per-mention color
-  // commands (~9 bytes) -- size for ~3x the sanitized body so a max-length,
-  // mention-heavy message never truncates.
+  // Build recolor markup. Each colored word costs ~9 bytes (\x01 + 6 hex + space + \x01);
+  // plain runs copy 1:1 (no escaping). Size for ~3x the sanitized body so a max-length,
+  // mention/hashtag-heavy message never truncates.
   char markup[3 * (CHAT_MSG_TEXT_MAX + 8) + 32];
   char* w = markup;
   char* end = markup + sizeof(markup);
@@ -2430,11 +2429,9 @@ static void addMessageText(lv_obj_t* bubble, const char* text, uint32_t fg) {
       if (cl >= sizeof(cname)) cl = sizeof(cname) - 1;
       memcpy(cname, tok + 1, cl); cname[cl] = 0;
       uint32_t hc = s_hashtag_channel_colors ? nameColor(cname) : UI_ACCENT;
-      // A literal '#' can't live inside a recolor span (it closes the color), so
-      // render the '#' in the default color, then the name as per-word colored spans
-      // (color survives a wrap inside a multi-word tag).
-      appendEscaped(w, end, "#", 1);                       // -> "##" = one literal '#'
-      if (!appendRecoloredWords(w, end, tok + 1, htend - (tok + 1), hc)) break;
+      // Recolor the whole "#tag" (the '#' included): a tag is a single word [A-Za-z0-9_-]
+      // with no spaces, so it's one colored span -- and the '#' now sits inside it.
+      if (!appendRecoloredWords(w, end, tok, htend - tok, hc)) break;
       p = htend;
     }
   }

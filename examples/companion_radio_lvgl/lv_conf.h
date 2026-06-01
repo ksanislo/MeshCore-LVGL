@@ -122,7 +122,11 @@
 #define LV_TXT_LINE_BREAK_LONG_LEN      0
 #define LV_TXT_LINE_BREAK_LONG_PRE_MIN_LEN 3
 #define LV_TXT_LINE_BREAK_LONG_POST_MIN_LEN 3
-#define LV_TXT_COLOR_CMD                "#"
+#define LV_TXT_COLOR_CMD                "\x01"   /* SOH: a control char that never appears in chat text,
+                                                   so a literal '#' (e.g. a #hashtag) can be recolored
+                                                   like any other char. We generate all recolor markup
+                                                   ourselves (addMessageText) and strip \x01 from input
+                                                   in sanitizeForFont so a message can't inject colors. */
 #define LV_USE_BIDI                     0
 #define LV_USE_ARABIC_PERSIAN_CHARS     0
 
