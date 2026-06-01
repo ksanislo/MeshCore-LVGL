@@ -78,4 +78,8 @@ struct NodePrefs {  // persisted to file
   // NTP clock sync (WiFi mode only; SNTP is built into the WiFi stack, no extra RAM)
   uint8_t  ntp_enabled;         // 1 = sync the RTC from NTP on connect (default on)
   char     ntp_server[48];      // empty = "pool.ntp.org"
+  // Hardware (battery-backed) RTC discipline. Boards with a real RTC chip trust it:
+  // skip the contact-time bootstrap at boot and periodically re-seed the system
+  // clock from it (the chip's crystal outlasts/outperforms the MCU's). 0xFF unset -> on.
+  uint8_t  use_rtc_clock;       // 1 = use the hardware RTC, 0 = off (stock bootstrap)
 };

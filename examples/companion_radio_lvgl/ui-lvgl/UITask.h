@@ -306,6 +306,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_screen_dd;       // screen idle-off timeout dropdown
   lv_obj_t*       _set_tz_ta;           // UTC offset (hours) for local-time display
   lv_obj_t*       _set_clock_chk;       // 12-hour clock toggle
+  lv_obj_t*       _set_rtc_chk;         // "use hardware RTC" toggle (discipline clock from the chip)
   lv_obj_t*       _set_autolock_chk;    // auto-lock on sleep toggle
   // Network panes (WiFi + MQTT). Values committed on each pane's Save button.
   lv_obj_t*       _set_wifi_en;         // WiFi enable switch
@@ -809,6 +810,7 @@ private:
   void      commitTz();
   static void set_tz_ta_event_cb(lv_event_t* e);
   static void set_clock_cb(lv_event_t* e);
+  static void set_rtc_cb(lv_event_t* e);
   static void set_autolock_cb(lv_event_t* e);
   static void net_ta_event_cb(lv_event_t* e);   // MQTT text-field keyboard
   static void wifi_ta_event_cb(lv_event_t* e);  // WiFi text field: kb on focus, apply on defocus
@@ -1000,7 +1002,7 @@ public:
       _profile_screen(NULL), _profile_body(NULL), _profile_kb(NULL), _profile_return_screen(NULL),
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
-      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_autolock_chk(NULL),
+      _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_rtc_chk(NULL), _set_autolock_chk(NULL),
       _set_wifi_en(NULL), _set_wifi_ssid(NULL), _set_wifi_pw(NULL),
       _set_wifi_dhcp(NULL), _set_wifi_dns_ovr(NULL), _set_wifi_ip(NULL), _set_wifi_mask(NULL),
       _set_wifi_gw(NULL), _set_wifi_dns(NULL), _set_wifi_status(NULL),

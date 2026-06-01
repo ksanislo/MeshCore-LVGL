@@ -87,6 +87,12 @@ EnvironmentSensorManager sensors;
   DISPLAY_CLASS display;
 #endif
 
+// Strong overrides of the weak RTC hooks in the shared companion app + UITask. They
+// route generic clock policy to this board's battery-backed BM8563 (see target.h).
+bool board_rtc_valid_at_boot()     { return rtc_clock.validAtBoot(); }
+void board_rtc_arm_hw_write(bool on){ rtc_clock.armHwWrite(on); }
+bool board_rtc_reseed_from_hw()    { return rtc_clock.reseedFromHw(); }
+
 bool radio_init() {
   hspi_mutex_ensure();   // before any radio/SD SPI transaction can take it
   rtc_clock.begin();

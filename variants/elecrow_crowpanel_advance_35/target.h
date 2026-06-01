@@ -32,6 +32,8 @@ class CrowPanelRTCClock : public mesh::RTCClock {
   ESP32RTCClock _internal;
   RTC_PCF8563   _hw;
   bool          _hw_ok;
+  bool          _valid_at_boot = false;  // chip supplied a plausible time at begin()
+  bool          _hw_write_armed = true;  // when false, setCurrentTime() updates the live clock only
 public:
   CrowPanelRTCClock() : _hw_ok(false) {}
   void begin() {
@@ -43,7 +45,8 @@ public:
       bool lp = _hw.lostPower();
       uint32_t t = _hw.now().unixtime();
       Serial.printf("[RTC] begin: detected lostPower=%d hw_unix=%lu\n", (int)lp, (unsigned long)t);
-      if (!lp && t > 1700000000UL) _internal.setCurrentTime(t);  // seed live clock from battery RTC
+      _valid_at_boot = (!lp && t > 1700000000UL);
+      if (_valid_at_boot) _internal.setCurrentTime(t);  // seed live clock from battery RTC
     } else {
       Serial.println("[RTC] begin: NOT detected at 0x51");
     }
@@ -51,15 +54,32 @@ public:
   uint32_t getCurrentTime() override { return _internal.getCurrentTime(); }
   void setCurrentTime(uint32_t time) override {
     _internal.setCurrentTime(time);
-    if (_hw_ok) {
+    if (_hw_ok && _hw_write_armed) {
       Wire.begin(P_TOUCH_SDA, P_TOUCH_SCL);   // re-assert pins (touch reconfigures them per read)
       _hw.adjust(DateTime(time));             // keep the battery RTC in sync
       uint32_t rb = _hw.now().unixtime();     // read back to verify the write actually landed
       Serial.printf("[RTC] set: wrote=%lu readback=%lu %s\n", (unsigned long)time,
                     (unsigned long)rb, (rb + 3 >= time && rb <= time + 3) ? "OK" : "MISMATCH");
     } else {
-      Serial.printf("[RTC] set: hw not ok, internal only=%lu\n", (unsigned long)time);
+      Serial.printf("[RTC] set: %s internal only=%lu\n", _hw_ok ? "disarmed," : "hw not ok,", (unsigned long)time);
     }
+  }
+
+  bool validAtBoot() const { return _valid_at_boot; }
+  // Bracket an untrusted clock write so it touches the live (MCU) clock only, never
+  // the battery chip (so the chip keeps its known-good time and stays recoverable).
+  void armHwWrite(bool on) { _hw_write_armed = on; }
+  // Pull the current time from the battery chip into the live clock (discipline the
+  // MCU oscillator against the better crystal). Live-clock-only: never writes the chip.
+  // Returns true if the chip held a plausible time. Call from the UI core (touch bus).
+  bool reseedFromHw() {
+    if (!_hw_ok) return false;
+    Wire.begin(P_TOUCH_SDA, P_TOUCH_SCL);
+    if (_hw.lostPower()) return false;
+    uint32_t t = _hw.now().unixtime();
+    if (t <= 1700000000UL) return false;
+    _internal.setCurrentTime(t);
+    return true;
   }
 };
 

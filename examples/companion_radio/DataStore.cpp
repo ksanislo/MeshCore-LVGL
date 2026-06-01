@@ -312,6 +312,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     _prefs.wifi_dns = 0;                                                                   // 181
     _prefs.ntp_enabled = 1;                                                                // 182 (default: on)
     _prefs.ntp_server[0] = 0;                                                              // 183 (empty -> pool.ntp.org)
+    _prefs.use_rtc_clock = 0xFF;                                                           // 184 (unset -> on)
     file.read((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
     file.read((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
     file.read((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
@@ -350,6 +351,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.wifi_dns, sizeof(_prefs.wifi_dns));                           // 181
     file.read((uint8_t *)&_prefs.ntp_enabled, sizeof(_prefs.ntp_enabled));                     // 182
     file.read((uint8_t *)_prefs.ntp_server, sizeof(_prefs.ntp_server));                        // 183
+    file.read((uint8_t *)&_prefs.use_rtc_clock, sizeof(_prefs.use_rtc_clock));                 // 184
 
     file.close();
   }
@@ -429,6 +431,7 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.wifi_dns, sizeof(_prefs.wifi_dns));                           // 181
     file.write((uint8_t *)&_prefs.ntp_enabled, sizeof(_prefs.ntp_enabled));                     // 182
     file.write((uint8_t *)_prefs.ntp_server, sizeof(_prefs.ntp_server));                        // 183
+    file.write((uint8_t *)&_prefs.use_rtc_clock, sizeof(_prefs.use_rtc_clock));                 // 184
 
     file.close();
     commitTmp(_fs, "/new_prefs.tmp", "/new_prefs");

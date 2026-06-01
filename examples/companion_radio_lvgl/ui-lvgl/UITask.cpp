@@ -28,6 +28,11 @@
 // definition (e.g. CrowPanelBoard's LEDC writer); others fall back to this no-op.
 extern "C" __attribute__((weak)) void board_set_backlight(uint8_t duty) { (void)duty; }
 
+// Battery-backed RTC discipline hook. A variant with a real RTC chip provides a strong
+// definition that re-seeds the system clock from the chip (CrowPanel: target.cpp).
+// Others fall back to this no-op, so the periodic sync below simply does nothing.
+__attribute__((weak)) bool board_rtc_reseed_from_hw() { return false; }
+
 static void sanitizeForFont(const char* in, char* out, size_t cap);
 static bool containsCI(const char* hay, const char* needle);
 static void firstGrapheme(const char* in, char* out, size_t cap);  // first UTF-8 codepoint (avatar glyph)
@@ -6878,6 +6883,14 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_clock_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_clock_chk, set_clock_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  // Trust the battery-backed hardware RTC: skip the contact-time bootstrap at boot and
+  // periodically discipline the system clock from the chip. Checking it also pulls the
+  // current time from the chip right now (recovers a clock clobbered while it was off).
+  _set_rtc_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_rtc_chk, "Use hardware RTC");
+  lv_obj_set_style_text_color(_set_rtc_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_rtc_chk, set_rtc_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
   addSettingsSection(body, "Appearance");
   // Contact avatar color scheme: our curated palette, or iOS-app parity (same
   // color as the phone app for a given name). See nameColor() in ui_theme.h.
@@ -7001,6 +7014,10 @@ void UITask::populateSettings() {
   if (_set_clock_chk) {
     if (_node_prefs->clock_12h) lv_obj_add_state(_set_clock_chk, LV_STATE_CHECKED);
     else                        lv_obj_clear_state(_set_clock_chk, LV_STATE_CHECKED);
+  }
+  if (_set_rtc_chk) {
+    if (_node_prefs->use_rtc_clock != 0) lv_obj_add_state(_set_rtc_chk, LV_STATE_CHECKED);
+    else                                 lv_obj_clear_state(_set_rtc_chk, LV_STATE_CHECKED);
   }
   if (_set_autolock_chk) {
     if (_node_prefs->auto_lock) lv_obj_add_state(_set_autolock_chk, LV_STATE_CHECKED);
@@ -8065,6 +8082,16 @@ void UITask::set_clock_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   _instance->_node_prefs->clock_12h = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
   pushPrefs();
+}
+
+void UITask::set_rtc_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  _instance->_node_prefs->use_rtc_clock = on ? 1 : 0;
+  pushPrefs();
+  // Turning it on: pull true time from the chip right now (runs on the UI core, which
+  // owns the touch/RTC I2C bus). Recovers a clock that was clobbered while RTC use was off.
+  if (on && board_rtc_reseed_from_hw()) _instance->showToast("Clock synced from RTC");
 }
 
 void UITask::set_avatar_cb(lv_event_t* e) {
@@ -9381,6 +9408,16 @@ void UITask::loop() {
 #ifdef PIN_BUZZER
   _buzzer.loop();   // non-blocking RTTTL state-stepping; run every pass, even display-off
 #endif
+
+  // Periodically discipline the system clock from the battery-backed RTC chip: its
+  // crystal is more stable than the MCU's, so this corrects ESP32 drift between the
+  // absolute syncs (GPS/NTP/phone). Live-clock-only (never writes the chip), and on
+  // the UI core which owns the shared touch/RTC I2C bus. No-op without a hardware RTC.
+  static uint32_t rtc_sync_next_ms = 0;
+  if (_node_prefs && _node_prefs->use_rtc_clock != 0 && (rtc_sync_next_ms == 0 || now >= rtc_sync_next_ms)) {
+    board_rtc_reseed_from_hw();
+    rtc_sync_next_ms = now + 600000UL;   // every 10 min
+  }
 
   // Pin the published snapshot for this UI pass, then apply backend events
   // (new/sent msgs, delivery, telemetry) to the store/LVGL on this (UI) core.

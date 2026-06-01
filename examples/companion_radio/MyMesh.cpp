@@ -70,6 +70,16 @@
 #define CMD_SET_DEFAULT_FLOOD_SCOPE   63
 #define CMD_GET_DEFAULT_FLOOD_SCOPE   64
 
+// Earliest plausible wall-clock time we'll accept from a user-controlled source
+// (the BLE companion app). Nothing legitimately current is older, so this only blocks
+// nonsense (e.g. a phone deliberately set to 1969) in either direction.
+// MIRRORS the upstream default "recent past" anchor, which standard MeshCore hardcodes
+// as a bare literal in ESP32RTCClock::begin (ESP32Board.h), VolatileRTCClock
+// (ArduinoHelpers.h), and `clkreboot` (CommonCLI.cpp). We can't share a symbol with
+// them without editing src/ (the don't-fork-standard-MeshCore rule), so keep this in
+// sync if upstream ever moves it.
+#define RTC_MIN_VALID_EPOCH           1715770351UL  // 15 May 2024, 8:50pm UTC
+
 // Stats sub-types for CMD_GET_STATS
 #define STATS_TYPE_CORE               0
 #define STATS_TYPE_RADIO              1
@@ -1079,6 +1089,16 @@ uint32_t MyMesh::calcDirectTimeoutMillisFor(uint32_t pkt_airtime_millis, uint8_t
 
 void MyMesh::onSendTimeout() {}
 
+// Weak hooks for variants with a battery-backed hardware RTC. Defaults below keep
+// every other companion on the stock path (no hardware RTC => bootstrap as before).
+// A variant (e.g. the CrowPanel) overrides these with strong symbols in its target.
+//  - board_rtc_valid_at_boot(): the chip supplied a plausible time at boot.
+//  - board_rtc_arm_hw_write(on): when off, clock writes update the live (MCU) clock
+//    only and leave the battery chip untouched -- used to bracket the untrusted
+//    contact-time bootstrap so it can't corrupt the chip's known-good time.
+__attribute__((weak)) bool board_rtc_valid_at_boot() { return false; }
+__attribute__((weak)) void board_rtc_arm_hw_write(bool on) { (void)on; }
+
 MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMeshTables &tables, DataStore& store, AbstractUITask* ui)
     : BaseChatMesh(radio, *new ArduinoMillis(), rng, rtc, *new StaticPoolPacketManager(16), tables),
       _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _ui(ui) {
@@ -1159,6 +1179,7 @@ void MyMesh::begin(bool has_display) {
 #endif
 
   // load persisted prefs
+  _prefs.use_rtc_clock = 0xFF;   // default-on for fresh installs (no prefs file); loadPrefs overrides if persisted
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
 
   // sanitise bad pref values
@@ -1193,7 +1214,19 @@ void MyMesh::begin(bool has_display) {
 
   resetContacts();
   _store->loadContacts(this);
-  bootstrapRTCfromContacts();
+  // Clock seed at boot. If we trust a battery-backed hardware RTC and it supplied a
+  // valid time, the live clock is already seeded from it (in radio_init) -- skip the
+  // contact-time bootstrap so a stale message timestamp can't drag the clock backward.
+  // Otherwise fall back to the stock bootstrap, but with hardware-write disarmed so it
+  // seeds the live clock only and never clobbers the chip's known-good time (keeps the
+  // chip recoverable: re-enabling "Use RTC clock" can pull the real time back from it).
+  if (getNodePrefs()->use_rtc_clock != 0 && board_rtc_valid_at_boot()) {
+    // trust the hardware RTC; nothing to do
+  } else {
+    board_rtc_arm_hw_write(false);
+    bootstrapRTCfromContacts();
+    board_rtc_arm_hw_write(true);
+  }
   addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
   _store->loadChannels(this);
   loadNameOverrides();
@@ -1477,10 +1510,13 @@ void MyMesh::handleCmdFrame(size_t len) {
     uint32_t secs;
     memcpy(&secs, &cmd_frame[1], 4);
     uint32_t curr = getRTCClock()->getCurrentTime();
-    Serial.printf("[RTC] BLE set-time: recv=%lu curr=%lu delta=%ld %s\n",
-                  (unsigned long)secs, (unsigned long)curr, (long)secs - (long)curr,
-                  (secs >= curr) ? "ACCEPT" : "REJECT");
-    if (secs >= curr) {
+    Serial.printf("[RTC] BLE set-time: recv=%lu curr=%lu delta=%ld ACCEPT\n",
+                  (unsigned long)secs, (unsigned long)curr, (long)secs - (long)curr);
+    // The phone is a deliberate, user-initiated, NTP-accurate source: accept it in
+    // either direction (like GPS/NTP). Forward-only would trap the clock if the phone
+    // ever pushed it ahead -- a corrected phone could never pull it back. The floor
+    // still rejects nonsense (an unset/joke phone clock set before the firmware exists).
+    if (secs > RTC_MIN_VALID_EPOCH) {
       getRTCClock()->setCurrentTime(secs);
       writeOKFrame();
     } else {
