@@ -41,6 +41,8 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _header_logo;         // MeshCore wordmark (recolorable alpha img)
   lv_obj_t*       _clock_label;         // live device clock in the home header
   uint32_t        _clock_last;          // last shown second (1 Hz throttle)
+  char            _clock_text[16];      // last formatted time (colon blinked on top of this)
+  uint8_t         _clock_blink;         // colon-blink phase (heartbeat: toggles every 500ms in loop)
   lv_obj_t*       _tabview;
   lv_obj_t*       _tab_contacts;
   lv_obj_t*       _tab_channels;
@@ -999,7 +1001,7 @@ public:
       _started(false), _last_tick_ms(0), _msgcount(0),
       _last_input_ms(0), _display_off(false), _swallow_touch(false), _touch_down(false), _backlight_duty(153),
       _splash_screen(NULL), _home_screen(NULL),
-      _header(NULL), _header_logo(NULL), _clock_label(NULL), _clock_last(0),
+      _header(NULL), _header_logo(NULL), _clock_label(NULL), _clock_last(0), _clock_blink(0),
       _tabview(NULL),
       _tab_contacts(NULL), _tab_channels(NULL), _tab_settings(NULL),
       _clist{},

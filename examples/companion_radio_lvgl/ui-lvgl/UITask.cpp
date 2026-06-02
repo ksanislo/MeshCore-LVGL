@@ -2184,8 +2184,16 @@ static void sanitizeForFont(const char* in, char* out, size_t cap) {
   const uint8_t* p = (const uint8_t*)(in ? in : "");
   size_t o = 0;
   auto emit = [&](const char* s) { while (*s && o + 1 < cap) out[o++] = *s++; };
+  const int TAB_COLS = 4;                            // fake tab stops every N columns
   while (*p && o + 1 < cap) {
     if (p[0] == 0x01) { p++; continue; }             // strip our recolor-command byte (anti-injection)
+    if (p[0] == '\t') {                              // fake a tab: pad with spaces to the next stop.
+      int col = 0;                                   // column = chars since the last newline (approx,
+      for (size_t k = o; k > 0 && out[k - 1] != '\n'; k--) col++;   // proportional font -> not exact)
+      for (int pad = TAB_COLS - (col % TAB_COLS); pad > 0 && o + 1 < cap; pad--) out[o++] = ' ';
+      p++;
+      continue;
+    }
     if (p[0] == 0xE2 && p[1] == 0x80) {              // U+2000..U+203F block
       if (p[2] == 0x8D) { p += 3; continue; }        // ZWJ (emoji sequences) -> drop
       const char* rep = nullptr;
@@ -3697,10 +3705,11 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   }
 
   _splash_screen = buildSplashScreen();
+  lv_scr_load(_splash_screen);    // show the splash NOW, before the slow home build...
+  lv_refr_now(NULL);              // ...and force it onto the panel this instant (loop isn't running yet)
   _home_screen   = buildHomeScreen();
   rebuildContactsList();
   rebuildChannelsList();
-  lv_scr_load(_splash_screen);
 
   // Auto-dismiss splash after a brief dwell. Single-shot via lv_timer_del.
   lv_timer_t* t = lv_timer_create(splash_dismiss_cb, 2500, this);
@@ -10208,6 +10217,7 @@ void UITask::loop() {
       } else {
         strftime(buf, sizeof(buf), "%H:%M", &tmv);     // e.g. "21:05"
       }
+      strncpy(_clock_text, buf, sizeof(_clock_text) - 1); _clock_text[sizeof(_clock_text) - 1] = 0;
       lv_label_set_text(_clock_label, buf);
       if (_sig_meter) {   // re-anchor to the (re-sized) clock, then update the bars
         lv_obj_align_to(_sig_meter, _clock_label, LV_ALIGN_OUT_LEFT_MID, -6, 0);
@@ -10220,6 +10230,18 @@ void UITask::loop() {
       }
       if (_set_active_pane == _set_pane_body[CAT_TELEMETRY]) refreshGpsStatus();
       if (_set_active_pane == _set_pane_body[CAT_DISPLAY]) refreshTimeFields();  // tick the set-time boxes
+    }
+  }
+
+  // Heartbeat: blink the clock colon at ~1 Hz, driven by the loop itself (not a strftime tick).
+  // If the UI thread ever hard-freezes, the colon stops toggling -- a glance tells live vs wedged.
+  if (_clock_label && _clock_text[0]) {
+    uint8_t phase = (uint8_t)((now / 500) & 1);
+    if (phase != _clock_blink) {
+      _clock_blink = phase;
+      char b[16]; strncpy(b, _clock_text, sizeof(b) - 1); b[sizeof(b) - 1] = 0;
+      if (phase) { char* c = strchr(b, ':'); if (c) *c = ' '; }   // hide the colon on the off phase
+      lv_label_set_text(_clock_label, b);
     }
   }
 
