@@ -186,58 +186,6 @@ class SdMessageStore : public MessageStore {
     hdr[REC - 1] = '\n';
   }
 
-  // Convert an old escaped-tab-text log to the fixed-record format (one-time, in place via
-  // temp + atomic rename). Old line: <ts>\t<dir>\t<st>\t<sender>\t<text>[\t<hops>\t<bytes>],
-  // with \t/\n/\r/\\ backslash-escaped in sender/text. No-op if already new format or empty.
-  void migrateIfNeeded(const char* path) {
-    FsFile f = sd.open(path, O_RDONLY);
-    if (!f.isOpen()) return;
-    uint32_t sz = (uint32_t)f.size();
-    if (sz == 0 || rcFileIsNew(f)) { f.close(); return; }
-    f.seek(0);
-    char tmp[80]; snprintf(tmp, sizeof(tmp), "%s.mig", path);
-    sd.remove(tmp);
-    FsFile out = sd.open(tmp, O_WRONLY | O_CREAT | O_TRUNC);
-    if (!out.isOpen()) { f.close(); return; }
-    char hdr[REC]; rcMakeHeader(hdr); out.write((const uint8_t*)hdr, REC);
-    static char line[512];        // assembled old line (>= worst-case escaped: 2*text+sender+fields)
-    static char rec[REC];
-    static char rbuf[1024];       // block read buffer -- byte-by-byte readBytesUntil is glacial on big logs
-    int  ll = 0;
-    bool ok = true;
-    auto convertLine = [&]() -> bool {
-      if (ll <= 0) return true;
-      line[ll] = 0; ll = 0;
-      char* save = nullptr;
-      char* f_ts  = strtok_r(line, "\t", &save);
-      char* f_dir = strtok_r(nullptr, "\t", &save);
-      char* f_st  = strtok_r(nullptr, "\t", &save);
-      char* f_snd = strtok_r(nullptr, "\t", &save);
-      if (!f_ts || !f_dir || !f_st || !f_snd) return true;   // skip a malformed line
-      char* f_txt; uint8_t hops; uint16_t bytes;
-      splitTail(save, &f_txt, &hops, &bytes);
-      unescape(f_snd); unescape(f_txt);
-      rcFormat(rec, atoi(f_dir) != 0, (uint8_t)atoi(f_st), hops, bytes,
-               (uint32_t)strtoul(f_ts, nullptr, 10), f_snd, f_txt);
-      return (int)out.write((const uint8_t*)rec, REC) == REC;
-    };
-    while (f.available()) {
-      int got = f.read((uint8_t*)rbuf, sizeof(rbuf));
-      if (got <= 0) break;
-      for (int i = 0; i < got; i++) {
-        char c = rbuf[i];
-        if (c == '\n') { if (!convertLine()) { ok = false; break; } }
-        else if (ll < (int)sizeof(line) - 1) line[ll++] = c;  // else: drop excess (over-long line truncates)
-      }
-      if (!ok) break;
-    }
-    if (ok) ok = convertLine();   // trailing line with no final newline
-    f.close();
-    bool full = out.sync() && ok;
-    out.close();
-    if (full) { sd.remove(path); sd.rename(tmp, path); }   // atomic-ish swap
-    else      { sd.remove(tmp); }                           // leave the original intact on any error
-  }
 
   void loadConversation(const char* key) {
     _count = 0;
@@ -247,7 +195,6 @@ class SdMessageStore : public MessageStore {
     char path[64];
     keyPath(key, path, sizeof(path));
     SdSvc::Lock lk;
-    migrateIfNeeded(path);                       // old escaped-text log -> fixed records (one-time)
     FsFile f = sd.open(path, O_RDONLY);
     if (f.isOpen()) {
       uint32_t sz = (uint32_t)f.size();
@@ -414,7 +361,6 @@ public:
       bool opened = false, wrote = false;
       {
         SdSvc::Lock lk;
-        migrateIfNeeded(path);   // convert an old escaped-text log before appending to it
         FsFile f = sd.open(path, O_WRONLY | O_CREAT | O_APPEND);
         opened = f.isOpen();
         if (opened) {
