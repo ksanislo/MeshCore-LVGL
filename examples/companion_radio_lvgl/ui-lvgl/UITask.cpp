@@ -2110,7 +2110,7 @@ void UITask::sendCurrentMessage() {
              _chat_channel_idx, _chat_key, me, encoded);
   }
   lv_textarea_set_text(_chat_input, "");
-  rebuildChatHistory();
+  appendPendingChat();   // append the just-sent bubble (falls back to full rebuild if needed)
 }
 
 // CLI command to a repeater: no ACK, so show it as a plain sent bubble and post the
@@ -3070,53 +3070,44 @@ static void fmtDateLabel(uint32_t local_secs, long now_day, char* out, size_t ca
   strftime(out, cap, "%a, %b %d", &tmv);
 }
 
-void UITask::rebuildChatHistory() {
-  _chat_pending = false;   // any rebuild path satisfies a pending incoming-message refresh
-  if (!_chat_history) return;
-  lv_obj_clean(_chat_history);
-  _sending_lbl = NULL;  // old label just got deleted; re-set if a sending msg renders
-
-  const ChatMessage* all[CHAT_HISTORY_CAP];
-  int n = _msgs->messagesFor(_chat_key, all, CHAT_HISTORY_CAP);
-
-  bool filtering = _search_active && _search_filter[0];
-  const ChatMessage* shown[CHAT_HISTORY_CAP];
-  int sn = 0;
-  for (int i = 0; i < n; i++) {
-    if (filtering && !containsCI(all[i]->text, _search_filter)) continue;
-    shown[sn++] = all[i];
-  }
-
-  if (sn == 0) {
-    lv_obj_t* empty = lv_label_create(_chat_history);
-    lv_label_set_text(empty, filtering ? "No matches." : "No messages yet.");
-    lv_obj_set_style_text_color(empty, lv_color_hex(DIM_HEX), 0);
-    lv_obj_center(empty);
-    return;
-  }
-
-  int  tzoff = _node_prefs ? _node_prefs->tz_offset_minutes * 60 : 0;
-  long now_day = ((long)mproxy::rtcSeconds() + tzoff) / 86400;
-
-  char last_sender[CHAT_PEER_NAME_MAX] = "";
-  bool last_outgoing = false;
-  long last_day = -999999;
-  bool first = true;
-
-  // Max bubble width (80% of the chat column). Plain-text bubbles shrink to fit their
-  // content up to this; rich bubbles (cards/links) keep the full width.
+// Recompute the per-render context (tz offset, "today", bubble width cap). Cheap; called
+// before a full rebuild and before each incremental append so widths stay correct even if
+// the content width only settled after the first layout pass.
+void UITask::ensureChatRenderCtx() {
+  _crender_tzoff = _node_prefs ? _node_prefs->tz_offset_minutes * 60 : 0;
+  _crender_now_day = ((long)mproxy::rtcSeconds() + _crender_tzoff) / 86400;
   lv_coord_t chat_w = lv_obj_get_content_width(_chat_history);
   if (chat_w < 40) chat_w = _screen_w;          // not laid out yet -> fall back to screen width
-  lv_coord_t bubble_cap = chat_w * 80 / 100;
+  _crender_bubble_cap = chat_w * 80 / 100;
+}
 
-  for (int i = 0; i < sn; i++) {
-    const ChatMessage* m = shown[i];
-    long mday = ((long)m->timestamp + tzoff) / 86400;
+// Render ONE message at the tail of _chat_history, advancing the render cursor (_crender_*).
+// Same output as the old per-message loop body, but the burst time-collapse is INVERTED so it
+// works without lookahead: a message that continues the previous one's burst deletes the
+// PREVIOUS message's plain-time footer (a sending/failed status footer is never collapsed).
+void UITask::appendChatBubble(const ChatMessage* m) {
+  const int  tzoff   = _crender_tzoff;
+  const lv_coord_t bubble_cap = _crender_bubble_cap;
+  long mday = ((long)m->timestamp + tzoff) / 86400;
 
+  // Burst continuation -> collapse the previous message's plain-time footer.
+  bool cont = !_crender_first && m->timestamp != 0 && _crender_last_ts != 0 &&
+              (m->outgoing == _crender_last_outgoing) &&
+              strncmp(m->sender, _crender_last_sender, CHAT_PEER_NAME_MAX) == 0 &&
+              mday == _crender_last_day &&
+              m->timestamp >= _crender_last_ts &&
+              (m->timestamp - _crender_last_ts) <= 300;
+  if (cont && _crender_last_footer && _crender_footer_collapsible) {
+    lv_obj_del(_crender_last_footer);
+    _crender_last_footer = NULL;
+    _crender_footer_collapsible = false;
+  }
+
+  {
     // Date separator (centered) whenever the calendar day changes.
-    if (m->timestamp != 0 && mday != last_day) {
+    if (m->timestamp != 0 && mday != _crender_last_day) {
       char dl[32];
-      fmtDateLabel((uint32_t)((long)m->timestamp + tzoff), now_day, dl, sizeof(dl));
+      fmtDateLabel((uint32_t)((long)m->timestamp + tzoff), _crender_now_day, dl, sizeof(dl));
       lv_obj_t* date = lv_label_create(_chat_history);
       lv_label_set_text(date, dl);
       lv_obj_set_width(date, LV_PCT(100));
@@ -3124,14 +3115,14 @@ void UITask::rebuildChatHistory() {
       lv_obj_set_style_text_color(date, lv_color_hex(DIM_HEX), 0);
       lv_obj_set_style_text_font(date, &lv_font_montserrat_12, 0);
       lv_obj_set_style_pad_ver(date, 4, 0);
-      last_day = mday;
-      first = true;  // start a fresh sender run after a date break
+      _crender_last_day = mday;
+      _crender_first = true;  // start a fresh sender run after a date break
     }
 
     // Incoming bubbles get a sender-name header at the start of a same-sender run.
     bool show_name = !m->outgoing &&
-                     (first || last_outgoing ||
-                      strncmp(last_sender, m->sender, CHAT_PEER_NAME_MAX) != 0);
+                     (_crender_first || _crender_last_outgoing ||
+                      strncmp(_crender_last_sender, m->sender, CHAT_PEER_NAME_MAX) != 0);
     if (show_name) {
       char sname[CHAT_PEER_NAME_MAX + 4];
       sanitizeForFont(m->sender[0] ? m->sender : "?", sname, sizeof(sname));
@@ -3227,23 +3218,15 @@ void UITask::rebuildChatHistory() {
       }
     }
 
-    // Timestamp below the bubble, but collapse it within a burst: hide it when
-    // the next message is the same sender, same day, and within 5 minutes.
+    // Footer line: time, or outgoing delivery status (sending/failed). The burst time-collapse
+    // is applied retroactively at the TOP of this function (a continuing message deletes the
+    // previous plain-time footer), so here we always render THIS message's own footer.
     bool show_time = (m->timestamp != 0);
-    if (show_time && i + 1 < sn) {
-      const ChatMessage* nx = shown[i + 1];
-      long nday = ((long)nx->timestamp + tzoff) / 86400;
-      bool same_sender = (nx->outgoing == m->outgoing) &&
-                         strncmp(nx->sender, m->sender, CHAT_PEER_NAME_MAX) == 0;
-      if (same_sender && nday == mday && nx->timestamp >= m->timestamp &&
-          (nx->timestamp - m->timestamp) <= 300)
-        show_time = false;
-    }
-    // Footer line: outgoing delivery status (sending/failed always; delivered ->
-    // a check + time) or just the time, with the burst-collapse applied to time.
     bool sending   = m->outgoing && m->status == MSG_STATUS_SENDING;
     bool failed    = m->outgoing && m->status == MSG_STATUS_FAILED;
     bool delivered = m->outgoing && m->status == MSG_STATUS_DELIVERED;
+    _crender_last_footer = NULL;
+    _crender_footer_collapsible = false;
     if (sending || failed || show_time) {
       char ftxt[64];
       if (sending) {
@@ -3270,17 +3253,83 @@ void UITask::rebuildChatHistory() {
       lv_obj_set_style_text_color(tl, lv_color_hex(failed ? UI_ERROR : DIM_HEX), 0);
       lv_obj_set_style_text_font(tl, &lv_font_montserrat_12, 0);
       if (sending) _sending_lbl = tl;  // animate this one's dots in loop()
+      _crender_last_footer = tl;
+      _crender_footer_collapsible = (!sending && !failed);  // only a plain-time footer collapses
     }
-
-    strncpy(last_sender, m->sender, CHAT_PEER_NAME_MAX - 1);
-    last_sender[CHAT_PEER_NAME_MAX - 1] = 0;
-    last_outgoing = m->outgoing;
-    first = false;
   }
+
+  // advance the render cursor (so the next append continues the run/day/burst correctly)
+  strncpy(_crender_last_sender, m->sender, CHAT_PEER_NAME_MAX - 1);
+  _crender_last_sender[CHAT_PEER_NAME_MAX - 1] = 0;
+  _crender_last_outgoing = m->outgoing;
+  _crender_last_ts = m->timestamp;
+  _crender_first = false;
+}
+
+void UITask::rebuildChatHistory() {
+  _chat_pending = false;   // any rebuild path satisfies a pending incoming-message refresh
+  if (!_chat_history) return;
+  lv_obj_clean(_chat_history);
+  _sending_lbl = NULL;  // old labels just got deleted; re-set if a sending msg renders
+
+  const ChatMessage* all[CHAT_HISTORY_CAP];
+  int n = _msgs->messagesFor(_chat_key, all, CHAT_HISTORY_CAP);
+
+  bool filtering = _search_active && _search_filter[0];
+  const ChatMessage* shown[CHAT_HISTORY_CAP];
+  int sn = 0;
+  for (int i = 0; i < n; i++) {
+    if (filtering && !containsCI(all[i]->text, _search_filter)) continue;
+    shown[sn++] = all[i];
+  }
+
+  // reset the incremental render cursor (appendChatBubble advances it)
+  _crender_last_sender[0] = 0;
+  _crender_last_outgoing = false;
+  _crender_last_day = -999999;
+  _crender_first = true;
+  _crender_last_ts = 0;
+  _crender_last_footer = NULL;
+  _crender_footer_collapsible = false;
+
+  if (sn == 0) {
+    lv_obj_t* empty = lv_label_create(_chat_history);
+    lv_label_set_text(empty, filtering ? "No matches." : "No messages yet.");
+    lv_obj_set_style_text_color(empty, lv_color_hex(DIM_HEX), 0);
+    lv_obj_center(empty);
+    _chat_rendered_n = n;   // baseline for incremental append (0 when truly empty)
+    return;
+  }
+
+  ensureChatRenderCtx();
+  for (int i = 0; i < sn; i++) appendChatBubble(shown[i]);
+  _chat_rendered_n = n;
 
   lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
   lv_obj_update_layout(_chat_history);
   sb_update(_chat_history, _chat_sb);
+}
+
+// Incremental refresh when a new message lands in the open chat: if exactly one message was
+// appended and the ring hasn't wrapped, render just that one bubble; otherwise fall back to a
+// full rebuild (search active, multi-message burst, ring wrap, or anything ambiguous).
+void UITask::appendPendingChat() {
+  _chat_pending = false;
+  if (!_chat_history) return;
+  if (_search_active && _search_filter[0]) { rebuildChatHistory(); return; }
+
+  const ChatMessage* all[CHAT_HISTORY_CAP];
+  int n = _msgs->messagesFor(_chat_key, all, CHAT_HISTORY_CAP);
+  if (_chat_rendered_n >= 1 && n == _chat_rendered_n + 1 && n <= CHAT_HISTORY_CAP) {
+    ensureChatRenderCtx();
+    appendChatBubble(all[n - 1]);
+    _chat_rendered_n = n;
+    lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
+    lv_obj_update_layout(_chat_history);
+    sb_update(_chat_history, _chat_sb);
+  } else {
+    rebuildChatHistory();
+  }
 }
 
 // Refresh the chat header (name + avatar + route status) from the current snapshot.
@@ -10315,7 +10364,7 @@ void UITask::loop() {
   bool interacting = _touch_down || (int32_t)(s_scroll_until_ms - now) > 0;
   if (!interacting) {
     if (_chat_pending && _chat_screen && lv_scr_act() == _chat_screen)
-      rebuildChatHistory();   // clears _chat_pending
+      appendPendingChat();    // clears _chat_pending; appends just the new bubble when possible
     if ((_contacts_pending || _contacts_dirty) && now - _contacts_rebuilt_ms >= 800) {
       _contacts_pending = false;
       rebuildContactsList();   // also clears _contacts_dirty + sets _contacts_rebuilt_ms

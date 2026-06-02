@@ -190,6 +190,21 @@ class UITask : public AbstractUITask {
   int             _dot_frame;
   uint32_t        _anim_ms;
 
+  // Chat incremental-render cursor (Phase 1: append one bubble per new message instead of
+  // rebuilding the whole history). rebuildChatHistory() resets these; appendChatBubble()
+  // advances them so a later incremental append continues seamlessly. See appendChatBubble().
+  int             _chat_rendered_n = 0;            // messages currently rendered as bubbles
+  char            _crender_last_sender[CHAT_PEER_NAME_MAX] = "";
+  bool            _crender_last_outgoing = false;
+  long            _crender_last_day = -999999;
+  bool            _crender_first = true;
+  uint32_t        _crender_last_ts = 0;
+  lv_obj_t*       _crender_last_footer = nullptr;  // previous msg's footer (for burst time-collapse)
+  bool            _crender_footer_collapsible = false; // prev footer is a plain time (deletable on burst)
+  int             _crender_tzoff = 0;
+  long            _crender_now_day = 0;
+  lv_coord_t      _crender_bubble_cap = 0;
+
   // Contact Info page (+ Path Editor sub-page). Lazily built, reused. The same
   // screen serves two modes: CINFO_VIEW (an existing contact) and CINFO_ADD
   // (assembling a new contact from a typed/pasted/prefilled key).
@@ -630,6 +645,9 @@ class UITask : public AbstractUITask {
   lv_obj_t* makeBackdrop(lv_event_cb_t tap_cb);   // dim full-screen overlay (shared by all popups)
   lv_obj_t* makeModalCard(lv_obj_t** backdrop_out, lv_event_cb_t backdrop_tap_cb);
   void      rebuildChatHistory();
+  void      ensureChatRenderCtx();           // recompute tz/now-day/bubble-cap before (re)rendering
+  void      appendChatBubble(const ChatMessage* m);  // render one message, advancing the render cursor
+  void      appendPendingChat();             // incremental: append just the new message(s), else rebuild
   void      layoutChatBody(bool keyboard_shown);
   void      updateCharCount();   // refresh the compose char-count label (shown while typing)
   // When a bottom-docked keyboard `kb` is shown, scroll `scroll` so the focused
