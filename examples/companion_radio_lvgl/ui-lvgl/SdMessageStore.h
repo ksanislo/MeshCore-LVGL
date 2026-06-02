@@ -26,6 +26,7 @@ class SdMessageStore : public MessageStore {
   char _loaded[CHAT_PEER_NAME_MAX];  // conversation key currently in _buf
   bool _write_err;                   // a persist write failed (e.g. card full)
   bool _dir_ok;                      // /chat exists on the currently-mounted card
+  bool _loaded_has_older = false;    // the loaded window started mid-file -> older history exists
 
   // Ensure the card is mounted (via the shared service, which throttles retries
   // and recovers a re-inserted card) and that our /chat dir exists. Resets the
@@ -111,21 +112,156 @@ class SdMessageStore : public MessageStore {
     dst[cap - 1] = 0;
   }
 
+  // ---- Fixed-width record log format -------------------------------------------------------
+  // /chat/<key>.log is an array of fixed 256-byte blocks of printable text. Block 0 is a header
+  // ("#MCHAT ..."); block N>=1 is record N-1. So offset = 256*N always lands on the header or a
+  // record start, count = (size-256)/256, and any message is random-accessible in O(1) -- no
+  // delimiters, no escaping, no line scanning. Fields live at FIXED byte columns; the message
+  // text is stored RAW (newlines/tabs and all) in its column and right-trimmed of pad spaces on
+  // read. Each block ends with '\n' so it still opens cleanly as a text file. Reserved bytes
+  // [208,255) leave room for future fixed-position fields without changing offsets.
+  static const int REC = 256;
+  static const int RC_TS_OFF=0,  RC_TS_W=10;   // decimal unix ts (10 digits = uint32 max)
+  static const int RC_DIR_OFF=11;              // '0'/'1' outgoing
+  static const int RC_ST_OFF=13;               // status digit
+  static const int RC_HOPS_OFF=15, RC_HOPS_W=3;
+  static const int RC_BYTES_OFF=19, RC_BYTES_W=5;
+  static const int RC_SND_OFF=25, RC_SND_W=CHAT_PEER_NAME_MAX;       // 32
+  static const int RC_TXT_OFF=58, RC_TXT_W=CHAT_MSG_TEXT_MAX;        // 150  (-> 208, then reserved)
+  static constexpr const char* RC_MAGIC = "#MCHAT";                  // first 6 bytes of block 0
+
+  static void rcPutNum(char* rec, int off, int w, uint32_t v) {
+    for (int i = w - 1; i >= 0; i--) { rec[off + i] = (char)('0' + (v % 10)); v /= 10; }
+  }
+  static uint32_t rcGetNum(const char* rec, int off, int w) {
+    uint32_t v = 0;
+    for (int i = 0; i < w; i++) { char c = rec[off + i]; if (c >= '0' && c <= '9') v = v * 10 + (uint32_t)(c - '0'); }
+    return v;
+  }
+  static void rcPutStr(char* rec, int off, int w, const char* s) {   // left-justified, space-padded, raw
+    int i = 0;
+    for (; s && s[i] && i < w; i++) rec[off + i] = s[i];
+    for (; i < w; i++) rec[off + i] = ' ';
+  }
+  static void rcGetStr(const char* rec, int off, int w, char* dst, int dcap) {  // rstrip pad spaces
+    int end = w; while (end > 0 && rec[off + end - 1] == ' ') end--;
+    int n = (end < dcap - 1) ? end : dcap - 1;
+    memcpy(dst, rec + off, (size_t)n); dst[n] = 0;
+  }
+  // Build one 256-byte record block from fields.
+  static void rcFormat(char* rec, bool outgoing, uint8_t status, uint8_t hops, uint16_t bytes,
+                       uint32_t ts, const char* sender, const char* text) {
+    memset(rec, ' ', REC);
+    rcPutNum(rec, RC_TS_OFF, RC_TS_W, ts);
+    rec[RC_DIR_OFF] = outgoing ? '1' : '0';
+    rec[RC_ST_OFF]  = (char)('0' + (status % 10));
+    rcPutNum(rec, RC_HOPS_OFF, RC_HOPS_W, hops);
+    rcPutNum(rec, RC_BYTES_OFF, RC_BYTES_W, bytes);
+    rcPutStr(rec, RC_SND_OFF, RC_SND_W, sender);
+    rcPutStr(rec, RC_TXT_OFF, RC_TXT_W, text);
+    rec[REC - 1] = '\n';
+  }
+  // Parse one 256-byte record block into the RAM ring (status SENDING -> NONE: not in-flight).
+  void rcParseInto(const char* rec) {
+    uint32_t ts = rcGetNum(rec, RC_TS_OFF, RC_TS_W);
+    bool outgoing = rec[RC_DIR_OFF] == '1';
+    char sc = rec[RC_ST_OFF];
+    uint8_t status = (sc >= '0' && sc <= '9') ? (uint8_t)(sc - '0') : MSG_STATUS_NONE;
+    if (status == MSG_STATUS_SENDING) status = MSG_STATUS_NONE;
+    uint8_t  hops  = (uint8_t)rcGetNum(rec, RC_HOPS_OFF, RC_HOPS_W);
+    uint16_t bytes = (uint16_t)rcGetNum(rec, RC_BYTES_OFF, RC_BYTES_W);
+    char sender[CHAT_PEER_NAME_MAX]; rcGetStr(rec, RC_SND_OFF, RC_SND_W, sender, sizeof(sender));
+    char text[CHAT_MSG_TEXT_MAX];    rcGetStr(rec, RC_TXT_OFF, RC_TXT_W, text, sizeof(text));
+    pushBuf(outgoing, sender, text, ts, status, 0, 0, 0, hops, bytes);
+  }
+  static bool rcFileIsNew(FsFile& f) {   // header magic present?
+    char m[6]; f.seek(0);
+    return f.read((uint8_t*)m, 6) == 6 && memcmp(m, RC_MAGIC, 6) == 0;
+  }
+  static void rcMakeHeader(char* hdr) {
+    memset(hdr, ' ', REC);
+    memcpy(hdr, RC_MAGIC, 6);
+    rcPutStr(hdr, 7, 4, "v1");
+    rcPutStr(hdr, 12, 4, "256");
+    hdr[REC - 1] = '\n';
+  }
+
+  // Convert an old escaped-tab-text log to the fixed-record format (one-time, in place via
+  // temp + atomic rename). Old line: <ts>\t<dir>\t<st>\t<sender>\t<text>[\t<hops>\t<bytes>],
+  // with \t/\n/\r/\\ backslash-escaped in sender/text. No-op if already new format or empty.
+  void migrateIfNeeded(const char* path) {
+    FsFile f = sd.open(path, O_RDONLY);
+    if (!f.isOpen()) return;
+    uint32_t sz = (uint32_t)f.size();
+    if (sz == 0 || rcFileIsNew(f)) { f.close(); return; }
+    f.seek(0);
+    char tmp[80]; snprintf(tmp, sizeof(tmp), "%s.mig", path);
+    sd.remove(tmp);
+    FsFile out = sd.open(tmp, O_WRONLY | O_CREAT | O_TRUNC);
+    if (!out.isOpen()) { f.close(); return; }
+    char hdr[REC]; rcMakeHeader(hdr); out.write((const uint8_t*)hdr, REC);
+    static char line[512];        // assembled old line (>= worst-case escaped: 2*text+sender+fields)
+    static char rec[REC];
+    static char rbuf[1024];       // block read buffer -- byte-by-byte readBytesUntil is glacial on big logs
+    int  ll = 0;
+    bool ok = true;
+    auto convertLine = [&]() -> bool {
+      if (ll <= 0) return true;
+      line[ll] = 0; ll = 0;
+      char* save = nullptr;
+      char* f_ts  = strtok_r(line, "\t", &save);
+      char* f_dir = strtok_r(nullptr, "\t", &save);
+      char* f_st  = strtok_r(nullptr, "\t", &save);
+      char* f_snd = strtok_r(nullptr, "\t", &save);
+      if (!f_ts || !f_dir || !f_st || !f_snd) return true;   // skip a malformed line
+      char* f_txt; uint8_t hops; uint16_t bytes;
+      splitTail(save, &f_txt, &hops, &bytes);
+      unescape(f_snd); unescape(f_txt);
+      rcFormat(rec, atoi(f_dir) != 0, (uint8_t)atoi(f_st), hops, bytes,
+               (uint32_t)strtoul(f_ts, nullptr, 10), f_snd, f_txt);
+      return (int)out.write((const uint8_t*)rec, REC) == REC;
+    };
+    while (f.available()) {
+      int got = f.read((uint8_t*)rbuf, sizeof(rbuf));
+      if (got <= 0) break;
+      for (int i = 0; i < got; i++) {
+        char c = rbuf[i];
+        if (c == '\n') { if (!convertLine()) { ok = false; break; } }
+        else if (ll < (int)sizeof(line) - 1) line[ll++] = c;  // else: drop excess (over-long line truncates)
+      }
+      if (!ok) break;
+    }
+    if (ok) ok = convertLine();   // trailing line with no final newline
+    f.close();
+    bool full = out.sync() && ok;
+    out.close();
+    if (full) { sd.remove(path); sd.rename(tmp, path); }   // atomic-ish swap
+    else      { sd.remove(tmp); }                           // leave the original intact on any error
+  }
+
   void loadConversation(const char* key) {
     _count = 0;
     copyBounded(_loaded, key, CHAT_PEER_NAME_MAX);
+    _loaded_has_older = false;
     if (!SdSvc::ready()) return;
     char path[64];
     keyPath(key, path, sizeof(path));
     SdSvc::Lock lk;
+    migrateIfNeeded(path);                       // old escaped-text log -> fixed records (one-time)
     FsFile f = sd.open(path, O_RDONLY);
     if (f.isOpen()) {
-      static char line[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 48];  // static: keep off the small loop-task stack (2x: escaping can double text)
-      while (f.available()) {
-        int len = f.readBytesUntil('\n', line, sizeof(line) - 1);
-        if (len <= 0) continue;
-        line[len] = 0;
-        parseInto(line);
+      uint32_t sz = (uint32_t)f.size();
+      if (sz >= (uint32_t)(2 * REC)) {           // header block + >=1 record
+        int total = (int)((sz - REC) / REC);     // record count = (size - header)/recsize
+        int want  = (total < CAP) ? total : CAP; // newest CAP records
+        int first = total - want;
+        _loaded_has_older = (first > 0);         // older records exist before the window
+        static char block[REC];
+        f.seek((uint32_t)REC * (1 + first));     // skip header (block 0) + the `first` older records
+        for (int i = 0; i < want; i++) {
+          if (f.read((uint8_t*)block, REC) != REC) break;
+          rcParseInto(block);
+        }
       }
       f.close();
     }
@@ -271,29 +407,22 @@ public:
               uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0,
               uint32_t cli = 0, uint8_t hops = 0xFF, uint16_t bytes = 0) override {
     if (ensure()) {
-      // Build the whole record, then write it in one go and verify every byte
-      // landed -- a full card silently short-writes, so check the count.
-      static char rec[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 64];  // static: keep off the stack (UI-core only; 2x: escaping can double text)
-      int o = snprintf(rec, sizeof(rec), "%lu\t%d\t%u\t",
-                       (unsigned long)ts, outgoing ? 1 : 0, (unsigned)status);
-      o += copyEscaped(rec + o, sizeof(rec) - o, sender);
-      if (o < (int)sizeof(rec) - 1) rec[o++] = '\t';
-      o += copyEscaped(rec + o, sizeof(rec) - o, text);
-      // Trailing hops/bytes so the chat metadata footer survives a reload (text is tab-free,
-      // so these stay cleanly separable; older records without them default to unset on read).
-      o += snprintf(rec + o, sizeof(rec) - o, "\t%u\t%u\n", (unsigned)hops, (unsigned)bytes);
-
+      static char rec[REC];
+      rcFormat(rec, outgoing, status, hops, bytes, ts, sender, text);  // one fixed 256B block
       char path[64];
       keyPath(peer, path, sizeof(path));
       bool opened = false, wrote = false;
       {
         SdSvc::Lock lk;
+        migrateIfNeeded(path);   // convert an old escaped-text log before appending to it
         FsFile f = sd.open(path, O_WRONLY | O_CREAT | O_APPEND);
         opened = f.isOpen();
         if (opened) {
-          size_t n = f.write((const uint8_t*)rec, o);
+          // A brand-new (or just-created) file needs the 256B header block first so offsets line up.
+          if (f.size() == 0) { char hdr[REC]; rcMakeHeader(hdr); f.write((const uint8_t*)hdr, REC); }
+          size_t n = f.write((const uint8_t*)rec, REC);   // append the record block; verify full write
           f.close();
-          wrote = ((int)n == o);
+          wrote = ((int)n == REC);
         }
       }
       if (!wrote) {
@@ -372,16 +501,24 @@ public:
     FsFile f = sd.open(path, O_RDONLY);
     if (f.isOpen()) {
       uint32_t sz = (uint32_t)f.size();
-      uint32_t start = sz > 256 ? sz - 256 : 0;   // last record only -- cheap
-      f.seek(start);
-      char buf[260];
-      int n = f.read((uint8_t*)buf, sizeof(buf) - 1);
-      if (n > 0) {
-        buf[n] = 0;
-        char* p = buf + n - 1;
-        while (p > buf && (*p == '\n' || *p == '\r')) *p-- = 0;  // strip trailing EOL
-        char* nl = strrchr(buf, '\n');
-        ts = (uint32_t)strtoul(nl ? nl + 1 : buf, nullptr, 10);
+      if (sz >= (uint32_t)(2 * REC) && rcFileIsNew(f)) {
+        // New fixed-record format: the last record block is at size-REC -- O(1), no migration.
+        static char block[REC];
+        f.seek(sz - REC);
+        if (f.read((uint8_t*)block, REC) == REC) ts = rcGetNum(block, RC_TS_OFF, RC_TS_W);
+      } else if (sz > 0) {
+        // Old escaped-text format (not yet migrated): last line's leading ts field.
+        uint32_t start = sz > 256 ? sz - 256 : 0;
+        f.seek(start);
+        char buf[260];
+        int n = f.read((uint8_t*)buf, sizeof(buf) - 1);
+        if (n > 0) {
+          buf[n] = 0;
+          char* p = buf + n - 1;
+          while (p > buf && (*p == '\n' || *p == '\r')) *p-- = 0;  // strip trailing EOL
+          char* nl = strrchr(buf, '\n');
+          ts = (uint32_t)strtoul(nl ? nl + 1 : buf, nullptr, 10);
+        }
       }
       f.close();
     }
