@@ -458,6 +458,7 @@ lv_obj_t* UITask::buildHomeScreen() {
   // Live device clock (right side of the header), updated once a second in loop().
   _clock_label = lv_label_create(header);
   lv_label_set_text(_clock_label, "--");
+  lv_label_set_recolor(_clock_label, true);   // lets the blink hide just the ':' (bg-colored, same width)
   lv_obj_set_style_text_color(_clock_label, lv_color_hex(DIM_HEX), 0);
   lv_obj_set_style_text_font(_clock_label, &lv_font_montserrat_14, 0);
   lv_obj_align(_clock_label, LV_ALIGN_RIGHT_MID, -4, 0);
@@ -3607,11 +3608,11 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   if (!_node_prefs || _node_prefs->persist_history) _msgs = &_sdmsgs;
 #endif
   _msgs->begin();  // mounts the SD card (SD store) or no-ops (RAM store)
-#ifdef HAS_SD_CARD
-  // Seed the RAM ring with recent history so disabling/ejecting the card later
-  // keeps recent messages visible without a gap.
-  if (_msgs == &_sdmsgs) _sdmsgs.preloadRecent(&_rammsgs, CHAT_HISTORY_CAP);
-#endif
+  // NOTE: history preload (preloadRecent) is deliberately deferred to *after* the LVGL
+  // display + draw_ctx are registered and the splash is rendered (see below). Doing SD
+  // file I/O here (before lv_init / display setup) perturbed the heap layout enough that
+  // the display's draw_ctx could come up zeroed -> the splash blit ran on a degenerate
+  // area and wedged core 1. Display first, then preload.
 
   // Restore the saved contacts sort/filter (0xFF = unset -> keep code defaults).
   if (_node_prefs) {
@@ -3707,6 +3708,13 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _splash_screen = buildSplashScreen();
   lv_scr_load(_splash_screen);    // show the splash NOW, before the slow home build...
   lv_refr_now(NULL);              // ...and force it onto the panel this instant (loop isn't running yet)
+#ifdef HAS_SD_CARD
+  // Seed the RAM ring with recent history so disabling/ejecting the card later keeps recent
+  // messages visible without a gap. Deferred to here (post display+splash) on purpose -- see
+  // the note above. Must still precede buildHomeScreen/rebuildContactsList, which sort
+  // contacts by latest-message timestamp.
+  if (_msgs == &_sdmsgs) _sdmsgs.preloadRecent(&_rammsgs, CHAT_HISTORY_CAP);
+#endif
   _home_screen   = buildHomeScreen();
   rebuildContactsList();
   rebuildChannelsList();

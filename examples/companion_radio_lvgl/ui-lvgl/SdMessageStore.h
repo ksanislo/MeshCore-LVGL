@@ -120,7 +120,7 @@ class SdMessageStore : public MessageStore {
     SdSvc::Lock lk;
     FsFile f = sd.open(path, O_RDONLY);
     if (f.isOpen()) {
-      char line[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 48];  // 2x: escaping can double text
+      static char line[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 48];  // static: keep off the small loop-task stack (2x: escaping can double text)
       while (f.available()) {
         int len = f.readBytesUntil('\n', line, sizeof(line) - 1);
         if (len <= 0) continue;
@@ -266,7 +266,7 @@ public:
     if (ensure()) {
       // Build the whole record, then write it in one go and verify every byte
       // landed -- a full card silently short-writes, so check the count.
-      char rec[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 64];  // 2x: escaping can double text
+      static char rec[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 64];  // static: keep off the stack (UI-core only; 2x: escaping can double text)
       int o = snprintf(rec, sizeof(rec), "%lu\t%d\t%u\t",
                        (unsigned long)ts, outgoing ? 1 : 0, (unsigned)status);
       o += copyEscaped(rec + o, sizeof(rec) - o, sender);
