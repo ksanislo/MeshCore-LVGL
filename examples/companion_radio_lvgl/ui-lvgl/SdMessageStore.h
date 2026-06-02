@@ -177,6 +177,13 @@ public:
   // Preload the newest ~cap messages across all conversations into `dst` (the RAM
   // ring), so disabling/ejecting the card keeps recent history on screen. Reads
   // only each file's tail. Appends oldest-first so the ring keeps the newest set.
+  //
+  // WARNING: NOT CALLED at boot anymore. On the CrowPanel's octal PSRAM @ 80MHz, running
+  // this over a large mixed set of logs could leave the memory bus such that a later pool
+  // read stalls -> watchdog -> boot loop (a marginal HW timing quirk; see the repo's
+  // psram-80mhz-stall-repro/). Do NOT re-enable on 80MHz hardware without a fix (e.g. 40MHz
+  // PSRAM). Kept here intentionally for that future path; it is not instantiated while
+  // unreferenced, so it costs nothing in the binary.
   void preloadRecent(MessageStore* dst, int cap) {
     if (!SdSvc::ready() || !dst || cap <= 0) return;
     if (cap > CAP) cap = CAP;
