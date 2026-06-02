@@ -136,6 +136,7 @@ UiPalette g_ui_palette = UI_THEME_DARK;
 
 // Chat chip coloring (seeded from prefs in begin(), toggled in Settings; read by
 // addMessageText). On = color @mentions by user / #hashtags by channel; off = accent.
+static bool s_suppress_search_rebuild = false;   // openChat clears the search box; don't let that rebuild (it'd run on the stale key, doubling the open cost)
 static uint8_t s_mention_user_colors   = 1;
 static uint8_t s_hashtag_channel_colors = 1;
 static uint8_t s_channel_sender_colors = 1;   // channel bubbles: brand+color the sender header
@@ -1506,6 +1507,7 @@ void UITask::chat_search_ta_event_cb(lv_event_t* e) {
     lv_keyboard_set_mode(_instance->_chat_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
     _instance->layoutChatBody(true);
   } else if (code == LV_EVENT_VALUE_CHANGED) {
+    if (s_suppress_search_rebuild) return;   // programmatic clear during openChat -> not a user edit, don't rebuild
     const char* s = lv_textarea_get_text(ta);
     strncpy(_instance->_search_filter, s ? s : "", sizeof(_instance->_search_filter) - 1);
     _instance->_search_filter[sizeof(_instance->_search_filter) - 1] = 0;
@@ -3540,11 +3542,15 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_add_flag(_chat_keyboard, LV_OBJ_FLAG_HIDDEN);
   }
 
-  // Reset any search state from a previously open conversation.
+  // Reset any search state from a previously open conversation. Clearing the search box fires
+  // VALUE_CHANGED -> chat_search_ta_event_cb; suppress its rebuild (it would run on the stale
+  // _chat_key, i.e. rebuild the PREVIOUS conversation, doubling the open cost).
+  s_suppress_search_rebuild = true;
   _search_active = false;
   _search_filter[0] = 0;
   if (_chat_search_ta) lv_textarea_set_text(_chat_search_ta, "");
   if (_chat_keyboard && _chat_input) lv_keyboard_set_textarea(_chat_keyboard, _chat_input);
+  s_suppress_search_rebuild = false;
 
   lv_textarea_set_text(_chat_input, "");
   layoutChatBody(false);  // keyboard hidden on (re)open
