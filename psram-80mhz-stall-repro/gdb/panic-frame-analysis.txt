@@ -1,0 +1,46 @@
+JTAG capture of the wedge (watchdogs disabled via killAllWatchdogs so the panic
+handler halts for the debugger instead of resetting; JTAG attached). The CPU is
+hung on a PSRAM load; ~300ms later the interrupt watchdog (xt_highint4 / TG1)
+fires and runs panicHandler with a PSEUDO exccause -- i.e. a timeout, not a real
+CPU exception.
+
+esp-gdb: .devtmp/xtensa-esp-elf-gdb/bin/xtensa-esp32s3-elf-gdb
+connect: target remote :3333 ; monitor halt ; thread apply all bt
+
+
+===== loopTask (CPU1) backtrace at the wedge =====
+#0  panic_handler (pseudo_excause=true)            panic_handler.c:148
+#1  panicHandler (frame=0x3fcebe40)                panic_handler.c:213
+#2  xt_highint4 ()                                 highint_hdl.S:119   <-- interrupt WDT (TG1)
+#3  0x40040025 in ?? ()                            (ROM)
+#4  psnapChunk (base=0x3d887000) ... UITask.cpp    <-- FNV read loop reading the pool
+#5  psnapTake
+#6  setup ()
+#7  loopTask ()
+
+At the same instant CPU0 was in IDLE0 / esp_pm_impl_waiti (idle, not on the bus).
+
+
+===== panic exception frame  (XtExcFrame @ 0x3fcebe40) =====
+word  field      value         meaning
+[0]   exit       0x40379fec
+[1]   pc         0x420280bc    psnapChunk FNV read loop (h ^= p[i])
+[2]   ps         0x00060134
+[5]   a2         0xa50eddaa    'h' (FNV hash accumulator) -- mid-loop
+[6]   a3         0x00000007
+[11]  a8         0x00000400    n = len/4 = 1024  (4096-byte chunk)
+[16]  a13        0x3d887660    <<< THE LOAD POINTER the CPU is stuck on
+[20]  exccause   0x00000007    pseudo (interrupt-WDT), NOT a real load/store fault
+[21]  excvaddr   0x00000000    no faulting vaddr recorded -> it timed out, didn't fault
+
+
+===== Interpretation (PROVEN) =====
+- 0x3d887660 is a FIXED, VALID, in-pool PSRAM address computed by pure arithmetic
+  (PSNAP_BASE 0x3d880000 + chunk 7*4096 + offset). It is NOT a dereferenced/corrupt
+  pointer -- psnapChunk only walks a linear range. The reads at 0x3d887000..0x3d88765c
+  succeeded; the cache-line-aligned word at 0x3d887660 is where the line-fill stalled.
+- excvaddr=0 / pseudo exccause => no memory fault. The load simply never completed;
+  the interrupt watchdog reset/halted the wedged core.
+- This is a PSRAM read-path STALL of a valid address, not data corruption.
+
+addr2line: ~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-addr2line

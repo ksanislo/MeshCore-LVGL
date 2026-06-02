@@ -1,0 +1,74 @@
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x3 (RTC_SW_SYS_RST),boot:0x19 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x40381e6e
+pro cpu reset by JTAG
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce3808,len:0x4bc
+load:0x403c9700,len:0xbd8
+load:0x403cc700,len:0x2a0c
+entry 0x403c98d0
+[  1143][E][Wire.cpp:137] setPins(): bus already initialized. change pins only when not.
+[RTC] begin: detected lostPower=0 hw_unix=1780425706
+E (1013) gpio: gpio_install_isr_service(450): GPIO isr service already installed
+[BOOT] *** splash wordmark image SKIPPED (diag) ***
+[HEAPCHK] after buildSplash          heap=ok lvpool=ok free=96496 stackHWM=4020 | lvpool free=255016 biggest=255004 used=3%
+[HEAPCHK] after lv_refr_now          heap=ok lvpool=ok free=94096 stackHWM=4020 | lvpool free=254956 biggest=254956 used=3%
+[HEAPCHK] after preloadRecent        heap=ok lvpool=ok free=94096 stackHWM=4020 | lvpool free=254956 biggest=254956 used=3%
+[HEAPCHK] bh:after tabview           heap=ok lvpool=ok free=94096 stackHWM=4020 | lvpool free=252340 biggest=252316 used=4%
+[HEAPCHK] bh:before buildContactRows heap=ok lvpool=ok free=94096 stackHWM=4020 | lvpool free=250576 biggest=250576 used=5%
+[HEAPCHK] bh:after buildContactRows  heap=ok lvpool=ok free=94096 stackHWM=4020 | lvpool free=236612 biggest=236612 used=10%
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x8 (TG1WDT_SYS_RST),boot:0x19 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x4208dd57
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce3808,len:0x4bc
+load:0x403c9700,len:0xbd8
+load:0x403cc700,len:0x2a0c
+entry 0x403c98d0
+[   866][E][Wire.cpp:137] setPins(): bus already initialized. change pins only when not.
+[RTC] begin: detected lostPower=0 hw_unix=1780425712
+E (1013) gpio: gpio_install_isr_service(450): GPIO isr service already installed
+[BOOT] *** splash wordmark image SKIPPED (diag) ***
+[HEAPCHK] after buildSplash          heap=ok lvpool=ok free=96496 stackHWM=3988 | lvpool free=255016 biggest=255004 used=3%
+[HEAPCHK] after lv_refr_now          heap=ok lvpool=ok free=94096 stackHWM=3988 | lvpool free=254956 biggest=254956 used=3%
+[HEAPCHK] after preloadRecent        heap=ok lvpool=ok free=94096 stackHWM=3988 | lvpool free=254956 biggest=254956 used=3%
+[HEAPCHK] bh:after tabview           heap=ok lvpool=ok free=94096 stackHWM=3988 | lvpool free=252340 biggest=252316 used=4%
+[HEAPCHK] bh:before buildContactRows heap=ok lvpool=ok free=94096 stackHWM=3988 | lvpool free=250576 biggest=250576 used=5%
+[HEAPCHK] bh:after buildContactRows  heap=ok lvpool=ok free=94096 stackHWM=3988 | lvpool free=236612 biggest=236612 used=10%
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x8 (TG1WDT_SYS_RST),boot:0x19 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x4208dd57
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce3808,len:0x4bc
+load:0x403c9700,len:0xbd8
+load:0x403cc700,len:0x2a0c
+entry 0x403c98d0
+[   866][E][Wire.cpp:137] setPins(): bus already initialized. change pins only when not.
+[RTC] begin: detected lostPower=0 hw_unix=1780425717
+E (1013) gpio: gpio_install_isr_service(450): GPIO isr service already installed
+[BOOT] *** splash wordmark image SKIPPED (diag) ***
+[HEAPCHK] after buildSplash          heap=ok lvpool=ok free=96496 stackHWM=4036 | lvpool free=255016 biggest=255004 used=3%
+[HEAPCHK] after lv_refr_now          heap=ok lvpool=ok free=94096 stackHWM=4036 | lvpool free=254956 biggest=254956 used=3%
+[HEAPCHK] after preloadRecent        heap=ok lvpool=ok free=94096 stackHWM=4036 | lvpool free=254956 biggest=254956 used=3%
+[HEAPCHK] bh:after tabview           heap=ok lvpool=ok free=94096 stackHWM=4036 | lvpool free=252340 biggest=252316 used=4%
+[HEAPCHK] bh:before buildContactRows heap=ok lvpool=ok free=94096 stackHWM=4036 | lvpool free=250576 biggest=250576 used=5%
+[HEAPCHK] bh:after buildContactRows  heap=ok lvpool=ok free=94096 stackHWM=4036 | lvpool free=236612 biggest=236612 used=10%
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x8 (TG1WDT_SYS_RST),boot:0x19 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x4208dd57
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce3808,len:0x4bc
+load:0x403c9700,len:0xbd8
+load:0x403cc700,len:0x2a0c
+entry 0x403c98d0
+[   866][E][Wire.cpp:137] setPins(): bus already initialized. change pins only when not.
+[RTC] begin: detected lostPower=0 hw_unix=1780425723
+E (1013) gpio: gpio_install_isr_service(450): GPIO isr service already installed

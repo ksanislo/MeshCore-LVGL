@@ -1,0 +1,556 @@
+diff --git a/examples/companion_radio/main.cpp b/examples/companion_radio/main.cpp
+index 19d95f15..656c5408 100644
+--- a/examples/companion_radio/main.cpp
++++ b/examples/companion_radio/main.cpp
+@@ -1,6 +1,23 @@
+ #include <Arduino.h>   // needed for PlatformIO
+ #include <Mesh.h>
+ #include "MyMesh.h"
++
++// DIAGNOSTIC: kill every watchdog so a crash breaks cleanly into JTAG instead of the hardware
++// WDT resetting first. NEVER ship this.
++#if defined(MESH_PROXY) && defined(ESP32)
++  #include "esp_task_wdt.h"
++  #include "soc/timer_group_reg.h"
++  static void killAllWatchdogs() {
++    disableCore0WDT();
++    disableCore1WDT();
++    esp_task_wdt_deinit();
++    for (int g = 0; g < 2; g++) {
++      WRITE_PERI_REG(TIMG_WDTWPROTECT_REG(g), 0x50D83AA1);
++      WRITE_PERI_REG(TIMG_WDTCONFIG0_REG(g), 0);
++      WRITE_PERI_REG(TIMG_WDTWPROTECT_REG(g), 0);
++    }
++  }
++#endif
+ #ifdef MESH_PROXY
+   // Dual-core split (CrowPanel LVGL companion): the UI talks to the mesh backend
+   // only through MeshProxy (snapshot + command/event queues). See MeshProxy.h.
+@@ -141,6 +158,9 @@ static volatile bool s_ui_ready = false;
+ 
+ void setup() {
+   Serial.begin(115200);
++#if defined(MESH_PROXY) && defined(ESP32)
++  killAllWatchdogs();   // DIAG (repro archive): WDTs OFF so the wedge HANGS for JTAG inspection
++#endif
+ #ifdef MESH_PROXY
+   // Pin the GPIO ISR service to core 0 (where meshTask runs) BEFORE any
+   // attachInterrupt, so the radio's DIO interrupt fires on core 0 -- same core as
+diff --git a/examples/companion_radio_lvgl/lv_mem_psram.h b/examples/companion_radio_lvgl/lv_mem_psram.h
+index f1596ba4..a6b17f06 100644
+--- a/examples/companion_radio_lvgl/lv_mem_psram.h
++++ b/examples/companion_radio_lvgl/lv_mem_psram.h
+@@ -8,3 +8,13 @@
+ 
+ #include <stdlib.h>            // free
+ #include "esp32-hal-psram.h"   // ps_malloc, ps_realloc (extern "C", C-safe)
++#include "esp_heap_caps.h"     // heap_caps_* (for the internal-RAM diagnostic wrappers)
++
++// DIAGNOSTIC wrappers: force LVGL allocations into INTERNAL SRAM so a JTAG data
++// watchpoint can catch heap corruption (ESP32-S3 can't watchpoint cached PSRAM).
++static inline void* lv_int_alloc(size_t s) {
++  return heap_caps_malloc(s, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
++}
++static inline void* lv_int_realloc(void* p, size_t s) {
++  return heap_caps_realloc(p, s, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
++}
+diff --git a/examples/companion_radio_lvgl/ui-lvgl/SdMessageStore.h b/examples/companion_radio_lvgl/ui-lvgl/SdMessageStore.h
+index dcf26287..2076070c 100644
+--- a/examples/companion_radio_lvgl/ui-lvgl/SdMessageStore.h
++++ b/examples/companion_radio_lvgl/ui-lvgl/SdMessageStore.h
+@@ -1,4 +1,12 @@
+ #pragma once
++#define PRELOAD_SKIP_READS 0     // reads ON
++#define PRELOAD_SKIP_PARSE 1     // B2 reliability re-test
++#define PRELOAD_SKIP_CONSIDER 0
++#define PRELOAD_SKIP_BUILD 0
++#define PRELOAD_SKIP_TAIL 0
++#define PRELOAD_SKIP_AFTER_SPLITTAIL 0  // DIAG: run strtok + splitTail, skip unescape/strtoul/build
++#define PRELOAD_SKIP_AFTER_UNESCAPE  0  // DIAG: run strtok+splitTail+unescape, skip strtoul/build
++#define PRELOAD_SKIP_AFTER_STRTOUL   0  // DIAG: run ...+strtoul, skip the recent[0] compare/build
+ 
+ #include "MessageStore.h"
+ #include <Arduino.h>
+@@ -120,7 +128,7 @@ class SdMessageStore : public MessageStore {
+     SdSvc::Lock lk;
+     FsFile f = sd.open(path, O_RDONLY);
+     if (f.isOpen()) {
+-      char line[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 48];  // 2x: escaping can double text
++      static char line[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 48];  // static: keep off the small loop-task stack
+       while (f.available()) {
+         int len = f.readBytesUntil('\n', line, sizeof(line) - 1);
+         if (len <= 0) continue;
+@@ -180,9 +188,13 @@ public:
+   void preloadRecent(MessageStore* dst, int cap) {
+     if (!SdSvc::ready() || !dst || cap <= 0) return;
+     if (cap > CAP) cap = CAP;
+-    ChatMessage* recent = (ChatMessage*)malloc(sizeof(ChatMessage) * cap);
++    // CANDIDATE FIX: force the scratch buffer to INTERNAL RAM. Plain malloc of this size
++    // (240*48 = 11.5KB > SPIRAM_MALLOC_ALWAYSINTERNAL=4096) lands in PSRAM; writing it via
++    // consider() interleaved with the SD reads is what wedges PSRAM reads at 80MHz.
++    ChatMessage* recent = (ChatMessage*)heap_caps_malloc(sizeof(ChatMessage) * cap, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+     if (!recent) return;
+     int rn = 0;  // recent[0..rn) sorted ascending by timestamp
++    int _parsed = 0;  // MITIGATION TEST: total records parsed, for periodic yields
+ 
+     auto consider = [&](const ChatMessage& m) {
+       if (rn == cap) {
+@@ -196,55 +208,76 @@ public:
+       rn++;
+     };
+ 
+-    {
+-    SdSvc::Lock lk;
+-    FsFile dir = sd.open("/chat", O_RDONLY);
+-    FsFile f;
+-    char name[80];
+-    char line[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 48];  // 2x: escaping can double text
+-    while (dir.isOpen() && f.openNext(&dir, O_RDONLY)) {
+-      if (f.isDir()) { f.close(); continue; }
+-      f.getName(name, sizeof(name));
++    // HARDWARE-QUIRK WORKAROUND: never run the per-record parse while the SD/HSPI bus is
++    // held active. Parsing interleaved with the SD reads under one bus lock reliably wedges
++    // octal-PSRAM reads at 80MHz on this board -- a memory-bus timing-margin quirk: the pool
++    // data is never corrupted, but a later PSRAM read stalls the CPU (int-WDT -> boot loop).
++    // So per file: read the tail into an INTERNAL-RAM buffer UNDER the lock, RELEASE the bus,
++    // then parse the buffer with the bus idle. (recent[] is internal too, see above.)
++    static char filebuf[CAP * 96 + 8];   // holds one file's ~cap-record tail (off the loop-task stack)
++
++    FsFile dir;
++    { SdSvc::Lock lk; dir = sd.open("/chat", O_RDONLY); }   // open dir (brief lock), then release
++    while (dir.isOpen()) {
+       char key[CHAT_PEER_NAME_MAX];
+-      copyBounded(key, name, CHAT_PEER_NAME_MAX);
+-      char* dot = strrchr(key, '.');
+-      if (dot) *dot = 0;                       // strip ".log" -> conversation key
+-      uint32_t sz = (uint32_t)f.size();
+-      uint32_t tail = (uint32_t)cap * 96;      // enough bytes for ~cap records
+-      if (sz > tail) { f.seek(sz - tail); f.readBytesUntil('\n', line, sizeof(line) - 1); }  // skip partial
+-      while (f.available()) {
+-        int len = f.readBytesUntil('\n', line, sizeof(line) - 1);
+-        if (len <= 0) continue;
+-        line[len] = 0;
++      int n = 0; bool skip_partial = false, done = false;
++      {
++        SdSvc::Lock lk;                          // bus -> SD: read this file's tail, then release
++        FsFile f;
++        if (!f.openNext(&dir, O_RDONLY)) { done = true; }
++        else if (f.isDir()) { f.close(); }       // (key stays empty -> n==0 -> parse loop is a no-op)
++        else {
++          char name[80];
++          f.getName(name, sizeof(name));
++          copyBounded(key, name, CHAT_PEER_NAME_MAX);
++          char* dot = strrchr(key, '.');
++          if (dot) *dot = 0;                     // strip ".log" -> conversation key
++          uint32_t sz = (uint32_t)f.size();
++          uint32_t tail = (uint32_t)cap * 96;    // enough bytes for ~cap records
++          if (sz > tail) { f.seek(sz - tail); skip_partial = true; }   // start mid-file -> drop first partial line
++          n = f.read((uint8_t*)filebuf, sizeof(filebuf) - 1);
++          if (n < 0) n = 0;
++          filebuf[n] = 0;
++          f.close();
++        }
++      }  // bus released (back to LoRa) -- the parse below runs with the SD bus idle
++      if (done) break;
++      char* p = filebuf;
++      if (skip_partial) { char* nl = (char*)memchr(p, '\n', n); p = nl ? nl + 1 : filebuf + n; }
++      while (*p) {                               // parse the buffered tail, bus idle
++        char* nl = strchr(p, '\n');
++        if (nl) *nl = 0;
+         char* save = nullptr;
+-        char* f_ts  = strtok_r(line, "\t", &save);
++        char* f_ts  = strtok_r(p, "\t", &save);
+         char* f_dir = strtok_r(nullptr, "\t", &save);
+         char* f_st  = strtok_r(nullptr, "\t", &save);
+         char* f_snd = strtok_r(nullptr, "\t", &save);
+-        if (!f_ts || !f_dir || !f_st || !f_snd) continue;
+-        char* f_txt; uint8_t hops; uint16_t bytes;
+-        splitTail(save, &f_txt, &hops, &bytes);   // text (+ optional hops/bytes)
+-        unescape(f_snd); unescape(f_txt);         // restore any tabs/newlines in the original
+-        uint32_t ts = (uint32_t)strtoul(f_ts, nullptr, 10);
+-        if (!ts) continue;
+-        if (rn == cap && ts <= recent[0].timestamp) continue;
+-        ChatMessage m;
+-        m.timestamp = ts;
+-        m.outgoing = (atoi(f_dir) != 0);
+-        m.status = MSG_STATUS_NONE;
+-        m.ack = 0;
+-        m.expiry_ms = 0;
+-        m.cli = 0;
+-        m.hops = hops; m.bytes = bytes;
+-        copyBounded(m.peer, key, CHAT_PEER_NAME_MAX);
+-        copyBounded(m.sender, f_snd, CHAT_PEER_NAME_MAX);
+-        copyBounded(m.text, f_txt, CHAT_MSG_TEXT_MAX);
+-        consider(m);
++        if (f_ts && f_dir && f_st && f_snd) {
++          char* f_txt; uint8_t hops; uint16_t bytes;
++          splitTail(save, &f_txt, &hops, &bytes);
++          unescape(f_snd); unescape(f_txt);
++          uint32_t ts = (uint32_t)strtoul(f_ts, nullptr, 10);
++          if (ts && !(rn == cap && ts <= recent[0].timestamp)) {
++            ChatMessage m;
++            m.timestamp = ts;
++            m.outgoing = (atoi(f_dir) != 0);
++            m.status = MSG_STATUS_NONE;
++            m.ack = 0;
++            m.expiry_ms = 0;
++            m.cli = 0;
++            m.hops = hops; m.bytes = bytes;
++            copyBounded(m.peer, key, CHAT_PEER_NAME_MAX);
++            copyBounded(m.sender, f_snd, CHAT_PEER_NAME_MAX);
++            copyBounded(m.text, f_txt, CHAT_MSG_TEXT_MAX);
++            consider(m);
++            if ((++_parsed & 7) == 0) vTaskDelay(1);   // MITIGATION TEST: break the burst -- yield every 8 records
++          }
++        }
++        if (!nl) break;
++        p = nl + 1;
+       }
+-      f.close();
+     }
+-    if (dir.isOpen()) dir.close();
+-    }  // release the bus before appending into the RAM ring
++    { SdSvc::Lock lk; if (dir.isOpen()) dir.close(); }
+ 
+     for (int i = 0; i < rn; i++)
+       dst->append(recent[i].outgoing, recent[i].peer, recent[i].sender, recent[i].text, recent[i].timestamp,
+@@ -252,6 +285,61 @@ public:
+     free(recent);
+   }
+ 
++  // DIAG: run the EXACT parse path `iters` times over a synthetic in-RAM line -- NO SD card,
++  // NO bus lock, NO file I/O. Tests whether the parser loop ITSELF triggers the PSRAM glitch.
++  static void synthParseTest(int iters) {
++    static ChatMessage recent[CAP];
++    int rn = 0, cap = CAP;
++    static char wrk[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 48];
++    for (int it = 0; it < iters; it++) {
++      strcpy(wrk, "1700000123\t0\t0\tBenderFields_Lynden\tHello there \\n this is a test message body\t3\t128");
++      char* save = nullptr;
++      char* f_ts  = strtok_r(wrk, "\t", &save);
++      char* f_dir = strtok_r(nullptr, "\t", &save);
++      char* f_st  = strtok_r(nullptr, "\t", &save);
++      char* f_snd = strtok_r(nullptr, "\t", &save);
++      if (!f_ts || !f_dir || !f_st || !f_snd) continue;
++      char* f_txt; uint8_t hops; uint16_t bytes;
++      splitTail(save, &f_txt, &hops, &bytes);
++      unescape(f_snd); unescape(f_txt);
++      // SCATTERED timestamps (pseudo-random) so the insertion-sort below shifts a lot,
++      // like real out-of-order log data does -- this is the path real preload exercises.
++      uint32_t ts = (uint32_t)strtoul(f_ts, nullptr, 10) + ((uint32_t)it * 2654435761u) % 100000u;
++      ChatMessage m;
++      m.timestamp = ts; m.outgoing = (atoi(f_dir) != 0); m.status = MSG_STATUS_NONE;
++      m.ack = 0; m.expiry_ms = 0; m.cli = 0; m.hops = hops; m.bytes = bytes;
++      copyBounded(m.peer, "synthpeer", CHAT_PEER_NAME_MAX);
++      copyBounded(m.sender, f_snd, CHAT_PEER_NAME_MAX);
++      copyBounded(m.text, f_txt, CHAT_MSG_TEXT_MAX);
++      // EXACT consider() insertion-sort (240-byte struct memmoves):
++      if (rn == cap) { if (m.timestamp <= recent[0].timestamp) continue; for (int i = 1; i < cap; i++) recent[i-1] = recent[i]; rn = cap - 1; }
++      int i = rn;
++      while (i > 0 && recent[i-1].timestamp > m.timestamp) { recent[i] = recent[i-1]; i--; }
++      recent[i] = m; rn++;
++    }
++    asm volatile("" : : "r"(&recent[0]) : "memory");  // keep the loop from being optimized away
++  }
++
++  // DIAG: read every /chat file's tail into a discard buffer -- real SD I/O, NO parse.
++  void synthReadTest() {
++    if (!SdSvc::ready()) return;
++    static char buf[CAP * 96 + 8];
++    FsFile dir;
++    { SdSvc::Lock lk; dir = sd.open("/chat", O_RDONLY); }
++    while (dir.isOpen()) {
++      bool done = false;
++      { SdSvc::Lock lk; FsFile f;
++        if (!f.openNext(&dir, O_RDONLY)) done = true;
++        else if (f.isDir()) f.close();
++        else { uint32_t sz = (uint32_t)f.size(); uint32_t tail = (uint32_t)CAP * 96;
++               if (sz > tail) f.seek(sz - tail); f.read((uint8_t*)buf, sizeof(buf) - 1); f.close(); }
++      }
++      if (done) break;
++    }
++    { SdSvc::Lock lk; if (dir.isOpen()) dir.close(); }
++    asm volatile("" : : "r"(&buf[0]) : "memory");
++  }
++
+   // Unmount the shared card (e.g. when the user disables history).
+   void end() {
+     SdSvc::end();
+@@ -266,7 +354,7 @@ public:
+     if (ensure()) {
+       // Build the whole record, then write it in one go and verify every byte
+       // landed -- a full card silently short-writes, so check the count.
+-      char rec[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 64];  // 2x: escaping can double text
++      static char rec[2 * CHAT_MSG_TEXT_MAX + CHAT_PEER_NAME_MAX + 64];  // static: keep off the stack (UI-core only)
+       int o = snprintf(rec, sizeof(rec), "%lu\t%d\t%u\t",
+                        (unsigned long)ts, outgoing ? 1 : 0, (unsigned)status);
+       o += copyEscaped(rec + o, sizeof(rec) - o, sender);
+diff --git a/examples/companion_radio_lvgl/ui-lvgl/UITask.cpp b/examples/companion_radio_lvgl/ui-lvgl/UITask.cpp
+index f597ac67..58fe112b 100644
+--- a/examples/companion_radio_lvgl/ui-lvgl/UITask.cpp
++++ b/examples/companion_radio_lvgl/ui-lvgl/UITask.cpp
+@@ -103,6 +103,7 @@ void UITask::touchTaskFn(void* arg) {
+ }
+ 
+ static void sanitizeForFont(const char* in, char* out, size_t cap);
++static void HEAPCHK(const char* where);   // DIAG: fwd decl (defined far below) for early probes
+ static bool containsCI(const char* hay, const char* needle);
+ static void firstGrapheme(const char* in, char* out, size_t cap);  // first UTF-8 codepoint (avatar glyph)
+ static const lv_font_t* withEmoji(const lv_font_t* base);  // base font + emoji/unicode fallback
+@@ -322,6 +323,10 @@ static lv_obj_t* attachScrollHandle(lv_obj_t* content) {
+ lv_obj_t* UITask::buildSplashScreen() {
+   lv_obj_t* scr = lv_obj_create(NULL);
+   styleAsDarkScreen(scr);
++#if 1  // DIAG: splash logo image neutralized -> does rendering it latently corrupt the pool?
++  Serial.println("[BOOT] *** splash wordmark image SKIPPED (diag) ***");
++  return scr;
++#else
+ 
+   // Resolution-independent wordmark: one high-res alpha master (600x67) scaled to
+   // ~62% of the screen width via zoom, tinted with the recolorable UI_LOGO token.
+@@ -330,14 +335,17 @@ lv_obj_t* UITask::buildSplashScreen() {
+   lv_img_set_src(wordmark, &meshcore_logo_alpha);
+   int target_w = (lv_disp_get_hor_res(NULL) * 80) / 100;
+   uint16_t zoom = (uint16_t)((256 * target_w) / meshcore_logo_alpha.header.w);
+-  lv_img_set_zoom(wordmark, zoom);
++  lv_img_set_zoom(wordmark, 256);   // DIAG: LV_IMG_ZOOM_NONE -> skip lv_draw_transform entirely
++  lv_img_set_antialias(wordmark, false);
+   lv_img_set_pivot(wordmark, meshcore_logo_alpha.header.w / 2,
+                    meshcore_logo_alpha.header.h / 2);
+-  lv_obj_set_style_img_recolor(wordmark, lv_color_hex(UI_LOGO), 0);
+-  lv_obj_set_style_img_recolor_opa(wordmark, LV_OPA_COVER, 0);
++  // DIAG: recolor disabled (crash was in lv_color_mix_premult)
++  // lv_obj_set_style_img_recolor(wordmark, lv_color_hex(UI_LOGO), 0);
++  // lv_obj_set_style_img_recolor_opa(wordmark, LV_OPA_COVER, 0);
+   lv_obj_align(wordmark, LV_ALIGN_CENTER, 0, 0);
+ 
+   return scr;
++#endif
+ }
+ 
+ static constexpr int HEADER_H     = 48;
+@@ -449,14 +457,17 @@ lv_obj_t* UITask::buildHomeScreen() {
+   _header_logo = lv_img_create(header);
+   lv_img_set_src(_header_logo, &meshcore_logo_alpha);
+   uint16_t hzoom = (uint16_t)((256 * 16) / meshcore_logo_alpha.header.h);
+-  lv_img_set_zoom(_header_logo, hzoom);
++  lv_img_set_zoom(_header_logo, 256);   // DIAG: LV_IMG_ZOOM_NONE -> skip lv_draw_transform entirely
++  lv_img_set_antialias(_header_logo, false);
+   lv_img_set_pivot(_header_logo, 0, meshcore_logo_alpha.header.h / 2);
+-  lv_obj_set_style_img_recolor(_header_logo, lv_color_hex(UI_LOGO), 0);
+-  lv_obj_set_style_img_recolor_opa(_header_logo, LV_OPA_COVER, 0);
++  // DIAG: recolor disabled (crash was in lv_color_mix_premult)
++  // lv_obj_set_style_img_recolor(_header_logo, lv_color_hex(UI_LOGO), 0);
++  // lv_obj_set_style_img_recolor_opa(_header_logo, LV_OPA_COVER, 0);
+   lv_obj_align(_header_logo, LV_ALIGN_LEFT_MID, 4, 0);
+ 
+   // Live device clock (right side of the header), updated once a second in loop().
+   _clock_label = lv_label_create(header);
++  lv_label_set_recolor(_clock_label, true);   // lets the blink hide just the ':' (bg-colored, same width)
+   lv_label_set_text(_clock_label, "--");
+   lv_obj_set_style_text_color(_clock_label, lv_color_hex(DIM_HEX), 0);
+   lv_obj_set_style_text_font(_clock_label, &lv_font_montserrat_14, 0);
+@@ -514,6 +525,7 @@ lv_obj_t* UITask::buildHomeScreen() {
+     lv_obj_set_style_bg_color(page, lv_color_hex(BG_HEX), 0);
+     lv_obj_set_style_bg_opa(page, LV_OPA_COVER, 0);
+   }
++  HEAPCHK("bh:after tabview");
+ 
+   // ----- Contacts tab: fixed search/filter band + the virtualized ContactListView -----
+   lv_obj_set_style_pad_all(_tab_contacts, 0, 0);
+@@ -553,7 +565,9 @@ lv_obj_t* UITask::buildHomeScreen() {
+   lv_label_set_text(fbl, LV_SYMBOL_LIST);
+   lv_obj_center(fbl);
+ 
++  HEAPCHK("bh:before buildContactRows");
+   buildContactRows(_tab_contacts);
++  HEAPCHK("bh:after buildContactRows");
+ 
+   // Search keyboard (hidden; overlays the home screen, like the settings one).
+   _contacts_kb = lv_keyboard_create(scr);
+@@ -573,8 +587,10 @@ lv_obj_t* UITask::buildHomeScreen() {
+   lv_obj_set_style_border_width(_channels_list, 0, 0);
+   lv_obj_set_style_pad_row(_channels_list, 0, 0);
+ 
++  HEAPCHK("bh:after channels");
+   // ----- Settings tab -----
+   buildSettingsTab(scr);
++  HEAPCHK("bh:after buildSettingsTab");
+ 
+   return scr;
+ }
+@@ -3590,6 +3606,62 @@ void UITask::reportCrashIfAny() {
+   if (wrote) snprintf(_crash_note, sizeof(_crash_note), LV_SYMBOL_WARNING " Crash report: %s", where);
+ }
+ 
++// DIAGNOSTIC: scan the whole heap for corruption and report. Used to bisect the old-logs
++// boot loop -- the first "CORRUPT" pinpoints the step that trashed the heap.
++static bool s_lv_ready = false;   // lv_init() done -> lv_mem_test is safe to call
++static void HEAPCHK(const char* where) {
++  bool ok = heap_caps_check_integrity_all(false);     // IDF heaps (internal + PSRAM)
++  const char* lv = s_lv_ready ? (lv_mem_test() == LV_RES_OK ? "ok" : "*CORRUPT*") : "n/a";
++  lv_mem_monitor_t mon{};
++  if (s_lv_ready) lv_mem_monitor(&mon);
++  Serial.printf("[HEAPCHK] %-26s heap=%s lvpool=%s free=%u stackHWM=%u | lvpool free=%u biggest=%u used=%u%%\n",
++                where, ok ? "ok" : "*CORRUPT*", lv,
++                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
++                (unsigned)uxTaskGetStackHighWaterMark(NULL),
++                (unsigned)mon.free_size, (unsigned)mon.free_biggest_size, (unsigned)mon.used_pct);
++  Serial.flush();
++}
++
++// DIAG: ESP32-S3 ROM cache maintenance (mitigation test #2).
++extern "C" { void Cache_WriteBack_All(void); void Cache_Invalidate_DCache_All(void); }
++// DIAG: hardware core-stall (experiment A: prove the wedge is core-1-local).
++extern "C" { void esp_cpu_stall(int cpu_id); void esp_cpu_unstall(int cpu_id); }
++
++// DIAG: verify the "preload doesn't touch the PSRAM pool" assumption empirically.
++// Snapshot the PSRAM heap region (covers the LVGL pool) by per-chunk hash; nothing
++// legitimately writes PSRAM during preload (LVGL loop not running, mesh gated), so any
++// changed chunk == preload wrote PSRAM. CPU reads (not JTAG) so PSRAM cache is fine.
++#define PSNAP_BASE   0x3d880000u   // LVGL pool region (pool base ~0x3d880800)
++#define PSNAP_CHUNKS 64
++#define PSNAP_CHUNK  4096u         // 256KB -- whole pool, so a layout shift can't move the stall out of view
++static uint32_t s_psnap_pre[PSNAP_CHUNKS];
++static uint32_t psnapChunk(uint32_t base, uint32_t len) {
++  const volatile uint32_t* p = (const volatile uint32_t*)base;
++  uint32_t h = 2166136261u, n = len / 4;
++  for (uint32_t i = 0; i < n; i++) { h ^= p[i]; h *= 16777619u; }
++  return h;
++}
++static void psnapTake(uint32_t* out) {
++  for (int i = 0; i < PSNAP_CHUNKS; i++) {
++    Serial.printf("[PSNAP] read chunk %d @0x%08x\n", i, PSNAP_BASE + (unsigned)i * PSNAP_CHUNK);
++    Serial.flush();
++    vTaskDelay(1);   // feed WDTs; if a read STALLS this won't help -> last printed addr is the stall
++    out[i] = psnapChunk(PSNAP_BASE + (uint32_t)i * PSNAP_CHUNK, PSNAP_CHUNK);
++  }
++}
++static void psnapDiff(const char* what) {
++  uint32_t post[PSNAP_CHUNKS]; psnapTake(post);
++  int changed = 0;
++  for (int i = 0; i < PSNAP_CHUNKS; i++)
++    if (post[i] != s_psnap_pre[i]) {
++      Serial.printf("[PSNAP] PSRAM @0x%08x (chunk %d) CHANGED during %s\n",
++                    PSNAP_BASE + (unsigned)i * PSNAP_CHUNK, i, what);
++      changed++;
++    }
++  Serial.printf("[PSNAP] %s: %d/%d PSRAM chunks changed\n", what, changed, PSNAP_CHUNKS);
++  Serial.flush();
++}
++
+ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs) {
+   _sensors = sensors;
+   // UI-owned working copy of prefs; edits push CMD_UpdatePrefs and the snapshot
+@@ -3607,11 +3679,11 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
+   if (!_node_prefs || _node_prefs->persist_history) _msgs = &_sdmsgs;
+ #endif
+   _msgs->begin();  // mounts the SD card (SD store) or no-ops (RAM store)
+-#ifdef HAS_SD_CARD
+-  // Seed the RAM ring with recent history so disabling/ejecting the card later
+-  // keeps recent messages visible without a gap.
+-  if (_msgs == &_sdmsgs) _sdmsgs.preloadRecent(&_rammsgs, CHAT_HISTORY_CAP);
+-#endif
++  // NOTE: history preload (preloadRecent) is deliberately deferred to *after* the LVGL
++  // display + draw_ctx are registered and the splash is rendered (see below). Doing SD
++  // file I/O before lv_init() perturbed the heap layout enough that the display's draw_ctx
++  // came up zeroed -> the splash image blit ran on a degenerate area and wedged core 1
++  // (interrupt-WDT reboot, only when chat logs were present). Display first, then preload.
+ 
+   // Restore the saved contacts sort/filter (0xFF = unset -> keep code defaults).
+   if (_node_prefs) {
+@@ -3654,6 +3726,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
+   _screen_h = _lgfx->height();
+ 
+   lv_init();
++  s_lv_ready = true;   // lv_mem_test() now valid
+ #ifdef HAS_SD_CARD
+   SdSvc::registerFs();   // 'S:' lv_fs driver for SD-backed images (emoji); needs lv_init first
+ #endif
+@@ -3705,11 +3778,36 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
+   }
+ 
+   _splash_screen = buildSplashScreen();
++  HEAPCHK("after buildSplash");
+   lv_scr_load(_splash_screen);    // show the splash NOW, before the slow home build...
+   lv_refr_now(NULL);              // ...and force it onto the panel this instant (loop isn't running yet)
++  HEAPCHK("after lv_refr_now");
++#ifdef HAS_SD_CARD
++  // Seed the RAM ring with recent history so disabling/ejecting the card later keeps recent
++  // messages visible without a gap. Deferred to here (post display+splash) on purpose -- see
++  // the begin()-time note above. Must still precede buildHomeScreen/rebuildContactsList, which
++  // sort contacts by latest-message timestamp.
++  // SYNTHETIC PARSE TEST: NO SD at all -- just run the parser loop over in-RAM data, then
++  // probe PSRAM. If this wedges, the parser loop itself is the trigger (SD is irrelevant).
++  if (_msgs == &_sdmsgs) _sdmsgs.preloadRecent(&_rammsgs, CHAT_HISTORY_CAP);   // the trigger
++  // PSRAM-stall PROBE: stall core0, then read the whole 256KB LVGL pool on core1. On the
++  // corrupt card this load WEDGES (int-WDT/TG1 -> reset, or hang under JTAG); on clean data
++  // it prints COMPLETED. This is the canonical pass/fail signal for this archive's repro.
++  Serial.println("[PROBE] post-preload: stall core0 + read 256KB pool..."); Serial.flush();
++  esp_cpu_stall(0);
++  { volatile uint32_t acc = 0;
++    for (uint32_t off = 0; off < 256u*1024u; off += 4) acc ^= *(volatile uint32_t*)(0x3d880000u + off);
++    esp_cpu_unstall(0);
++    Serial.printf("[PROBE] pool read COMPLETED acc=%08x -> NOT poisoned this boot\n", (unsigned)acc); Serial.flush();
++  }
++  HEAPCHK("after preloadRecent");
++#endif
+   _home_screen   = buildHomeScreen();
++  HEAPCHK("after buildHome");
+   rebuildContactsList();
++  HEAPCHK("after rebuildContacts");
+   rebuildChannelsList();
++  HEAPCHK("after rebuildChannels");
+ 
+   // Auto-dismiss splash after a brief dwell. Single-shot via lv_timer_del.
+   lv_timer_t* t = lv_timer_create(splash_dismiss_cb, 2500, this);
+@@ -10219,6 +10317,7 @@ void UITask::loop() {
+       }
+       strncpy(_clock_text, buf, sizeof(_clock_text) - 1); _clock_text[sizeof(_clock_text) - 1] = 0;
+       lv_label_set_text(_clock_label, buf);
++      _clock_blink = 0xFF;   // force the blink block below to reassert the colon phase this frame
+       if (_sig_meter) {   // re-anchor to the (re-sized) clock, then update the bars
+         lv_obj_align_to(_sig_meter, _clock_label, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+         refreshSignalMeter();
+@@ -10233,15 +10332,23 @@ void UITask::loop() {
+     }
+   }
+ 
+-  // Heartbeat: blink the clock colon at ~1 Hz, driven by the loop itself (not a strftime tick).
+-  // If the UI thread ever hard-freezes, the colon stops toggling -- a glance tells live vs wedged.
++  // Heartbeat: blink the clock colon, 1 s on / 1 s off, driven by the loop itself (not a strftime
++  // tick). If the UI thread ever hard-freezes, the colon stops toggling -- a glance tells live vs
++  // wedged. Off-phase hides the ':' by recoloring it to the header bg (same glyph width, no jiggle)
++  // rather than swapping in a space (which differs in width on this proportional font).
+   if (_clock_label && _clock_text[0]) {
+-    uint8_t phase = (uint8_t)((now / 500) & 1);
++    uint8_t phase = (uint8_t)((now / 1000) & 1);   // 0 = colon shown, 1 = colon hidden
+     if (phase != _clock_blink) {
+       _clock_blink = phase;
+-      char b[16]; strncpy(b, _clock_text, sizeof(b) - 1); b[sizeof(b) - 1] = 0;
+-      if (phase) { char* c = strchr(b, ':'); if (c) *c = ' '; }   // hide the colon on the off phase
+-      lv_label_set_text(_clock_label, b);
++      const char* c = phase ? strchr(_clock_text, ':') : nullptr;
++      if (c) {
++        char b[40];
++        snprintf(b, sizeof(b), "%.*s\x01%06X :\x01%s", (int)(c - _clock_text), _clock_text,
++                 (unsigned)(UI_SURFACE & 0xFFFFFF), c + 1);   // ':' recolored to the header surface
++        lv_label_set_text(_clock_label, b);
++      } else {
++        lv_label_set_text(_clock_label, _clock_text);         // colon shown (on phase / no colon)
++      }
+     }
+   }
+ 
+diff --git a/variants/elecrow_crowpanel_advance_35/target.cpp b/variants/elecrow_crowpanel_advance_35/target.cpp
+index 94bba9a2..7e1a1aa3 100644
+--- a/variants/elecrow_crowpanel_advance_35/target.cpp
++++ b/variants/elecrow_crowpanel_advance_35/target.cpp
+@@ -63,7 +63,6 @@ void sd_bus_to_lora() { lora_spi.end(); lora_spi.begin(P_LORA_SCLK, P_LORA_MISO,
+ bool sd_card_begin() {
+   sd_bus_to_sd();
+   sd.end();   // clean (re)mount -- lets a re-inserted card be picked up
+-  // SHARED_SPI: SdFat re-acquires the bus per access, matching our re-pin model.
+   bool ok = sd.begin(SdSpiConfig(PIN_SD_CS, SHARED_SPI, SD_SCK_MHZ(20), &lora_spi));
+   sd_bus_to_lora();
+   return ok;

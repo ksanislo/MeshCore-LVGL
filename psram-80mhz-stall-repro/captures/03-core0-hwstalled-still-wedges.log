@@ -1,0 +1,103 @@
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x3 (RTC_SW_SYS_RST),boot:0x19 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x40381e6e
+pro cpu reset by JTAG
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce3808,len:0x4bc
+load:0x403c9700,len:0xbd8
+load:0x403cc700,len:0x2a0c
+entry 0x403c98d0
+[   751][E][esp32-hal-misc.c:143] disableCore1WDT(): Failed to remove Core 1 IDLE task from WDT
+[  1153][E][Wire.cpp:137] setPins(): bus already initialized. change pins only when not.
+[RTC] begin: detected lostPower=0 hw_unix=1780423552
+E (1022) gpio: gpio_install_isr_service(450): GPIO isr service already installed
+[BOOT] *** splash wordmark image SKIPPED (diag) ***
+[HEAPCHK] after buildSplash          heap=ok lvpool=ok free=100372 stackHWM=3972 | lvpool free=255016 biggest=255004 used=3%
+[HEAPCHK] after lv_refr_now          heap=ok lvpool=ok free=97972 stackHWM=3972 | lvpool free=254956 biggest=254956 used=3%
+[HEAPCHK] before preloadRecent       heap=ok lvpool=ok free=97972 stackHWM=3972 | lvpool free=254956 biggest=254956 used=3%
+[PROBE] PRE-preload pool scan:
+[PSNAP] read chunk 0 @0x3d880000
+[PSNAP] read chunk 1 @0x3d881000
+[PSNAP] read chunk 2 @0x3d882000
+[PSNAP] read chunk 3 @0x3d883000
+[PSNAP] read chunk 4 @0x3d884000
+[PSNAP] read chunk 5 @0x3d885000
+[PSNAP] read chunk 6 @0x3d886000
+[PSNAP] read chunk 7 @0x3d887000
+[PSNAP] read chunk 8 @0x3d888000
+[PSNAP] read chunk 9 @0x3d889000
+[PSNAP] read chunk 10 @0x3d88a000
+[PSNAP] read chunk 11 @0x3d88b000
+[PSNAP] read chunk 12 @0x3d88c000
+[PSNAP] read chunk 13 @0x3d88d000
+[PSNAP] read chunk 14 @0x3d88e000
+[PSNAP] read chunk 15 @0x3d88f000
+[PSNAP] read chunk 16 @0x3d890000
+[PSNAP] read chunk 17 @0x3d891000
+[PSNAP] read chunk 18 @0x3d892000
+[PSNAP] read chunk 19 @0x3d893000
+[PSNAP] read chunk 20 @0x3d894000
+[PSNAP] read chunk 21 @0x3d895000
+[PSNAP] read chunk 22 @0x3d896000
+[PSNAP] read chunk 23 @0x3d897000
+[PSNAP] read chunk 24 @0x3d898000
+[PSNAP] read chunk 25 @0x3d899000
+[PSNAP] read chunk 26 @0x3d89a000
+[PSNAP] read chunk 27 @0x3d89b000
+[PSNAP] read chunk 28 @0x3d89c000
+[PSNAP] read chunk 29 @0x3d89d000
+[PSNAP] read chunk 30 @0x3d89e000
+[PSNAP] read chunk 31 @0x3d89f000
+[PSNAP] read chunk 32 @0x3d8a0000
+[PSNAP] read chunk 33 @0x3d8a1000
+[PSNAP] read chunk 34 @0x3d8a2000
+[PSNAP] read chunk 35 @0x3d8a3000
+[PSNAP] read chunk 36 @0x3d8a4000
+[PSNAP] read chunk 37 @0x3d8a5000
+[PSNAP] read chunk 38 @0x3d8a6000
+[PSNAP] read chunk 39 @0x3d8a7000
+[PSNAP] read chunk 40 @0x3d8a8000
+[PSNAP] read chunk 41 @0x3d8a9000
+[PSNAP] read chunk 42 @0x3d8aa000
+[PSNAP] read chunk 43 @0x3d8ab000
+[PSNAP] read chunk 44 @0x3d8ac000
+[PSNAP] read chunk 45 @0x3d8ad000
+[PSNAP] read chunk 46 @0x3d8ae000
+[PSNAP] read chunk 47 @0x3d8af000
+[PSNAP] read chunk 48 @0x3d8b0000
+[PSNAP] read chunk 49 @0x3d8b1000
+[PSNAP] read chunk 50 @0x3d8b2000
+[PSNAP] read chunk 51 @0x3d8b3000
+[PSNAP] read chunk 52 @0x3d8b4000
+[PSNAP] read chunk 53 @0x3d8b5000
+[PSNAP] read chunk 54 @0x3d8b6000
+[PSNAP] read chunk 55 @0x3d8b7000
+[PSNAP] read chunk 56 @0x3d8b8000
+[PSNAP] read chunk 57 @0x3d8b9000
+[PSNAP] read chunk 58 @0x3d8ba000
+[PSNAP] read chunk 59 @0x3d8bb000
+[PSNAP] read chunk 60 @0x3d8bc000
+[PSNAP] read chunk 61 @0x3d8bd000
+[PSNAP] read chunk 62 @0x3d8be000
+[PSNAP] read chunk 63 @0x3d8bf000
+[PRELOAD] >>> file=7BEAC6073EC6.log sz=2579 rn=0
+[PRELOAD] <<< file=7BEAC6073EC6.log recs=73 rn=48
+[PRELOAD] >>> file=ch_000000000000.log sz=90 rn=48
+[PRELOAD] <<< file=ch_000000000000.log recs=3 rn=48
+[PRELOAD] >>> file=ch_4DD75E2D5BAE.log sz=735 rn=48
+[PRELOAD] <<< file=ch_4DD75E2D5BAE.log recs=21 rn=48
+[PRELOAD] >>> file=ch_8B3387E9C5CD.log sz=79391 rn=48
+[PRELOAD] <<< file=ch_8B3387E9C5CD.log recs=57 rn=48
+[PRELOAD] >>> file=ch_9CD8FCF22A47.log sz=464 rn=48
+[PRELOAD] <<< file=ch_9CD8FCF22A47.log recs=10 rn=48
+[PRELOAD] >>> file=ch_CDE5E82CF515.log sz=3720 rn=48
+[PRELOAD] <<< file=ch_CDE5E82CF515.log recs=3 rn=48
+[PRELOAD] >>> file=ch_FD2931E0DD57.log sz=55 rn=48
+[PRELOAD] <<< file=ch_FD2931E0DD57.log recs=1 rn=48
+[PRELOAD] >>> file=DD7AE62BF96A.log sz=459 rn=48
+[PRELOAD] <<< file=DD7AE62BF96A.log recs=0 rn=48
+[PRELOAD] >>> file=E59DF8DC4BE5.log sz=81 rn=48
+[PRELOAD] <<< file=E59DF8DC4BE5.log recs=0 rn=48
+[PROBE] A: hardware-stalling core0, then silent 256KB pool read on core1...

@@ -1,0 +1,12 @@
+1780102766	1	0	Me	get radio
+1780102767	0	0	Daleway Park	> 910.5250244,62.5,7,8
+1780128314	1	0	Me	get radio
+1780128315	0	0	Daleway Park	> 910.5250244,62.5,7,8
+1780300580	1	0	Me	get repeat
+1780300581	0	0	Daleway Park	> on
+1780300597	1	0	Me	repeat off
+1780300598	0	0	Daleway Park	Unknown command
+1780300608	1	0	Me	set repeat off
+1780300610	0	0	Daleway Park	OK - repeat is now OFF
+1780301001	1	0	Me	set repeat on
+1780301003	0	0	Daleway Park	OK - repeat is now ON

@@ -1,0 +1,16 @@
+Required /chat/ directory CREATION order to re-arm the bug (SdFat enumerates in
+directory-entry order, NOT alphabetical). Clear /chat first, then copy in EXACTLY
+this order (cp one at a time, sync between):
+
+  1. 7BEAC6073EC6.log      (DM log, 73 records -- MUST be read first, into an empty buffer)
+  2. ch_000000000000.log
+  3. ch_4DD75E2D5BAE.log
+  4. ch_8B3387E9C5CD.log    (79391 bytes, the large channel log)
+  5. ch_9CD8FCF22A47.log
+  6. ch_CDE5E82CF515.log
+  7. ch_FD2931E0DD57.log
+  8. DD7AE62BF96A.log
+  9. E59DF8DC4BE5.log
+
+NOTE: do NOT let any other file (e.g. a stray newlogs.zip) land in /chat -- it
+changes enumeration order. Verify with `ls -la` that 7BEAC6073EC6.log is first.
