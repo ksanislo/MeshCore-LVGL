@@ -1,7 +1,33 @@
 #include "CrowPanelBoard.h"
 
+// Deterministic GT911 power-on reset. The controller latches BOTH its I2C slave
+// address and its startup state from the INT line level at the moment RST is
+// released. LovyanGFX's Touch_GT911::init() pulses only RST and leaves INT
+// floating, so it occasionally comes up ACKing I2C but never asserting data-ready
+// -- touch is then dead with no recovery (the second lgfx.init() in
+// ui_task.begin() early-returns once _inited latched true). We do the reset here,
+// before display.begin(), with the datasheet INT/RST timing and INT held HIGH at
+// the RST rising edge to select addr 0x14 (matching CrowPanelLGFX's touch config).
+static void gt911_reset() {
+  pinMode(PIN_TOUCH_RST, OUTPUT);
+  pinMode(PIN_TOUCH_INT, OUTPUT);
+  digitalWrite(PIN_TOUCH_RST, LOW);    // assert reset
+  digitalWrite(PIN_TOUCH_INT, LOW);
+  delay(11);                           // hold in reset (>10 ms)
+  digitalWrite(PIN_TOUCH_INT, HIGH);   // INT high at release -> I2C addr 0x14
+  delayMicroseconds(120);              // >100 us of INT setup before release
+  digitalWrite(PIN_TOUCH_RST, HIGH);   // release reset; address/state latch now
+  delay(6);                            // hold INT through the latch window (>5 ms)
+  digitalWrite(PIN_TOUCH_INT, LOW);
+  delay(55);                           // firmware boot (>50 ms) before first I2C
+  pinMode(PIN_TOUCH_INT, INPUT);       // hand INT back as the interrupt line
+}
+
 void CrowPanelBoard::begin() {
   ESP32Board::begin();
+
+  // Bring the touch controller up deterministically before anything probes it.
+  gt911_reset();
 
   pinMode(PIN_LORA_MIC_MUX, OUTPUT);
   digitalWrite(PIN_LORA_MIC_MUX, LOW);

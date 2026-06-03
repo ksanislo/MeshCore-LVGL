@@ -47,6 +47,16 @@
   #define PIN_I2S_DOUT 12
 #endif
 
+// GT911 capacitive touch control lines (the I2C data pins live in target.h as
+// P_TOUCH_SDA/SCL). We reset the controller ourselves in begin() with correct
+// INT/RST timing, so RST is -1 in the LovyanGFX touch config.
+#ifndef PIN_TOUCH_INT
+  #define PIN_TOUCH_INT 47
+#endif
+#ifndef PIN_TOUCH_RST
+  #define PIN_TOUCH_RST 48
+#endif
+
 // microSD slot (SPI). Wired to its own pin set, separate from the display (SPI2)
 // and LoRa (HSPI) buses.
 #ifndef PIN_SD_SCK

@@ -74,7 +74,12 @@ public:
       cfg.y_min       = 0;
       cfg.y_max       = native_h - 1;
       cfg.pin_int     = 47;
-      cfg.pin_rst     = 48;
+      // RST is owned by CrowPanelBoard::begin(), which resets the GT911 with the
+      // proper INT/RST address-select timing BEFORE this init runs. Leaving it -1
+      // here stops LovyanGFX from re-pulsing RST with INT uncontrolled (lines 59-65
+      // of Touch_GT911.cpp), which otherwise re-opens the power-up race that
+      // occasionally leaves the controller ACKing I2C but never reporting touch.
+      cfg.pin_rst     = -1;
       cfg.bus_shared  = false;
       cfg.offset_rotation = 0;
       cfg.i2c_port    = 0;
