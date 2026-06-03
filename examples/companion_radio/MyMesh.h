@@ -163,6 +163,8 @@ protected:
   char _ota_status[48] = "idle";      // last OTA result/progress, for the UI
   volatile bool _ota_busy = false;    // an OTA task is running (one at a time)
   volatile bool _ota_cancel = false;  // UI requested abort -> the download loop bails (inactive slot only)
+  void* volatile _ota_client = nullptr;  // active download WiFiClient (void* to keep WiFi out of the
+                                         // header); cancelOta() stop()s it to abort a blocked connect/read
   static void otaTaskTramp(void* arg); // FreeRTOS entry -> otaFromUrl() on its own task
   void startWifi();
   void stopWifi();

@@ -496,7 +496,15 @@ void MyMesh::getOtaStatus(char* out, size_t cap) {
 // Request the running download abort. Safe: the image streams into the INACTIVE app slot and
 // the boot partition only flips at Update.end(true) -- which we never reach when cancelled --
 // so the live firmware is untouched. The download loop notices the flag and tears down cleanly.
-void MyMesh::cancelOta() { if (_ota_busy) _ota_cancel = true; }
+void MyMesh::cancelOta() {
+  if (!_ota_busy) return;
+  _ota_cancel = true;
+  // A flag alone can't break a task blocked inside a socket connect/read, so forcibly stop the
+  // active client -- that makes the blocked call return an error and the task bails on the next
+  // _ota_cancel check. (No-op if we're between phases with no client set.)
+  WiFiClient* c = (WiFiClient*)_ota_client;
+  if (c) c->stop();
+}
 
 // FreeRTOS entry: run the (blocking) download on its own task so the mesh keeps running.
 void MyMesh::otaTaskTramp(void* arg) {
@@ -534,11 +542,29 @@ void MyMesh::otaFromUrl() {
   auto set = [this](const char* m) { strncpy(_ota_status, m, sizeof(_ota_status) - 1); _ota_status[sizeof(_ota_status) - 1] = 0; };
   // Any failure path: set the status AND fire the UI hook so an on-device modal can warn the
   // user (we don't reboot on failure, so a walked-away user would otherwise see nothing).
-  auto fail = [this, &set](const char* m) { set(m); if (_ui) _ui->otaFailed(m); };
+  auto fail = [this, &set](const char* m) { _ota_client = nullptr; set(m); if (_ui) _ui->otaFailed(m); };
   const char* url = getNodePrefs()->ota_url;
   if (!url[0])                         { fail("no URL set"); return; }
   if (WiFi.status() != WL_CONNECTED)   { fail("no WiFi"); return; }
   if (_ota_cancel)                     { set("cancelled"); return; }  // cancelled before we even connect
+
+  // Bounded pre-resolve. HTTPClient's own name lookup is NOT bounded by setConnectTimeout and can
+  // hang effectively forever on a bad / mDNS (.local) host -> the "connecting..." wedge. Resolve
+  // here first (lwIP DNS has its own finite timeout, and mDNS its own), so an unresolvable name
+  // fails fast and frees the slot; on success the name is cached so begin()'s resolve is instant.
+  // (An IP literal resolves trivially.) The host is the same for the .md5 and the image.
+  set("resolving...");
+  {
+    char host[80]; host[0] = 0;
+    const char* hp = strstr(url, "://");
+    if (hp) { hp += 3; size_t i = 0;
+      while (hp[i] && hp[i] != '/' && hp[i] != ':' && i < sizeof(host) - 1) { host[i] = hp[i]; i++; }
+      host[i] = 0;
+    }
+    IPAddress rip;
+    if (host[0] && !WiFi.hostByName(host, rip)) { fail("can't resolve host"); return; }
+  }
+  if (_ota_cancel)                     { set("cancelled"); return; }
 
   bool https = (strncmp(url, "https://", 8) == 0);
 
@@ -553,6 +579,8 @@ void MyMesh::otaFromUrl() {
     if (https) mtls.setInsecure();
     HTTPClient mh; mh.setTimeout(8000); mh.setConnectTimeout(8000);   // bound connect/DNS too, not just reads
     mh.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    set("checking version...");
+    _ota_client = (void*)(https ? (WiFiClient*)&mtls : (WiFiClient*)&mplain);   // cancel can stop this GET
     if ((https ? mh.begin(mtls, murl) : mh.begin(mplain, murl)) && mh.GET() == HTTP_CODE_OK) {
       String s = mh.getString();
       int n = 0;                         // take the first 32 hex chars (bare hash or md5sum-style)
@@ -567,6 +595,7 @@ void MyMesh::otaFromUrl() {
       if (n != 32) expected_md5[0] = 0;  // not a usable md5
     }
     mh.end();
+    _ota_client = nullptr;   // md5 clients go out of scope here
   }
 
   if (_ota_cancel)                     { set("cancelled"); return; }  // cancelled during the .md5 fetch
@@ -581,9 +610,11 @@ void MyMesh::otaFromUrl() {
                                        // unresolvable mDNS name) can't hang the task before the
                                        // cancel-checked download loop -> "Cancel + idle" wedge
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);   // GitHub asset -> CDN 302
+  _ota_client = (void*)(https ? (WiFiClient*)&tls : (WiFiClient*)&plain);   // cancel can stop connect/read
+  set("requesting...");
   bool ok = https ? http.begin(tls, url) : http.begin(plain, url);
   if (!ok)                             { fail("connect failed"); return; }
-  if (_ota_cancel)                     { http.end(); set("cancelled"); return; }
+  if (_ota_cancel)                     { _ota_client = nullptr; http.end(); set("cancelled"); return; }
 
   int code = http.GET();
   if (code != HTTP_CODE_OK) {           // positive = a real HTTP status (404/403/502/...) -> show
@@ -605,6 +636,7 @@ void MyMesh::otaFromUrl() {
   int len = http.getSize();            // may be -1 (chunked); Update handles unknown size
   Serial.printf("[OTA] %s, content-length=%d, md5=%s\n", url, len, expected_md5[0] ? expected_md5 : "(none)");
 
+  set("preparing flash...");           // Update.begin erases the OTA partition (seconds) -> own phase
   if (!Update.begin(len > 0 ? (size_t)len : UPDATE_SIZE_UNKNOWN)) {
     http.end(); fail("no OTA space"); Serial.printf("[OTA] begin failed: %s\n", Update.errorString()); return;
   }
@@ -643,6 +675,7 @@ void MyMesh::otaFromUrl() {
     delay(1);                                                  // no data yet -> yield, keep waiting
   }
   http.end();
+  _ota_client = nullptr;   // streaming done; the client is about to go out of scope -> nothing to stop
   if (cancelled) { Update.abort(); set("cancelled"); Serial.println("[OTA] cancelled by user"); return; }
   if (stalled)   { Update.abort(); fail("connection lost"); Serial.println("[OTA] stalled mid-download"); return; }
   if (len > 0 && written != (size_t)len) {
