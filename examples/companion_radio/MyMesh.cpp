@@ -515,6 +515,10 @@ void MyMesh::startOtaTask() {
   }
   _ota_busy = true;
   _ota_cancel = false;       // clear any stale request from a prior run
+  // Reflect "busy" in the status the instant the button flips to Cancel. The task's
+  // first set() is only after the .md5 fetch + GET (seconds, or a stall on a bad
+  // host/mDNS), so without this the UI shows Cancel + a stale "idle" and looks hung.
+  strncpy(_ota_status, "connecting...", sizeof(_ota_status) - 1); _ota_status[sizeof(_ota_status) - 1] = 0;
   if (xTaskCreatePinnedToCore(otaTaskTramp, "ota", 16384, this, 1, nullptr, 1) != pdPASS) {
     _ota_busy = false;
     strncpy(_ota_status, "task spawn failed", sizeof(_ota_status) - 1); _ota_status[sizeof(_ota_status) - 1] = 0;
@@ -534,6 +538,7 @@ void MyMesh::otaFromUrl() {
   const char* url = getNodePrefs()->ota_url;
   if (!url[0])                         { fail("no URL set"); return; }
   if (WiFi.status() != WL_CONNECTED)   { fail("no WiFi"); return; }
+  if (_ota_cancel)                     { set("cancelled"); return; }  // cancelled before we even connect
 
   bool https = (strncmp(url, "https://", 8) == 0);
 
@@ -546,7 +551,7 @@ void MyMesh::otaFromUrl() {
     snprintf(murl, sizeof(murl), "%s.md5", url);
     WiFiClient mplain; WiFiClientSecure mtls;
     if (https) mtls.setInsecure();
-    HTTPClient mh; mh.setTimeout(8000);
+    HTTPClient mh; mh.setTimeout(8000); mh.setConnectTimeout(8000);   // bound connect/DNS too, not just reads
     mh.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     if ((https ? mh.begin(mtls, murl) : mh.begin(mplain, murl)) && mh.GET() == HTTP_CODE_OK) {
       String s = mh.getString();
@@ -564,15 +569,21 @@ void MyMesh::otaFromUrl() {
     mh.end();
   }
 
+  if (_ota_cancel)                     { set("cancelled"); return; }  // cancelled during the .md5 fetch
+
   WiFiClient   plain;
   WiFiClientSecure tls;
   if (https) tls.setInsecure();        // v1: no cert verification
   HTTPClient http;
   http.setTimeout(30000);              // per-read; generous so a slow/stuttering link (e.g. a
                                        // dialup->WiFi bridge) doesn't false-fail mid-download
+  http.setConnectTimeout(8000);        // but bound the TCP connect/DNS so a bad host (e.g. an
+                                       // unresolvable mDNS name) can't hang the task before the
+                                       // cancel-checked download loop -> "Cancel + idle" wedge
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);   // GitHub asset -> CDN 302
   bool ok = https ? http.begin(tls, url) : http.begin(plain, url);
   if (!ok)                             { fail("connect failed"); return; }
+  if (_ota_cancel)                     { http.end(); set("cancelled"); return; }
 
   int code = http.GET();
   if (code != HTTP_CODE_OK) {           // positive = a real HTTP status (404/403/502/...) -> show
