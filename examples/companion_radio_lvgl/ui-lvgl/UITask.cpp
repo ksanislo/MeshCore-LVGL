@@ -4156,6 +4156,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   mproxy::UiEvent ev{};
   ev.kind = mproxy::EvKind::Msg;
   ev.outgoing = false;
+  ev.is_cli = mproxy::hookIsCli();   // set HERE (backend thread); read via ev.is_cli in drainEvents
   convKey(mproxy::hookKey(), mproxy::hookIsChannel(), ev.conv_key, sizeof(ev.conv_key));
   strncpy(ev.sender, sender ? sender : "", sizeof(ev.sender) - 1);
   strncpy(ev.text,   body   ? body   : "", sizeof(ev.text) - 1);
@@ -5497,6 +5498,7 @@ void UITask::chat_kebab_cb(lv_event_t* e) {
   if (!s->_chat_is_channel &&
       (s->_chat_contact_type == ADV_TYPE_REPEATER || s->_chat_contact_type == ADV_TYPE_ROOM)) {
     lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_SETTINGS, "Login"), kebab_login_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_LIST, "Admin"), kebab_admin_cb, LV_EVENT_CLICKED, NULL);
   }
   if (s->_chat_is_channel) {
     lv_obj_add_event_cb(lv_list_add_btn(list, LV_SYMBOL_UPLOAD, "Share"), kebab_chanshare_cb, LV_EVENT_CLICKED, NULL);
@@ -6883,6 +6885,603 @@ static lv_obj_t* makeNumberField(lv_obj_t* body, const char* cap, lv_event_cb_t 
   lv_obj_set_width(ta, LV_PCT(100));
   lv_obj_add_event_cb(ta, cb, LV_EVENT_ALL, NULL);
   return ta;
+}
+
+// ===== Repeater / Room-server Admin screen ===============================
+// One screen, parameterized by contact type, driving CLI-over-mesh admin. The
+// transport (login + sendCliCommand) already exists; this is the structured
+// front-end: fields compose get/set <key>, action buttons send one-shot verbs,
+// and replies (TXT_TYPE_CLI_DATA, flagged is_cli) are routed here by drainEvents.
+// Repeater vs room differences are pure data in ADMIN_SPEC[].
+
+enum AdminKind : uint8_t { AK_TEXT, AK_INT, AK_FLOAT, AK_BOOL, AK_DROPDOWN, AK_PASSWORD, AK_READONLY, AK_RADIO_TUPLE };
+struct AdminFieldSpec {
+  const char* section;   // non-NULL: start a new section heading
+  const char* label;
+  const char* key;       // CLI key for get/set
+  AdminKind   kind;
+  const char* opts;      // AK_DROPDOWN: human labels (newline-joined)
+  const char* setvals;   // AK_DROPDOWN/AK_BOOL: wire tokens, parallel to opts (BOOL = "off\non")
+  uint8_t     mask;      // bit0 = repeater, bit1 = room
+  const char* get_verb;  // NULL: fetch via "get <key>"; else this literal command
+};
+// mask helpers: ADV_TYPE_REPEATER=2, ADV_TYPE_ROOM=3
+static inline uint8_t adminTypeBit(uint8_t t) { return t == ADV_TYPE_REPEATER ? 1 : (t == ADV_TYPE_ROOM ? 2 : 0); }
+
+static const AdminFieldSpec ADMIN_SPEC[] = {
+  { "Identity", "Name",                    "name",                 AK_TEXT,        NULL, NULL, 3, NULL },
+  { NULL,       "Role",                     "role",                 AK_READONLY,    NULL, NULL, 3, NULL },
+  { NULL,       "Firmware",                 "ver",                  AK_READONLY,    NULL, NULL, 3, "ver" },
+  { "Radio",    "TX power (dBm)",           "tx",                   AK_INT,         NULL, NULL, 3, NULL },
+  { NULL,       "Radio (freq,bw,sf,cr)",    "radio",                AK_RADIO_TUPLE, NULL, NULL, 3, NULL },
+  { "Advertising", "Advert interval (min)", "advert.interval",      AK_INT,         NULL, NULL, 3, NULL },
+  { NULL,       "Flood advert interval (h)","flood.advert.interval",AK_INT,         NULL, NULL, 3, NULL },
+  { "Relay",    "Repeat",                   "repeat",               AK_BOOL,        NULL, "off\non", 1, NULL },
+  { NULL,       "Allow read-only clients",  "allow.read.only",      AK_BOOL,        NULL, "off\non", 3, NULL },
+  { NULL,       "Loop detect",              "loop.detect",          AK_DROPDOWN,    "Off\nMinimal\nModerate\nStrict", "off\nminimal\nmoderate\nstrict", 1, NULL },
+  { "Location", "Latitude",                 "lat",                  AK_FLOAT,       NULL, NULL, 3, NULL },
+  { NULL,       "Longitude",                "lon",                  AK_FLOAT,       NULL, NULL, 3, NULL },
+  { "Security", "Guest/room password",      "guest.password",       AK_PASSWORD,    NULL, NULL, 3, NULL },
+  { NULL,       "Admin password (set new)", "password",             AK_PASSWORD,    NULL, NULL, 3, NULL },
+};
+static const int ADMIN_SPEC_N = sizeof(ADMIN_SPEC) / sizeof(ADMIN_SPEC[0]);
+
+struct AdminAction { const char* label; const char* cli; bool confirm; bool to_popup; uint8_t mask; };
+static const AdminAction ADMIN_ACTIONS[] = {
+  { "Send advert",            "advert",          false, false, 3 },
+  { "Send advert (zero-hop)", "advert.zerohop",  false, false, 3 },
+  { "Sync clock",             "clock sync",      false, false, 3 },
+  { "Clear stats",            "clear stats",     false, false, 3 },
+  { "Neighbors",              "neighbors",       false, true,  1 },  // repeater-only; reply -> popup
+  { "Set permission...",      "__setperm",       false, false, 3 },  // opens the blind setperm form
+  { "Reboot",                 "reboot",          true,  false, 3 },
+  { "Start OTA",              "start ota",       true,  false, 3 },
+};
+static const int ADMIN_ACTIONS_N = sizeof(ADMIN_ACTIONS) / sizeof(ADMIN_ACTIONS[0]);
+
+static const char* ADMIN_PLACEHOLDER = "(tap Refresh)";
+
+// nth newline-separated token of `list` into out (empty if out of range).
+static void admin_nthToken(const char* list, int idx, char* out, size_t cap) {
+  out[0] = 0;
+  if (!list || idx < 0) return;
+  const char* p = list;
+  for (int i = 0; i < idx && p; i++) { p = strchr(p, '\n'); if (p) p++; }
+  if (!p) return;
+  const char* e = strchr(p, '\n');
+  size_t n = e ? (size_t)(e - p) : strlen(p);
+  if (n >= cap) n = cap - 1;
+  memcpy(out, p, n); out[n] = 0;
+}
+// index of the token in `list` equal to `val` (case-insensitive), or -1.
+static int admin_tokenIndex(const char* list, const char* val) {
+  if (!list || !val) return -1;
+  char tok[32];
+  for (int i = 0; ; i++) {
+    admin_nthToken(list, i, tok, sizeof(tok));
+    if (!tok[0]) return -1;
+    if (strcasecmp(tok, val) == 0) return i;
+  }
+}
+
+int UITask::adminRowOfWidget(lv_obj_t* w) {
+  for (int i = 0; i < _admin_field_count; i++) if (_admin_widget[i] == w) return i;
+  return -1;
+}
+
+// --- transient admin-state cache (is_admin learned from LoginResult) -------
+UITask::AdminCred* UITask::adminCredFor(const uint8_t* pk) {
+  for (int i = 0; i < ADMIN_CRED_CACHE_N; i++)
+    if (_admin_creds[i].used && memcmp(_admin_creds[i].pubkey, pk, 6) == 0) return &_admin_creds[i];
+  return NULL;
+}
+void UITask::adminCacheLogin(const uint8_t* pk, bool is_admin, uint16_t ka) {
+  AdminCred* c = adminCredFor(pk);
+  if (!c) {                          // pick a free slot, else the oldest
+    c = &_admin_creds[0];
+    for (int i = 0; i < ADMIN_CRED_CACHE_N; i++) {
+      if (!_admin_creds[i].used) { c = &_admin_creds[i]; break; }
+      if (_admin_creds[i].ts_ms < c->ts_ms) c = &_admin_creds[i];
+    }
+    memcpy(c->pubkey, pk, 6); c->used = true;
+  }
+  c->is_admin = is_admin; c->keep_alive = ka; c->ts_ms = millis();
+}
+
+// --- screen build ---------------------------------------------------------
+void UITask::buildAdminScreen() {
+  if (_admin_screen) return;
+  _admin_screen = lv_obj_create(NULL);
+  styleAsDarkScreen(_admin_screen);
+  lv_obj_set_style_pad_all(_admin_screen, 0, 0);
+
+  lv_obj_t* bar = makeHeaderBar(_admin_screen, "Admin", admin_back_cb);
+  lv_obj_t* rb = lv_btn_create(bar);          // header "Refresh all" (flexes right of the title)
+  lv_obj_set_style_bg_opa(rb, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_shadow_width(rb, 0, 0);
+  lv_obj_add_event_cb(rb, admin_refresh_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* rl = lv_label_create(rb);
+  lv_label_set_text(rl, LV_SYMBOL_REFRESH);
+  lv_obj_set_style_text_color(rl, lv_color_hex(FG_HEX), 0);
+  lv_obj_center(rl);
+
+  lv_obj_t* body = lv_obj_create(_admin_screen);
+  _admin_body = body;
+  lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
+  lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
+  lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(body, 0, 0);
+  lv_obj_set_style_pad_all(body, 12, 0);
+  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(body, 8, 0);
+
+  _admin_kb = lv_keyboard_create(_admin_screen);
+  lv_obj_add_event_cb(_admin_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);
+  lv_obj_add_event_cb(_admin_kb, [](lv_event_t* ev) {
+    if (_instance && (lv_event_get_code(ev) == LV_EVENT_READY || lv_event_get_code(ev) == LV_EVENT_CANCEL))
+      lv_obj_add_flag(_instance->_admin_kb, LV_OBJ_FLAG_HIDDEN);
+  }, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_admin_kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+// (Re)create the field rows + action buttons for the current _admin_type.
+void UITask::adminRebuildFields() {
+  _admin_field_count = 0;   // before clean: a DEFOCUSED fired during widget deletion finds no row
+  _admin_dirty = 0;
+  lv_obj_clean(_admin_body);
+  uint8_t bit = adminTypeBit(_admin_type);
+
+  for (int i = 0; i < ADMIN_SPEC_N && _admin_field_count < ADMIN_MAX_FIELDS; i++) {
+    const AdminFieldSpec& sp = ADMIN_SPEC[i];
+    if (!(sp.mask & bit)) continue;
+    if (sp.section) addSettingsSection(_admin_body, sp.section);
+    lv_obj_t* w = NULL;
+    switch (sp.kind) {
+      case AK_BOOL: {
+        w = lv_checkbox_create(_admin_body);
+        lv_checkbox_set_text(w, sp.label);
+        lv_obj_set_style_text_color(w, lv_color_hex(FG_HEX), 0);
+        lv_obj_add_event_cb(w, admin_field_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+        break;
+      }
+      case AK_DROPDOWN: {
+        w = makeDropdownField(_admin_body, sp.label, sp.opts);
+        lv_obj_add_event_cb(w, admin_field_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+        break;
+      }
+      case AK_READONLY: {
+        lv_obj_t* f = makeField(_admin_body, sp.label);
+        w = lv_label_create(f);
+        lv_label_set_long_mode(w, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(w, LV_PCT(100));
+        lv_obj_set_style_text_color(w, lv_color_hex(FG_HEX), 0);
+        lv_label_set_text(w, ADMIN_PLACEHOLDER);
+        break;
+      }
+      default: {   // AK_TEXT / AK_INT / AK_FLOAT / AK_PASSWORD / AK_RADIO_TUPLE
+        lv_obj_t* f = makeField(_admin_body, sp.label);
+        w = makeSelTextarea(f);
+        lv_textarea_set_one_line(w, true);
+        lv_obj_set_width(w, LV_PCT(100));
+        if (sp.kind == AK_INT)   lv_textarea_set_accepted_chars(w, "0123456789-");
+        if (sp.kind == AK_FLOAT) lv_textarea_set_accepted_chars(w, "0123456789.-");
+        if (sp.kind == AK_PASSWORD) attachInlineEye(w);
+        lv_textarea_set_placeholder_text(w, ADMIN_PLACEHOLDER);
+        lv_obj_add_event_cb(w, admin_field_event_cb, LV_EVENT_ALL, NULL);
+        break;
+      }
+    }
+    _admin_widget[_admin_field_count] = w;
+    _admin_specidx[_admin_field_count] = (uint8_t)i;
+    _admin_field_count++;
+  }
+
+  // Action buttons
+  addSettingsSection(_admin_body, "Actions");
+  for (int i = 0; i < ADMIN_ACTIONS_N; i++) {
+    const AdminAction& a = ADMIN_ACTIONS[i];
+    if (!(a.mask & bit)) continue;
+    lv_obj_t* btn = lv_btn_create(_admin_body);
+    lv_obj_set_width(btn, LV_PCT(100));
+    if (a.confirm) lv_obj_set_style_bg_color(btn, lv_color_hex(UI_DANGER), 0);
+    lv_obj_set_user_data(btn, (void*)&ADMIN_ACTIONS[i]);
+    lv_obj_add_event_cb(btn, admin_action_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* l = lv_label_create(btn);
+    lv_label_set_text(l, a.label);
+    lv_obj_center(l);
+  }
+}
+
+void UITask::openAdmin(const uint8_t* pubkey6, uint8_t type, const char* name, lv_obj_t* ret) {
+  buildAdminScreen();
+  memcpy(_admin_pubkey, pubkey6, 6);
+  _admin_type = type;
+  _admin_return_screen = ret;
+  convKey(pubkey6, false, _admin_conv_key, sizeof(_admin_conv_key));
+  adminRebuildFields();
+
+  // reset the reply machine
+  if (_admin_reply_timer) { lv_timer_del(_admin_reply_timer); _admin_reply_timer = NULL; }
+  _admin_pending_row = -1; _admin_await_ack = false; _admin_action_to_popup = false;
+  _admin_get_head = _admin_get_count = 0; _admin_timeout_streak = 0;
+
+  char title[CHAT_PEER_NAME_MAX + 8];
+  snprintf(title, sizeof(title), "Admin: %s", name ? name : "");
+  lv_obj_t* bar = lv_obj_get_child(_admin_screen, 0);     // header bar -> title is child[1]
+  if (bar) { lv_obj_t* t = lv_obj_get_child(bar, 1); if (t) lv_label_set_text(t, title); }
+
+  _admin_active = true;
+  lv_scr_load(_admin_screen);
+
+  // Auto-fetch only the bare minimum (identity); everything else loads on Refresh.
+  for (int r = 0; r < _admin_field_count; r++) {
+    const char* k = ADMIN_SPEC[_admin_specidx[r]].key;
+    if (strcmp(k, "name") == 0 || strcmp(k, "role") == 0 || strcmp(k, "ver") == 0) adminEnqueueGet(r);
+  }
+  adminIssueNextGet();
+}
+
+void UITask::admin_back_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  UITask* s = _instance;
+  s->_admin_active = false;
+  if (s->_admin_reply_timer) { lv_timer_del(s->_admin_reply_timer); s->_admin_reply_timer = NULL; }
+  s->_admin_pending_row = -1; s->_admin_await_ack = false;
+  s->_admin_get_head = s->_admin_get_count = 0;
+  lv_scr_load(s->_admin_return_screen ? s->_admin_return_screen : s->_home_screen);
+}
+
+// --- get queue ------------------------------------------------------------
+void UITask::adminEnqueueGet(int row) {
+  if (row < 0 || row >= _admin_field_count) return;
+  if (_admin_get_count >= ADMIN_MAX_FIELDS) return;
+  if (ADMIN_SPEC[_admin_specidx[row]].kind == AK_PASSWORD) return;   // write-only
+  uint8_t tail = (_admin_get_head + _admin_get_count) % ADMIN_MAX_FIELDS;
+  _admin_get_queue[tail] = (uint8_t)row;
+  _admin_get_count++;
+}
+
+void UITask::adminRefreshAll() {
+  _admin_get_head = _admin_get_count = 0;
+  for (int r = 0; r < _admin_field_count; r++) adminEnqueueGet(r);
+  adminIssueNextGet();
+}
+
+void UITask::adminIssueNextGet() {
+  if (_admin_pending_row >= 0 || _admin_await_ack) return;   // one outstanding at a time
+  if (_admin_get_count == 0) return;
+  int row = _admin_get_queue[_admin_get_head];
+  _admin_get_head = (_admin_get_head + 1) % ADMIN_MAX_FIELDS;
+  _admin_get_count--;
+  _admin_pending_row = row;
+  const AdminFieldSpec& sp = ADMIN_SPEC[_admin_specidx[row]];
+  // loading hint on text-like widgets
+  if (sp.kind == AK_READONLY) lv_label_set_text(_admin_widget[row], "...");
+  else if (sp.kind == AK_TEXT || sp.kind == AK_INT || sp.kind == AK_FLOAT || sp.kind == AK_RADIO_TUPLE)
+    lv_textarea_set_placeholder_text(_admin_widget[row], "loading...");
+  char cmd[48];
+  if (sp.get_verb) snprintf(cmd, sizeof(cmd), "%s", sp.get_verb);
+  else             snprintf(cmd, sizeof(cmd), "get %s", sp.key);
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::SendCommand;
+  memcpy(c.pubkey, _admin_pubkey, 6);
+  strncpy(c.text, cmd, sizeof(c.text) - 1); c.text[sizeof(c.text) - 1] = 0;
+  mproxy::postCommand(c);
+  if (_admin_reply_timer) { lv_timer_del(_admin_reply_timer); _admin_reply_timer = NULL; }
+  _admin_reply_timer = lv_timer_create(admin_reply_timeout_cb, 6000, this);
+  lv_timer_set_repeat_count(_admin_reply_timer, 1);
+}
+
+void UITask::admin_reply_timeout_cb(lv_timer_t* t) {
+  (void)t;
+  if (!_instance) return;
+  UITask* s = _instance;
+  s->_admin_reply_timer = NULL;   // LVGL auto-deletes a repeat-count-0 timer after this returns
+  if (s->_admin_pending_row >= 0) {
+    int row = s->_admin_pending_row; s->_admin_pending_row = -1;
+    const AdminFieldSpec& sp = ADMIN_SPEC[s->_admin_specidx[row]];
+    if (sp.kind == AK_READONLY) lv_label_set_text(s->_admin_widget[row], ADMIN_PLACEHOLDER);
+    else if (sp.kind == AK_TEXT || sp.kind == AK_INT || sp.kind == AK_FLOAT || sp.kind == AK_RADIO_TUPLE)
+      lv_textarea_set_placeholder_text(s->_admin_widget[row], ADMIN_PLACEHOLDER);
+  }
+  s->_admin_await_ack = false;
+  if (++s->_admin_timeout_streak >= 2) s->showToast("No reply - session may have expired, re-login");
+  else                                 s->showToast("No reply (timed out)");
+  s->adminIssueNextGet();   // don't stall the rest of a Refresh-all
+}
+
+// --- reply parsing --------------------------------------------------------
+bool UITask::adminConsumeReply(const char* text) {
+  _admin_timeout_streak = 0;
+  if (_admin_reply_timer) { lv_timer_del(_admin_reply_timer); _admin_reply_timer = NULL; }
+  if (_admin_pending_row >= 0) {
+    int row = _admin_pending_row; _admin_pending_row = -1;
+    const char* v = text ? text : "";
+    if (v[0] == '>') { v++; if (*v == ' ') v++; }   // strip the "> " get-reply prefix
+    adminSetFieldValue(row, v);
+    adminIssueNextGet();
+    return true;
+  }
+  if (_admin_await_ack) {
+    _admin_await_ack = false;
+    if (_admin_action_to_popup) { _admin_action_to_popup = false; showInfoPopup("Result", text && text[0] ? text : "(no output)"); }
+    else                        showToast(text && text[0] ? text : "OK");
+    adminIssueNextGet();
+    return true;
+  }
+  return false;   // nothing outstanding (e.g. a late reply) -> let it fall through to chat
+}
+
+void UITask::adminSetFieldValue(int row, const char* value) {
+  const AdminFieldSpec& sp = ADMIN_SPEC[_admin_specidx[row]];
+  lv_obj_t* w = _admin_widget[row];
+  switch (sp.kind) {
+    case AK_BOOL: {
+      bool on = (strcasecmp(value, "on") == 0 || strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0);
+      if (on) lv_obj_add_state(w, LV_STATE_CHECKED); else lv_obj_clear_state(w, LV_STATE_CHECKED);
+      break;
+    }
+    case AK_DROPDOWN: {
+      int idx = admin_tokenIndex(sp.setvals, value);
+      if (idx >= 0) lv_dropdown_set_selected(w, (uint16_t)idx);
+      break;
+    }
+    case AK_READONLY:
+      lv_label_set_text(w, value[0] ? value : "-");
+      break;
+    default:
+      lv_textarea_set_text(w, value);
+      break;
+  }
+  if (row < 32) _admin_dirty &= ~(1u << row);   // a programmatic load is not a user edit
+}
+
+// --- sending sets / actions ----------------------------------------------
+void UITask::adminSendAction(const char* cli, bool to_popup) {
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::SendCommand;
+  memcpy(c.pubkey, _admin_pubkey, 6);
+  strncpy(c.text, cli, sizeof(c.text) - 1); c.text[sizeof(c.text) - 1] = 0;
+  mproxy::postCommand(c);
+  _admin_await_ack = true;
+  _admin_action_to_popup = to_popup;
+  if (_admin_reply_timer) { lv_timer_del(_admin_reply_timer); _admin_reply_timer = NULL; }
+  _admin_reply_timer = lv_timer_create(admin_reply_timeout_cb, 6000, this);
+  lv_timer_set_repeat_count(_admin_reply_timer, 1);
+}
+
+void UITask::adminSendSet(int row, const char* value) {
+  const AdminFieldSpec& sp = ADMIN_SPEC[_admin_specidx[row]];
+  char val[48];
+  if (sp.kind == AK_BOOL) {
+    bool on = lv_obj_has_state(_admin_widget[row], LV_STATE_CHECKED);
+    admin_nthToken(sp.setvals, on ? 1 : 0, val, sizeof(val));
+  } else if (sp.kind == AK_DROPDOWN) {
+    admin_nthToken(sp.setvals, lv_dropdown_get_selected(_admin_widget[row]), val, sizeof(val));
+  } else {
+    strncpy(val, value ? value : "", sizeof(val) - 1); val[sizeof(val) - 1] = 0;
+  }
+  char cmd[80];
+  if (strcmp(sp.key, "password") == 0) snprintf(cmd, sizeof(cmd), "password %s", val);   // bare verb (not "set ...")
+  else                                 snprintf(cmd, sizeof(cmd), "set %s %s", sp.key, val);
+  adminSendAction(cmd, false);
+}
+
+// --- shared confirm dialog (radio edit / reboot / start ota) --------------
+void UITask::adminConfirm(const char* msg, const char* cmd, bool to_popup) {
+  strncpy(_admin_pending_cmd, cmd, sizeof(_admin_pending_cmd) - 1);
+  _admin_pending_cmd[sizeof(_admin_pending_cmd) - 1] = 0;
+  _admin_confirm_to_popup = to_popup;
+  if (!_admin_confirm_popup) {
+    lv_obj_t* card = makeModalCard(&_admin_confirm_popup, NULL);
+    _admin_confirm_lbl = lv_label_create(card);
+    lv_label_set_long_mode(_admin_confirm_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(_admin_confirm_lbl, LV_PCT(100));
+    lv_obj_set_style_text_color(_admin_confirm_lbl, lv_color_hex(FG_HEX), 0);
+    lv_obj_t* btns = lv_obj_create(card);
+    lv_obj_remove_style_all(btns);
+    lv_obj_set_width(btns, LV_PCT(100));
+    lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(btns, 8, 0);
+    lv_obj_t* cancel = lv_btn_create(btns);
+    lv_obj_add_event_cb(cancel, admin_confirm_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(cancel), "Cancel");
+    lv_obj_t* go = lv_btn_create(btns);
+    lv_obj_set_style_bg_color(go, lv_color_hex(UI_PRIMARY), 0);
+    lv_obj_add_event_cb(go, admin_confirm_go_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(go), "Confirm");
+  }
+  lv_label_set_text(_admin_confirm_lbl, msg);
+  lv_obj_clear_flag(_admin_confirm_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_admin_confirm_popup);
+}
+
+void UITask::admin_confirm_go_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  UITask* s = _instance;
+  lv_obj_add_flag(s->_admin_confirm_popup, LV_OBJ_FLAG_HIDDEN);
+  s->adminSendAction(s->_admin_pending_cmd, s->_admin_confirm_to_popup);
+}
+void UITask::admin_confirm_cancel_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance && _instance->_admin_confirm_popup) lv_obj_add_flag(_instance->_admin_confirm_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+// --- field interaction ----------------------------------------------------
+void UITask::admin_field_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  UITask* s = _instance;
+  lv_obj_t* w = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  int row = s->adminRowOfWidget(w);
+  if (row < 0) return;
+  const AdminFieldSpec& sp = ADMIN_SPEC[s->_admin_specidx[row]];
+  bool textlike = (sp.kind == AK_TEXT || sp.kind == AK_INT || sp.kind == AK_FLOAT ||
+                   sp.kind == AK_PASSWORD || sp.kind == AK_RADIO_TUPLE);
+  if (textlike) {
+    if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+      s->_set_active_ta = w;
+      lv_keyboard_set_textarea(s->_admin_kb, w);
+      lv_keyboard_set_mode(s->_admin_kb, (sp.kind == AK_INT || sp.kind == AK_FLOAT)
+                           ? LV_KEYBOARD_MODE_NUMBER : LV_KEYBOARD_MODE_TEXT_LOWER);
+      lv_obj_clear_flag(s->_admin_kb, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_align(s->_admin_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+      lv_obj_move_foreground(s->_admin_kb);
+      s->raiseFieldForKb(s->_admin_body, s->_admin_kb, w);
+    } else if (code == LV_EVENT_READY) {
+      lv_obj_clear_state(w, LV_STATE_FOCUSED);
+      lv_obj_add_flag(s->_admin_kb, LV_OBJ_FLAG_HIDDEN);
+      lv_event_send(w, LV_EVENT_DEFOCUSED, NULL);   // commit via the DEFOCUSED path
+    } else if (code == LV_EVENT_VALUE_CHANGED) {
+      if (row < 32) s->_admin_dirty |= (1u << row);   // user typed -> field is dirty
+    } else if (code == LV_EVENT_DEFOCUSED) {
+      if (row >= 32 || !(s->_admin_dirty & (1u << row))) return;   // only commit edited fields
+      s->_admin_dirty &= ~(1u << row);
+      const char* v = lv_textarea_get_text(w);
+      if (!v || !v[0]) return;
+      if (sp.kind == AK_RADIO_TUPLE) {
+        // normalize "freq,bw,sf,cr" (commas or spaces) -> "set radio f b s c"
+        char buf[64]; strncpy(buf, v, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+        for (char* p = buf; *p; p++) if (*p == ',') *p = ' ';
+        char f[16], b[16], sf[8], cr[8];
+        if (sscanf(buf, "%15s %15s %7s %7s", f, b, sf, cr) != 4) { s->showToast("Enter: freq,bw,sf,cr"); return; }
+        char cmd[64]; snprintf(cmd, sizeof(cmd), "set radio %s %s %s %s", f, b, sf, cr);
+        s->adminConfirm("Apply radio config? It takes effect only after a MANUAL reboot, and a wrong "
+                        "value can make this node unreachable.", cmd, false);
+      } else {
+        s->adminSendSet(row, v);
+      }
+    }
+  } else if (code == LV_EVENT_VALUE_CHANGED) {   // AK_BOOL / AK_DROPDOWN
+    s->adminSendSet(row, NULL);
+  }
+}
+
+void UITask::admin_refresh_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->adminRefreshAll();
+}
+
+void UITask::admin_action_cb(lv_event_t* e) {
+  if (!_instance) return;
+  UITask* s = _instance;
+  const AdminAction* a = (const AdminAction*)lv_obj_get_user_data(lv_event_get_target(e));
+  if (!a) return;
+  if (strcmp(a->cli, "__setperm") == 0) { admin_perm_open_cb(e); return; }
+  if (a->confirm) {
+    char msg[64]; snprintf(msg, sizeof(msg), "%s this node?", a->label);
+    s->adminConfirm(msg, a->cli, a->to_popup);
+  } else {
+    s->adminSendAction(a->cli, a->to_popup);
+  }
+}
+
+// --- blind setperm form ---------------------------------------------------
+void UITask::admin_perm_open_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  UITask* s = _instance;
+  if (!s->_admin_perm_popup) {
+    lv_obj_t* card = s->makeModalCard(&s->_admin_perm_popup, admin_perm_dismiss_cb);
+    lv_obj_t* title = lv_label_create(card);
+    lv_label_set_text(title, "Set permission");
+    lv_obj_set_style_text_color(title, lv_color_hex(FG_HEX), 0);
+    lv_obj_set_style_text_font(title, fontHeading(), 0);
+    lv_obj_t* kf = makeField(card, "Public key (hex)");
+    s->_admin_perm_key_ta = makeSelTextarea(kf);
+    lv_textarea_set_one_line(s->_admin_perm_key_ta, true);
+    lv_textarea_set_accepted_chars(s->_admin_perm_key_ta, "0123456789abcdefABCDEF");
+    lv_obj_set_width(s->_admin_perm_key_ta, LV_PCT(100));
+    lv_obj_add_event_cb(s->_admin_perm_key_ta, [](lv_event_t* ev) {
+      if (!_instance) return; UITask* z = _instance;
+      lv_event_code_t c = lv_event_get_code(ev);
+      if (c == LV_EVENT_FOCUSED || c == LV_EVENT_CLICKED) {
+        lv_keyboard_set_textarea(z->_admin_perm_kb, lv_event_get_target(ev));
+        lv_keyboard_set_mode(z->_admin_perm_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+        lv_obj_clear_flag(z->_admin_perm_kb, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(z->_admin_perm_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_obj_move_foreground(z->_admin_perm_kb);
+      }
+    }, LV_EVENT_ALL, NULL);
+    s->_admin_perm_role_dd = makeDropdownField(card, "Role", "Guest\nRead-only\nRead-write\nAdmin");
+    lv_dropdown_set_selected(s->_admin_perm_role_dd, 1);   // default read-only
+    lv_obj_t* btns = lv_obj_create(card);
+    lv_obj_remove_style_all(btns);
+    lv_obj_set_width(btns, LV_PCT(100));
+    lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(btns, 8, 0);
+    lv_obj_t* cancel = lv_btn_create(btns);
+    lv_obj_add_event_cb(cancel, admin_perm_dismiss_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(cancel), "Cancel");
+    lv_obj_t* go = lv_btn_create(btns);
+    lv_obj_set_style_bg_color(go, lv_color_hex(UI_PRIMARY), 0);
+    lv_obj_add_event_cb(go, admin_perm_go_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(go), "Apply");
+    s->_admin_perm_kb = lv_keyboard_create(s->_admin_perm_popup);
+    lv_obj_add_event_cb(s->_admin_perm_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);
+    lv_obj_add_event_cb(s->_admin_perm_kb, [](lv_event_t* ev) {
+      if (_instance && (lv_event_get_code(ev) == LV_EVENT_READY || lv_event_get_code(ev) == LV_EVENT_CANCEL))
+        lv_obj_add_flag(_instance->_admin_perm_kb, LV_OBJ_FLAG_HIDDEN);
+    }, LV_EVENT_ALL, NULL);
+    lv_obj_add_flag(s->_admin_perm_kb, LV_OBJ_FLAG_HIDDEN);
+  }
+  lv_textarea_set_text(s->_admin_perm_key_ta, "");
+  lv_obj_add_flag(s->_admin_perm_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(s->_admin_perm_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(s->_admin_perm_popup);
+}
+
+void UITask::admin_perm_go_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  UITask* s = _instance;
+  const char* hex = lv_textarea_get_text(s->_admin_perm_key_ta);
+  if (!hex || strlen(hex) < 2) { s->showToast("Enter a public key"); return; }
+  uint16_t role = lv_dropdown_get_selected(s->_admin_perm_role_dd);   // 0..3 = perm int
+  char cmd[96];
+  snprintf(cmd, sizeof(cmd), "setperm %s %u", hex, (unsigned)role);
+  lv_obj_add_flag(s->_admin_perm_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(s->_admin_perm_popup, LV_OBJ_FLAG_HIDDEN);
+  s->adminSendAction(cmd, false);
+}
+
+void UITask::admin_perm_dismiss_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  UITask* s = _instance;
+  if (s->_admin_perm_kb) lv_obj_add_flag(s->_admin_perm_kb, LV_OBJ_FLAG_HIDDEN);
+  if (s->_admin_perm_popup) lv_obj_add_flag(s->_admin_perm_popup, LV_OBJ_FLAG_HIDDEN);
+}
+
+void UITask::kebab_admin_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  UITask* s = _instance;
+  uint8_t pk[6]; memcpy(pk, s->_chat_pubkey, 6);
+  uint8_t type = s->_chat_contact_type;
+  char nm[CHAT_PEER_NAME_MAX]; strncpy(nm, s->_chat_peer, sizeof(nm) - 1); nm[sizeof(nm) - 1] = 0;
+  lv_obj_t* ret = s->_chat_screen;
+  s->closeMenuPopup();
+  AdminCred* c = s->adminCredFor(pk);
+  bool fresh = c && c->is_admin &&
+               (c->keep_alive == 0 ? (millis() - c->ts_ms < 5UL * 60 * 1000)
+                                   : (millis() - c->ts_ms < (uint32_t)c->keep_alive * 1000));
+  if (fresh) {
+    s->openAdmin(pk, type, nm, ret);
+  } else {
+    s->_admin_open_after_login = true;
+    memcpy(s->_admin_pending_pk, pk, 6);
+    s->_admin_pending_type = type;
+    s->_admin_pending_ret = ret;
+    strncpy(s->_admin_pending_name, nm, sizeof(s->_admin_pending_name) - 1);
+    s->_admin_pending_name[sizeof(s->_admin_pending_name) - 1] = 0;
+    s->openLogin(pk, nm);
+  }
 }
 
 // ---- Settings: category launcher + per-category panes ---------------------
@@ -10713,6 +11312,14 @@ void UITask::drainEvents() {
     switch (ev.kind) {
       case mproxy::EvKind::Msg: {
         if (ev.msgcount >= 0) _msgcount = ev.msgcount;
+        // Admin screen: a CLI reply (is_cli) for the node we're administering is consumed
+        // into the structured fields/actions, not appended to the chat. Gated on the Admin
+        // screen actually being active so the repeater raw-console keeps its replies otherwise;
+        // room plain posts carry is_cli=false so are never swallowed here.
+        if (ev.is_cli && _admin_active && _admin_screen && lv_scr_act() == _admin_screen &&
+            strncmp(ev.conv_key, _admin_conv_key, CHAT_PEER_NAME_MAX) == 0) {
+          if (adminConsumeReply(ev.text)) break;
+        }
         storeAppend(ev.outgoing, ev.conv_key, ev.sender, ev.text, ev.ts,
                     MSG_STATUS_NONE, 0, 0, 0, ev.hops, ev.bytes);
         // "Viewing" = the chat screen is the active screen AND it's this conversation
@@ -10757,10 +11364,18 @@ void UITask::drainEvents() {
       }
       case mproxy::EvKind::LoginResult: {
         if (ev.ok) {
+          adminCacheLogin(ev.pubkey, ev.is_admin, ev.keep_alive);   // remember admin state (not persisted elsewhere)
           char m[48];
           snprintf(m, sizeof(m), "Logged in%s", ev.is_admin ? " (admin)" : "");
           showToast(m);
+          // If the user tapped "Admin" but wasn't logged in yet, open it now that we are.
+          if (_admin_open_after_login && memcmp(ev.pubkey, _admin_pending_pk, 6) == 0) {
+            _admin_open_after_login = false;
+            if (ev.is_admin) openAdmin(_admin_pending_pk, _admin_pending_type, _admin_pending_name, _admin_pending_ret);
+            else             showToast("Not an admin on this node");
+          }
         } else {
+          if (_admin_open_after_login) _admin_open_after_login = false;
           showToast("Login failed");
         }
         break;

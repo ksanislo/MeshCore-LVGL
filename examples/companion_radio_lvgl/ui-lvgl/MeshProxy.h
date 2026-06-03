@@ -113,6 +113,7 @@ struct UiEvent {
   uint32_t ts;
   uint8_t  hops;       // incoming flood path length (0xFF = direct/unknown)
   uint16_t bytes;      // incoming message payload size (diagnostic footer)
+  bool     is_cli;     // reply came as TXT_TYPE_CLI_DATA (admin/console reply, not a chat post)
   // SendResult (+ Delivered reuses `ack`)
   uint32_t token;
   bool     ok;
@@ -177,6 +178,7 @@ bool  signalHasData();             // false until the first real sample (cold st
 // so they read these to cook their event before enqueuing it.
 const uint8_t* hookKey();
 bool           hookIsChannel();
+bool           hookIsCli();
 
 bool postCommand(const MeshCmd& cmd);   // returns false if the queue is full
 bool pollEvent(UiEvent& ev);            // false if no event pending

@@ -907,6 +907,7 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
                      || txt_type == TXT_TYPE_CLI_DATA;
   if (should_display && _ui) {
     setHookKey(from.id.pub_key, false);
+    setHookCli(txt_type == TXT_TYPE_CLI_DATA);   // let the UI route admin/console replies
     _ui->newMsg(path_len, from.name, text, offline_queue_len);
     // MESH_PROXY (dual-core): newMsg() enqueues a UI event; the UI core fires the
     // chime from drainEvents (mute/toggle/viewing-aware). Don't ring it from core 0.

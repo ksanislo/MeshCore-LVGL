@@ -584,6 +584,7 @@ float signalLevelDb(uint32_t now_ms, uint32_t hold_ms, uint32_t tau_ms) {
 bool signalHasData() { return s_sig_seen; }
 const uint8_t* hookKey()     { return the_mesh.hookKey(); }
 bool hookIsChannel()         { return the_mesh.hookIsChannel(); }
+bool hookIsCli()             { return the_mesh.hookIsCli(); }
 
 bool postCommand(const MeshCmd& cmd) { return s_cmd_q && xQueueSend(s_cmd_q, &cmd, 0) == pdTRUE; }
 bool pollEvent(UiEvent& ev)          { return s_ev_q && xQueueReceive(s_ev_q, &ev, 0) == pdTRUE; }

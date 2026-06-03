@@ -560,6 +560,50 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _login_kb;
   uint8_t         _login_pubkey[6];     // server we're logging into
 
+  // ----- Repeater/room Admin screen (structured CLI-over-mesh editor). Lazily built. -----
+  // One screen, parameterized by contact type via a declarative spec table. Field values
+  // are fetched on demand (get <key>); edits send set <key> <v>; actions are one-shot CLI.
+  static constexpr int ADMIN_MAX_FIELDS = 24;
+  static constexpr int ADMIN_CRED_CACHE_N = 8;
+  lv_obj_t*       _admin_screen = NULL;
+  lv_obj_t*       _admin_body = NULL;
+  lv_obj_t*       _admin_kb = NULL;
+  lv_obj_t*       _admin_return_screen = NULL; // screen to restore on back
+  bool            _admin_active = false;        // Admin screen is the active screen (gates reply interception)
+  uint8_t         _admin_pubkey[6] = {0};       // node being administered
+  uint8_t         _admin_type = 0;              // ADV_TYPE_REPEATER / ADV_TYPE_ROOM (drives the spec mask)
+  char            _admin_conv_key[CHAT_PEER_NAME_MAX] = {0};  // conv_key of the admin target (reply matching)
+  lv_obj_t*       _admin_widget[ADMIN_MAX_FIELDS] = {0};      // visible-row -> input widget
+  uint8_t         _admin_specidx[ADMIN_MAX_FIELDS] = {0};     // visible-row -> spec index
+  int             _admin_field_count = 0;       // number of visible rows built
+  uint32_t        _admin_dirty = 0;             // per-row "edited since load" bitmask (commit only dirty fields)
+  // Serial get queue (one outstanding; mesh is slow + lossy)
+  int             _admin_pending_row = -1;      // visible-row of the outstanding get (-1 = none)
+  bool            _admin_await_ack = false;     // a set/action reply is expected (toast it)
+  bool            _admin_action_to_popup = false; // route the next ack to showInfoPopup (e.g. neighbors)
+  uint8_t         _admin_get_queue[ADMIN_MAX_FIELDS] = {0};
+  uint8_t         _admin_get_head = 0, _admin_get_count = 0;
+  lv_timer_t*     _admin_reply_timer = NULL;    // single-shot timeout for the outstanding get/ack
+  uint8_t         _admin_timeout_streak = 0;
+  // Shared confirm dialog (radio edit, reboot, start ota): holds the CLI command until confirmed.
+  lv_obj_t*       _admin_confirm_popup = NULL;  // confirm-dialog backdrop
+  lv_obj_t*       _admin_confirm_lbl = NULL;
+  char            _admin_pending_cmd[80] = {0};
+  bool            _admin_confirm_to_popup = false;
+  // Blind setperm sub-form
+  lv_obj_t*       _admin_perm_popup = NULL;
+  lv_obj_t*       _admin_perm_key_ta = NULL;
+  lv_obj_t*       _admin_perm_role_dd = NULL;
+  lv_obj_t*       _admin_perm_kb = NULL;
+  // Transient admin-state cache (is_admin isn't persisted; learned from LoginResult)
+  struct AdminCred { uint8_t pubkey[6]; bool is_admin; uint32_t ts_ms; uint16_t keep_alive; bool used; };
+  AdminCred       _admin_creds[ADMIN_CRED_CACHE_N] = {};
+  bool            _admin_open_after_login = false;
+  uint8_t         _admin_pending_pk[6] = {0};
+  uint8_t         _admin_pending_type = 0;
+  lv_obj_t*       _admin_pending_ret = NULL;
+  char            _admin_pending_name[CHAT_PEER_NAME_MAX] = {0};
+
   // LVGL display + input. Resolution is read from the LGFX device after
   // setRotation, so this UITask doesn't care whether the variant chose
   // portrait or landscape.
@@ -1048,6 +1092,33 @@ private:
   static void newchan_save_cb(lv_event_t* e);
   static void newchan_ta_event_cb(lv_event_t* e);
   static void newchan_kb_event_cb(lv_event_t* e);
+
+  // Repeater/room Admin screen
+  void      buildAdminScreen();
+  void      openAdmin(const uint8_t* pubkey6, uint8_t type, const char* name, lv_obj_t* ret);
+  void      adminRebuildFields();       // (re)create the spec rows for _admin_type
+  void      adminEnqueueGet(int row);   // queue a single field's value fetch
+  void      adminRefreshAll();          // queue every visible field
+  void      adminIssueNextGet();        // pop + send the next queued get
+  bool      adminConsumeReply(const char* text);  // returns true if the reply was consumed
+  void      adminSendSet(int row, const char* value);
+  void      adminSendAction(const char* cli, bool to_popup);  // send a CLI command, await its ack
+  void      adminConfirm(const char* msg, const char* cmd, bool to_popup);  // confirm dialog -> adminSendAction
+  void      adminSetFieldValue(int row, const char* value);  // parsed "> v" -> widget
+  int       adminRowOfWidget(lv_obj_t* w);   // visible-row owning a field widget, or -1
+  AdminCred* adminCredFor(const uint8_t* pk);
+  void      adminCacheLogin(const uint8_t* pk, bool is_admin, uint16_t ka);
+  static void kebab_admin_cb(lv_event_t* e);
+  static void admin_back_cb(lv_event_t* e);
+  static void admin_refresh_cb(lv_event_t* e);     // header "Refresh all"
+  static void admin_field_event_cb(lv_event_t* e); // focus -> kb; READY/DEFOCUSED -> set
+  static void admin_action_cb(lv_event_t* e);      // action button -> CLI command
+  static void admin_reply_timeout_cb(lv_timer_t* t);
+  static void admin_confirm_go_cb(lv_event_t* e);
+  static void admin_confirm_cancel_cb(lv_event_t* e);
+  static void admin_perm_open_cb(lv_event_t* e);
+  static void admin_perm_go_cb(lv_event_t* e);
+  static void admin_perm_dismiss_cb(lv_event_t* e);
 
 public:
   UITask(mesh::MainBoard* board, BaseSerialInterface* serial)

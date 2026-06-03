@@ -295,6 +295,7 @@ public:
   // on-device UI key chat history by identity instead of a mutable display name.
   const uint8_t* hookKey() const { return _hook_key; }
   bool hookIsChannel() const { return _hook_is_channel; }
+  bool hookIsCli() const { return _hook_is_cli; }
 
   // Local display-name overrides, stored OUTSIDE the contact record (a small
   // RAM table persisted to /disp_names) so they survive advert name overwrites.
@@ -381,7 +382,9 @@ private:
 
   uint8_t _hook_key[6] = {0};   // identity of the msg currently handed to the UI
   bool _hook_is_channel = false;
-  void setHookKey(const uint8_t* k6, bool is_channel) { memcpy(_hook_key, k6, 6); _hook_is_channel = is_channel; }
+  bool _hook_is_cli = false;    // the msg handed to the UI is a CLI_DATA (admin/console) reply
+  void setHookKey(const uint8_t* k6, bool is_channel) { memcpy(_hook_key, k6, 6); _hook_is_channel = is_channel; _hook_is_cli = false; }
+  void setHookCli(bool v) { _hook_is_cli = v; }
 
   void writeOKFrame();
   void writeErrFrame(uint8_t err_code);
