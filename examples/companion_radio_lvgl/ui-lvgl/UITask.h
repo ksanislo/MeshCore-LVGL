@@ -576,13 +576,11 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _admin_widget[ADMIN_MAX_FIELDS] = {0};      // visible-row -> input widget
   uint8_t         _admin_specidx[ADMIN_MAX_FIELDS] = {0};     // visible-row -> spec index
   int             _admin_field_count = 0;       // number of visible rows built
-  uint32_t        _admin_dirty = 0;             // per-row "edited since load" bitmask (commit only dirty fields)
-  // Serial get queue (one outstanding; mesh is slow + lossy)
+  // One outstanding request at a time -- the mesh can't batch, so every get/set is an
+  // explicit, single user action (per-item Refresh / Apply buttons). No auto-load, no auto-save.
   int             _admin_pending_row = -1;      // visible-row of the outstanding get (-1 = none)
   bool            _admin_await_ack = false;     // a set/action reply is expected (toast it)
   bool            _admin_action_to_popup = false; // route the next ack to showInfoPopup (e.g. neighbors)
-  uint8_t         _admin_get_queue[ADMIN_MAX_FIELDS] = {0};
-  uint8_t         _admin_get_head = 0, _admin_get_count = 0;
   lv_timer_t*     _admin_reply_timer = NULL;    // single-shot timeout for the outstanding get/ack
   uint8_t         _admin_timeout_streak = 0;
   // Shared confirm dialog (radio edit, reboot, start ota): holds the CLI command until confirmed.
@@ -1097,11 +1095,10 @@ private:
   void      buildAdminScreen();
   void      openAdmin(const uint8_t* pubkey6, uint8_t type, const char* name, lv_obj_t* ret);
   void      adminRebuildFields();       // (re)create the spec rows for _admin_type
-  void      adminEnqueueGet(int row);   // queue a single field's value fetch
-  void      adminRefreshAll();          // queue every visible field
-  void      adminIssueNextGet();        // pop + send the next queued get
+  bool      adminBusy();                // a request is in flight -> reject + toast (one at a time)
+  void      adminFetch(int row);        // send one "get <key>" for this field (Refresh button)
+  void      adminApply(int row);        // send one "set <key> <v>" for this field (Apply button)
   bool      adminConsumeReply(const char* text);  // returns true if the reply was consumed
-  void      adminSendSet(int row, const char* value);
   void      adminSendAction(const char* cli, bool to_popup);  // send a CLI command, await its ack
   void      adminConfirm(const char* msg, const char* cmd, bool to_popup);  // confirm dialog -> adminSendAction
   void      adminSetFieldValue(int row, const char* value);  // parsed "> v" -> widget
@@ -1110,9 +1107,10 @@ private:
   void      adminCacheLogin(const uint8_t* pk, bool is_admin, uint16_t ka);
   static void kebab_admin_cb(lv_event_t* e);
   static void admin_back_cb(lv_event_t* e);
-  static void admin_refresh_cb(lv_event_t* e);     // header "Refresh all"
-  static void admin_field_event_cb(lv_event_t* e); // focus -> kb; READY/DEFOCUSED -> set
-  static void admin_action_cb(lv_event_t* e);      // action button -> CLI command
+  static void admin_field_event_cb(lv_event_t* e);   // textarea focus -> keyboard
+  static void admin_field_refresh_cb(lv_event_t* e); // per-field Refresh (get)
+  static void admin_field_apply_cb(lv_event_t* e);   // per-field Apply (set)
+  static void admin_action_cb(lv_event_t* e);        // action button -> CLI command
   static void admin_reply_timeout_cb(lv_timer_t* t);
   static void admin_confirm_go_cb(lv_event_t* e);
   static void admin_confirm_cancel_cb(lv_event_t* e);
