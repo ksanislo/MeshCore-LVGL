@@ -6941,6 +6941,16 @@ static const int ADMIN_ACTIONS_N = sizeof(ADMIN_ACTIONS) / sizeof(ADMIN_ACTIONS[
 
 static const char* ADMIN_PLACEHOLDER = "(tap Refresh)";
 
+// Radio sub-field option sets (LoRa). BW reuses the settings table (BW_OPTS / BW_OPTS_STR).
+static const char* SF_OPTS_STR = "5\n6\n7\n8\n9\n10\n11\n12";   // spreading factor 5..12
+static const char* CR_OPTS_STR = "5\n6\n7\n8";                   // coding rate 4/5..4/8
+// nearest bandwidth dropdown index for a value (get radio returns bw as e.g. "62.500")
+static int admin_bwIndex(float v) {
+  int best = 0; float bd = 1e9f;
+  for (int i = 0; i < BW_OPTS_N; i++) { float d = BW_OPTS[i] - v; if (d < 0) d = -d; if (d < bd) { bd = d; best = i; } }
+  return best;
+}
+
 // nth newline-separated token of `list` into out (empty if out of range).
 static void admin_nthToken(const char* list, int idx, char* out, size_t cap) {
   out[0] = 0;
@@ -7093,7 +7103,29 @@ void UITask::adminRebuildFields() {
         addBtns(r, row, true, false);
         break;
       }
-      default: {   // AK_TEXT / AK_INT / AK_FLOAT / AK_PASSWORD / AK_RADIO_TUPLE
+      case AK_RADIO_TUPLE: {
+        // One composite setting (set radio freq bw sf cr) shown as a freq field + 3 dropdowns,
+        // with a single Refresh/Apply that fetches/sends all four at once.
+        lv_obj_t* ff = makeField(_admin_body, "Frequency (MHz)");
+        _admin_radio_freq = makeSelTextarea(ff);
+        lv_textarea_set_one_line(_admin_radio_freq, true);
+        lv_obj_set_width(_admin_radio_freq, LV_PCT(100));
+        lv_textarea_set_accepted_chars(_admin_radio_freq, "0123456789.");
+        lv_textarea_set_placeholder_text(_admin_radio_freq, ADMIN_PLACEHOLDER);
+        lv_obj_add_event_cb(_admin_radio_freq, admin_field_event_cb, LV_EVENT_ALL, NULL);
+        _admin_radio_bw = makeDropdownField(_admin_body, "Bandwidth (kHz)", BW_OPTS_STR);
+        _admin_radio_sf = makeDropdownField(_admin_body, "Spreading factor", SF_OPTS_STR);
+        _admin_radio_cr = makeDropdownField(_admin_body, "Coding rate (4/x)", CR_OPTS_STR);
+        lv_obj_t* r = makeRow(_admin_body);
+        lv_obj_t* spacer = lv_obj_create(r);        // push the two buttons to the right
+        lv_obj_remove_style_all(spacer);
+        lv_obj_set_height(spacer, 1);
+        lv_obj_set_flex_grow(spacer, 1);
+        addBtns(r, row, true, true);
+        w = _admin_radio_freq;   // anchor for the loading hint + row mapping
+        break;
+      }
+      default: {   // AK_TEXT / AK_INT / AK_FLOAT / AK_PASSWORD
         lv_obj_t* f = makeField(_admin_body, sp.label);
         lv_obj_t* r = makeRow(f);
         w = makeSelTextarea(r);
@@ -7232,6 +7264,17 @@ bool UITask::adminConsumeReply(const char* text) {
 void UITask::adminSetFieldValue(int row, const char* value) {
   const AdminFieldSpec& sp = ADMIN_SPEC[_admin_specidx[row]];
   lv_obj_t* w = _admin_widget[row];
+  if (sp.kind == AK_RADIO_TUPLE) {
+    // value = "freq,bw,sf,cr" -> split into the freq field + the three dropdowns
+    char buf[64]; strncpy(buf, value, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+    char* parts[4] = {0}; int n = 0; parts[n++] = buf;
+    for (char* p = buf; *p && n < 4; p++) if (*p == ',') { *p = 0; parts[n++] = p + 1; }
+    if (n > 0 && parts[0]) lv_textarea_set_text(_admin_radio_freq, parts[0]);
+    if (n > 1 && parts[1]) lv_dropdown_set_selected(_admin_radio_bw, admin_bwIndex(strtof(parts[1], nullptr)));
+    if (n > 2 && parts[2]) { int sf = atoi(parts[2]); if (sf < 5) sf = 5; if (sf > 12) sf = 12; lv_dropdown_set_selected(_admin_radio_sf, sf - 5); }
+    if (n > 3 && parts[3]) { int cr = atoi(parts[3]); if (cr < 5) cr = 5; if (cr > 8) cr = 8; lv_dropdown_set_selected(_admin_radio_cr, cr - 5); }
+    return;
+  }
   switch (sp.kind) {
     case AK_BOOL: {
       bool on = (strcasecmp(value, "on") == 0 || strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0);
@@ -7274,13 +7317,13 @@ void UITask::adminApply(int row) {
   const AdminFieldSpec& sp = ADMIN_SPEC[_admin_specidx[row]];
   lv_obj_t* w = _admin_widget[row];
   if (sp.kind == AK_RADIO_TUPLE) {
-    const char* v = lv_textarea_get_text(w);
-    if (!v || !v[0]) { showToast("Enter: freq,bw,sf,cr"); return; }
-    char buf[64]; strncpy(buf, v, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
-    for (char* p = buf; *p; p++) if (*p == ',') *p = ' ';   // accept commas or spaces
-    char f[16], b[16], sfv[8], cr[8];
-    if (sscanf(buf, "%15s %15s %7s %7s", f, b, sfv, cr) != 4) { showToast("Enter: freq,bw,sf,cr"); return; }
-    char cmd[64]; snprintf(cmd, sizeof(cmd), "set radio %s %s %s %s", f, b, sfv, cr);
+    const char* fr = lv_textarea_get_text(_admin_radio_freq);
+    if (!fr || !fr[0]) { showToast("Enter a frequency"); return; }
+    char bw[16], sfv[8], cr[8];
+    lv_dropdown_get_selected_str(_admin_radio_bw, bw, sizeof(bw));
+    lv_dropdown_get_selected_str(_admin_radio_sf, sfv, sizeof(sfv));
+    lv_dropdown_get_selected_str(_admin_radio_cr, cr, sizeof(cr));
+    char cmd[64]; snprintf(cmd, sizeof(cmd), "set radio %s %s %s %s", fr, bw, sfv, cr);
     adminConfirm("Apply radio config? It takes effect only after a MANUAL reboot, and a wrong "
                  "value can make this node unreachable.", cmd, false);
     return;
@@ -7357,7 +7400,7 @@ void UITask::admin_field_event_cb(lv_event_t* e) {
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     s->_set_active_ta = w;
     lv_keyboard_set_textarea(s->_admin_kb, w);
-    lv_keyboard_set_mode(s->_admin_kb, (sp.kind == AK_INT || sp.kind == AK_FLOAT)
+    lv_keyboard_set_mode(s->_admin_kb, (sp.kind == AK_INT || sp.kind == AK_FLOAT || sp.kind == AK_RADIO_TUPLE)
                          ? LV_KEYBOARD_MODE_NUMBER : LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_obj_clear_flag(s->_admin_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(s->_admin_kb, LV_ALIGN_BOTTOM_MID, 0, 0);

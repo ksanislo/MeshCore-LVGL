@@ -575,6 +575,12 @@ class UITask : public AbstractUITask {
   char            _admin_conv_key[CHAT_PEER_NAME_MAX] = {0};  // conv_key of the admin target (reply matching)
   lv_obj_t*       _admin_widget[ADMIN_MAX_FIELDS] = {0};      // visible-row -> input widget
   uint8_t         _admin_specidx[ADMIN_MAX_FIELDS] = {0};     // visible-row -> spec index
+  // Radio tuple is one logical setting (composite set radio) shown as freq field + bw/sf/cr
+  // dropdowns; _admin_widget[radio row] aliases _admin_radio_freq for the loading hint.
+  lv_obj_t*       _admin_radio_freq = NULL;
+  lv_obj_t*       _admin_radio_bw = NULL;
+  lv_obj_t*       _admin_radio_sf = NULL;
+  lv_obj_t*       _admin_radio_cr = NULL;
   int             _admin_field_count = 0;       // number of visible rows built
   // One outstanding request at a time -- the mesh can't batch, so every get/set is an
   // explicit, single user action (per-item Refresh / Apply buttons). No auto-load, no auto-save.
