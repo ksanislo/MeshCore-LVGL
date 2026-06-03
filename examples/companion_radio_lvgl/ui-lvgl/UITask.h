@@ -490,7 +490,7 @@ class UITask : public AbstractUITask {
   // target pull the relevant part (smart paste, Phase 3); for now everything pastes
   // _clip_text verbatim. A lone contact card copies as CLIP_CONTACT_REF (the whole
   // "<hex:type:name>" token + parsed parts); any other selection is CLIP_PLAIN.
-  enum ClipKind : uint8_t { CLIP_EMPTY, CLIP_PLAIN, CLIP_CONTACT_REF };
+  enum ClipKind : uint8_t { CLIP_EMPTY, CLIP_PLAIN, CLIP_CONTACT_REF, CLIP_MENTION };
   char            _crash_note[96];    // one-shot "crash report saved" toast, surfaced from loop()
   char            _clip_text[1024];   // longest copyable today is the ~150B msg body
   uint8_t         _clip_kind;
@@ -743,6 +743,7 @@ class UITask : public AbstractUITask {
   // per-tap by hit-testing the touched character (resolveChip, from sel_event_cb).
   enum ChipKind : uint8_t { CHIP_MENTION, CHIP_HASHTAG };
   void      resolveChip(uint8_t kind, const char* name);   // act on the tapped chip
+  static void chanSenderTapCb(lv_event_t* e);              // tap a channel sender avatar -> open contact
   void      openOrJoinHashtag(const char* name);   // open the channel, or offer to join it
   void      showJoinChannel(const char* name);     // "Add channel #name?" confirm
   static void joinch_join_cb(lv_event_t* e);
@@ -901,6 +902,7 @@ private:
   void        commitManualTime();                   // shown HH:MM -> set clock to HH:MM:00 (local -> UTC)
   void        refreshTimeFields();                  // live-tick the boxes not being edited
   void        refreshSignalMeter();                 // 1Hz: decay SNR envelope -> header bars (hysteretic)
+  void        renderClock(bool colon_hidden);       // clock w/ fixed-width recolored ':' (blink w/o jiggle)
   void        buildSignalPopup();                   // lazily build the signal-meter tuning modal
   void        openSignalMeter();                    // populate from prefs + show
   void        commitSigMeter();                     // parse the 4 fields -> prefs + pushPrefs

@@ -460,7 +460,7 @@ lv_obj_t* UITask::buildHomeScreen() {
   _clock_label = lv_label_create(header);
   lv_label_set_text(_clock_label, "--");
   lv_label_set_recolor(_clock_label, true);   // lets the blink hide just the ':' (bg-colored, same width)
-  lv_obj_set_style_text_color(_clock_label, lv_color_hex(DIM_HEX), 0);
+  lv_obj_set_style_text_color(_clock_label, lv_color_hex(UI_FG_STRONG), 0);  // match the lit signal bars
   lv_obj_set_style_text_font(_clock_label, &lv_font_montserrat_14, 0);
   lv_obj_align(_clock_label, LV_ALIGN_RIGHT_MID, -4, 0);
 
@@ -2423,18 +2423,25 @@ static void addMessageText(lv_obj_t* bubble, const char* text, uint32_t fg) {
 
     appendEscaped(w, end, p, tok - p);                 // plain run before the token
     if (is_mention) {
-      // Color the mention by the user's own avatar color (toggle), else the theme accent.
       char uname[CHAT_PEER_NAME_MAX]; size_t ul = (size_t)(atclose - (at + 2));
       if (ul >= sizeof(uname)) ul = sizeof(uname) - 1;
       memcpy(uname, at + 2, ul); uname[ul] = 0;
-      uint32_t mc = s_mention_user_colors ? nameColor(uname) : UI_ACCENT;
-      // Per-word colored spans so the color survives a wrap inside a multi-word name.
-      // "@" + the (possibly multi-word) username, all in the mention color.
+      // "@" + the (possibly multi-word) username.
       char tagged[CHAT_PEER_NAME_MAX + 1];
       int tl = snprintf(tagged, sizeof(tagged), "@%.*s", (int)(atclose - (at + 2)), at + 2);
       if (tl < 0) tl = 0; if (tl > (int)sizeof(tagged) - 1) tl = sizeof(tagged) - 1;
-      has_recolor = true;
-      if (!appendRecoloredWords(w, end, tagged, tl, mc)) break;
+      if (!s_channel_sender_colors) {
+        // Names-uncolored mode: render the mention in the default text color (readable, no per-user
+        // hash color) -- still tappable via the label's logical source. Matches the un-colored sender
+        // header names. Keeps user names easy to read; the brand avatar still IDs them.
+        appendEscaped(w, end, tagged, tl);
+      } else {
+        // Per-word colored spans so the color survives a wrap inside a multi-word name. Color by the
+        // user's own avatar color (mention toggle), else the theme accent.
+        uint32_t mc = s_mention_user_colors ? nameColor(uname) : UI_ACCENT;
+        has_recolor = true;
+        if (!appendRecoloredWords(w, end, tagged, tl, mc)) break;
+      }
       p = atclose + 1;
     } else {
       // Color the tag by the channel's own color (toggle), else the theme accent.
@@ -2697,6 +2704,7 @@ static bool textHasRichToken(const char* text) {
 struct CardTarget {
   uint8_t pubkey[PUB_KEY_SIZE]; uint8_t type; char name[CHAT_PEER_NAME_MAX];
   bool    is_channel;          // true -> copy as a channel link (uses secret/seclen, not pubkey)
+  bool    is_mention;          // true -> copy as a @mention (channel sender header): @[name]
   uint8_t secret[32]; uint8_t seclen;
 };
 struct ChanCardTarget { char name[CHAT_PEER_NAME_MAX]; uint8_t secret[32]; uint8_t seclen; };
@@ -3131,9 +3139,11 @@ void UITask::appendChatBubble(const ChatMessage* m) {
     if (show_name) {
       char sname[CHAT_PEER_NAME_MAX + 4];
       sanitizeForFont(m->sender[0] ? m->sender : "?", sname, sizeof(sname));
-      if (_chat_is_channel && s_channel_sender_colors) {
-        // Channel bubbles: brand each sender with a small name-colored avatar stamp
-        // and color their name, so a busy channel is easy to scan by who said what.
+      if (_chat_is_channel) {
+        // Channel bubbles: brand each sender with a small name-colored avatar stamp (ALWAYS -- the
+        // circle IDs who said what). The sender-colors toggle only colors the NAME text: on -> the
+        // user's name-hash color, off -> the default readable fg (names easier to read; same as the
+        // @mention behavior). The branded circle is independent of the toggle.
         lv_obj_t* hdr = lv_obj_create(_chat_history);
         lv_obj_remove_style_all(hdr);
         lv_obj_set_width(hdr, LV_PCT(100));
@@ -3159,8 +3169,26 @@ void UITask::appendChatBubble(const ChatMessage* m) {
 
         lv_obj_t* name = lv_label_create(hdr);
         lv_label_set_text(name, sname);
-        lv_obj_set_style_text_color(name, lv_color_hex(nameColor(sname)), 0);
+        lv_obj_set_style_text_color(name, lv_color_hex(s_channel_sender_colors ? nameColor(sname) : FG_HEX), 0);
         lv_obj_set_style_text_font(name, fontCaption(), 0);
+
+        // Tap the brand avatar -> open the sender's contact (if we have one). Long-press the header
+        // -> atomically select the name + copy it as a @[name] mention (a reply handle). The name is a
+        // plain (non-clickable) label so the long-press falls through to the header for a WHOLE-name
+        // select rather than a char drag-select (sel_event_cb does char-select on labels, atomic on
+        // non-labels).
+        lv_obj_add_flag(av, LV_OBJ_FLAG_CLICKABLE);
+        { char* an = (char*)lv_mem_alloc(strlen(sname) + 1);
+          if (an) { strcpy(an, sname); lv_obj_set_user_data(av, an);
+                    lv_obj_add_event_cb(av, msglabel_free_cb, LV_EVENT_DELETE, NULL); } }
+        lv_obj_add_event_cb(av, chanSenderTapCb, LV_EVENT_CLICKED, NULL);
+
+        lv_obj_add_flag(hdr, LV_OBJ_FLAG_CLICKABLE);
+        { CardTarget* mt = (CardTarget*)lv_mem_alloc(sizeof(CardTarget));
+          if (mt) { memset(mt, 0, sizeof(*mt)); mt->is_mention = true;
+                    strncpy(mt->name, sname, sizeof(mt->name) - 1); mt->name[sizeof(mt->name) - 1] = 0;
+                    lv_obj_set_user_data(hdr, mt); lv_obj_add_event_cb(hdr, card_free_cb, LV_EVENT_DELETE, NULL);
+                    makeCardSelectable(hdr); } }
       } else {
         lv_obj_t* name = lv_label_create(_chat_history);
         lv_label_set_text(name, sname);
@@ -8070,6 +8098,10 @@ const char* UITask::pasteTextFor(uint8_t field_kind) {
       default:              return _clip_text;          // whole <hex:type:name> token (re-renders as a card)
     }
   }
+  if (_clip_kind == CLIP_MENTION) {
+    // Into the message box: the @[name] token (renders/sends as a mention). Anywhere else: plain name.
+    return (field_kind == FK_CHAT_COMPOSE) ? _clip_text : _clip_name;
+  }
   return _clip_text;                                    // CLIP_PLAIN -> verbatim everywhere
 }
 
@@ -8273,6 +8305,14 @@ void UITask::resolveChip(uint8_t kind, const char* name) {
     if (strcmp(c.name, name) == 0) { openContactInfo(c.id.pub_key, _chat_screen); return; }
   }
   // unknown contact -> no action (the name renders highlighted but isn't a contact)
+}
+
+// Tap a channel sender's brand avatar -> open their contact (exact name match), if we have one.
+// Ignored mid-selection so a long-press that selected the header name doesn't also navigate.
+void UITask::chanSenderTapCb(lv_event_t* e) {
+  if (!_instance || _instance->_sel.state != SS_IDLE) return;
+  const char* nm = (const char*)lv_obj_get_user_data(lv_event_get_target(e));
+  if (nm && nm[0]) _instance->resolveChip(CHIP_MENTION, nm);
 }
 
 void UITask::makeLabelSelectable(lv_obj_t* lbl) {
@@ -8626,7 +8666,14 @@ void UITask::showSelMenu() {
 void UITask::copySelection() {
   if (_sel.kind == SEL_CARD && _sel.target) {
     const CardTarget* t = (const CardTarget*)lv_obj_get_user_data(_sel.target);
-    if (t && t->is_channel) {
+    if (t && t->is_mention) {
+      // Channel sender header: copy as a @mention so it pastes into the message box as @[name]
+      // (a reply handle) and as plain name into any other field.
+      char ment[CHAT_PEER_NAME_MAX + 4];
+      snprintf(ment, sizeof(ment), "@[%s]", t->name);
+      clipSet(CLIP_MENTION, ment, nullptr, t->name, 0);
+      showToast("Name copied");
+    } else if (t && t->is_channel) {
       // Copy a channel as a meshcore://channel/add link -> pastes into chat as a
       // tappable "Join channel" chip (mirrors how a contact pastes as a card).
       char hex[2 * 32 + 1]; mesh::Utils::toHex(hex, t->secret, t->seclen);
@@ -8938,6 +8985,22 @@ void UITask::refreshTimeFields() {
   if (!editing(_set_time_hh)) { snprintf(b, sizeof b, "%02d", dh);          lv_textarea_set_text(_set_time_hh, b); }
   if (!editing(_set_time_mm)) { snprintf(b, sizeof b, "%02d", tmv.tm_min);  lv_textarea_set_text(_set_time_mm, b); }
   if (h12 && _set_time_ampm)  lv_dropdown_set_selected(_set_time_ampm, tmv.tm_hour >= 12 ? 1 : 0);
+}
+
+// Render _clock_text with the ':' ALWAYS as a recolor span -- visible (UI_FG_STRONG, matching the
+// lit signal bars) or hidden (UI_SURFACE = header bg). Emitting the same recolor structure in every
+// phase means the measured content width is identical whether the colon shows or not, so the hour
+// never shifts on the blink (a plain ':' vs ' ' -- or plain vs recolored -- differs in width in a
+// proportional font). recolor was enabled on _clock_label at creation.
+void UITask::renderClock(bool colon_hidden) {
+  if (!_clock_label || !_clock_text[0]) return;
+  const char* c = strchr(_clock_text, ':');
+  if (!c) { lv_label_set_text(_clock_label, _clock_text); return; }
+  uint32_t col = (colon_hidden ? UI_SURFACE : UI_FG_STRONG) & 0xFFFFFF;
+  char b[40];
+  lv_snprintf(b, sizeof(b), "%.*s\x01%06X :\x01%s",
+              (int)(c - _clock_text), _clock_text, (unsigned)col, c + 1);
+  lv_label_set_text(_clock_label, b);
 }
 
 // Map the decayed SNR envelope to 0-4 lit bars and recolor. Thresholds are evenly spaced
@@ -10510,7 +10573,7 @@ void UITask::loop() {
         strftime(buf, sizeof(buf), "%H:%M", &tmv);     // e.g. "21:05"
       }
       strncpy(_clock_text, buf, sizeof(_clock_text) - 1); _clock_text[sizeof(_clock_text) - 1] = 0;
-      lv_label_set_text(_clock_label, buf);
+      renderClock(_clock_blink != 0);   // re-render with the current blink phase (same width either way)
       if (_sig_meter) {   // re-anchor to the (re-sized) clock, then update the bars
         lv_obj_align_to(_sig_meter, _clock_label, LV_ALIGN_OUT_LEFT_MID, -6, 0);
         refreshSignalMeter();
@@ -10531,9 +10594,7 @@ void UITask::loop() {
     uint8_t phase = (uint8_t)((now / 500) & 1);
     if (phase != _clock_blink) {
       _clock_blink = phase;
-      char b[16]; strncpy(b, _clock_text, sizeof(b) - 1); b[sizeof(b) - 1] = 0;
-      if (phase) { char* c = strchr(b, ':'); if (c) *c = ' '; }   // hide the colon on the off phase
-      lv_label_set_text(_clock_label, b);
+      renderClock(phase != 0);   // off phase hides the colon (recolored to bg, same width)
     }
   }
 
