@@ -227,7 +227,9 @@ class UITask : public AbstractUITask {
   bool            _chat_keep_scroll = false;// rebuildChatHistory: skip scroll-to-bottom (paging re-anchors)
   bool            _chat_prog_scroll = false;// a programmatic scroll/rebuild is in progress -> ignore scroll cb
   ChatMessage*    _gather = nullptr;        // PSRAM scratch (residentCap msgs) for gathering a range/chunk
-  int             _rrowStart[CHAT_RES_MAX]; // child index where each resident message's bubbles start
+  int             _rrowChildN[CHAT_RES_MAX * 2];// child-object count per resident message (for edge trim);
+                                                // 2x so a page can transiently exceed cap before trimming
+
   int             _rrowCount = 0;           // resident message count (== _rlast-_rfirst after a render)
 
   // Contact Info page (+ Path Editor sub-page). Lazily built, reused. The same

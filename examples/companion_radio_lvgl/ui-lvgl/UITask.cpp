@@ -3372,8 +3372,9 @@ void UITask::rebuildChatHistory() {
 
   ensureChatRenderCtx();
   for (int i = 0; i < cnt; i++) {
-    _rrowStart[_rrowCount++] = (int)lv_obj_get_child_cnt(_chat_history);   // child index this msg starts at
+    uint32_t before = lv_obj_get_child_cnt(_chat_history);
     appendChatBubble(&_gather[i]);
+    _rrowChildN[_rrowCount++] = (int)(lv_obj_get_child_cnt(_chat_history) - before);  // children this msg made
   }
 
   lv_obj_update_layout(_chat_history);
@@ -3396,61 +3397,118 @@ int UITask::computeChatWinK() {
   return k;
 }
 
-// A paging step does a BOUNDED full rebuild of the resident range (<= residentCap bubbles), then
-// re-anchors on a message present in both the old and new range so the view doesn't jump. In LVGL
-// lv_obj_get_y() is the scroll-INDEPENDENT layout position, so a message's viewport offset is
-// get_y() - scroll_y; restoring that offset after the rebuild keeps it visually fixed.
-
-// Scrolled near the TOP with older history: slide the resident window one chunk older (the chunk is
-// read from SD by gatherRange), trimming the bottom to stay <= residentCap, and re-anchor on the old
-// top message so the view holds steady.
-void UITask::expandChatOlder() {
-  if (_search_active && _search_filter[0]) return;
-  if (_rfirst <= 0) return;                          // already at the start of history
-  int chunk = _chat_win_k > 0 ? _chat_win_k : 8;
-  int cap   = residentCap();
-  int oldFirst = _rfirst;
-  int newFirst = oldFirst - chunk; if (newFirst < 0) newFirst = 0;
-  int newLast  = _rlast; if (newLast - newFirst > cap) newLast = newFirst + cap;
-  if (newFirst == oldFirst) return;
-
-  lv_coord_t off = 0;                                // viewport offset of the anchor (old top) message
-  { int row = oldFirst - _rfirst;                    // == 0 (anchor is the current top)
-    if (row >= 0 && row < _rrowCount) { lv_obj_t* ch = lv_obj_get_child(_chat_history, _rrowStart[row]);
-      if (ch) off = lv_obj_get_y(ch) - lv_obj_get_scroll_y(_chat_history); } }
-
-  _rfirst = newFirst; _rlast = newLast;
-  _chat_keep_scroll = true; rebuildChatHistory(); _chat_keep_scroll = false;
-
-  { int row = oldFirst - _rfirst;                    // anchor's new row after the slide
-    if (row >= 0 && row < _rrowCount) { lv_obj_t* ch = lv_obj_get_child(_chat_history, _rrowStart[row]);
-      if (ch) { _chat_prog_scroll = true; lv_obj_scroll_to_y(_chat_history, lv_obj_get_y(ch) - off, LV_ANIM_OFF); _chat_prog_scroll = false; } } }
+// Total scrollable content height (scrolled-above + viewport + below) -- for re-anchor height deltas.
+static lv_coord_t chatContentH(lv_obj_t* c) {
+  return lv_obj_get_scroll_top(c) + lv_obj_get_content_height(c) + lv_obj_get_scroll_bottom(c);
 }
 
-// Scrolled near the BOTTOM with newer (previously trimmed) history available: slide the window one
-// chunk newer, trimming the top, and re-anchor on the old bottom message.
+// Paging is INCREMENTAL (O(chunk), not O(resident)): render/delete only the chunk's bubbles. Bursts/
+// dates at a chunk seam aren't reconciled -> an occasional redundant header/date line; cosmetic.
+
+// Scrolled near the TOP with older history: render an older chunk (read from SD by gatherRange),
+// prepend it (move the fresh children to the front), re-anchor by the inserted height, then trim the
+// bottom back to residentCap (those bubbles are below the viewport, so no further re-anchor).
+void UITask::expandChatOlder() {
+  if (_search_active && _search_filter[0]) return;
+  if (_rfirst <= 0) return;
+  int chunk = _chat_win_k > 0 ? _chat_win_k : 8;
+  int newFirst = _rfirst - chunk; if (newFirst < 0) newFirst = 0;
+  if (newFirst == _rfirst) return;
+  int m = gatherRange(newFirst, _rfirst, ensureGather());
+  if (m <= 0) return;
+
+  _chat_prog_scroll = true;
+  lv_coord_t beforeH = chatContentH(_chat_history);
+  lv_coord_t beforeY = lv_obj_get_scroll_y(_chat_history);
+
+  // render the chunk as an isolated forward run at the tail, capturing each message's child count
+  _crender_last_sender[0] = 0; _crender_last_outgoing = false; _crender_last_day = -999999;
+  _crender_first = true; _crender_last_ts = 0; _crender_last_footer = NULL; _crender_footer_collapsible = false;
+  ensureChatRenderCtx();
+  uint32_t childBefore = lv_obj_get_child_cnt(_chat_history);
+  int chunkChild[CHAT_RES_MAX]; uint32_t prev = childBefore;
+  for (int i = 0; i < m; i++) {
+    appendChatBubble(&_gather[i]);
+    uint32_t now = lv_obj_get_child_cnt(_chat_history); chunkChild[i] = (int)(now - prev); prev = now;
+  }
+  uint32_t childAfter = lv_obj_get_child_cnt(_chat_history);
+
+  // move the fresh children (at the tail) to the front, preserving order
+  static lv_obj_t* fresh[CHAT_RES_MAX * 4];
+  uint32_t fn = 0;
+  for (uint32_t idx = childBefore; idx < childAfter && fn < (sizeof(fresh)/sizeof(fresh[0])); idx++)
+    fresh[fn++] = lv_obj_get_child(_chat_history, idx);
+  for (uint32_t j = 0; j < fn; j++) lv_obj_move_to_index(fresh[j], (int32_t)j);
+
+  // splice the chunk's row counts to the FRONT of the row map
+  memmove(_rrowChildN + m, _rrowChildN, (size_t)_rrowCount * sizeof(int));
+  for (int i = 0; i < m; i++) _rrowChildN[i] = chunkChild[i];
+  _rrowCount += m;
+  _rfirst = newFirst;
+
+  lv_obj_update_layout(_chat_history);
+  lv_coord_t delta = chatContentH(_chat_history) - beforeH;        // inserted (older) height
+  lv_obj_scroll_to_y(_chat_history, beforeY + delta, LV_ANIM_OFF); // re-anchor: view holds steady
+
+  // trim the bottom back to the cap (below the viewport -> no re-anchor)
+  int cap = residentCap();
+  if (_rrowCount > cap) {
+    int t = _rrowCount - cap;
+    int delN = 0; for (int i = _rrowCount - t; i < _rrowCount; i++) delN += _rrowChildN[i];
+    for (int k = 0; k < delN; k++) {
+      uint32_t cc = lv_obj_get_child_cnt(_chat_history); if (!cc) break;
+      lv_obj_del(lv_obj_get_child(_chat_history, cc - 1));
+    }
+    _rrowCount -= t; _rlast -= t; _sending_lbl = NULL;
+  }
+  sb_update(_chat_history, _chat_sb);
+  _chat_prog_scroll = false;
+}
+
+// Scrolled near the BOTTOM with newer (previously trimmed) history: render a newer chunk and append
+// it at the bottom (below the viewport -> no shift), then trim the top back to cap, re-anchoring by
+// the removed height so the view holds.
 void UITask::pageChatNewer() {
   if (_search_active && _search_filter[0]) return;
-  if (_rlast >= _chat_total) return;                 // already at the live tail
+  if (_rlast >= _chat_total) return;
   int chunk = _chat_win_k > 0 ? _chat_win_k : 8;
-  int cap   = residentCap();
-  int oldLast  = _rlast;
-  int newLast  = oldLast + chunk; if (newLast > _chat_total) newLast = _chat_total;
-  int newFirst = _rfirst; if (newLast - newFirst > cap) newFirst = newLast - cap;
-  if (newLast == oldLast) return;
-  int anchor = oldLast - 1;                          // old bottom message
+  int newLast = _rlast + chunk; if (newLast > _chat_total) newLast = _chat_total;
+  if (newLast == _rlast) return;
+  int m = gatherRange(_rlast, newLast, ensureGather());
+  if (m <= 0) return;
 
-  lv_coord_t off = 0;
-  { int row = anchor - _rfirst;
-    if (row >= 0 && row < _rrowCount) { lv_obj_t* ch = lv_obj_get_child(_chat_history, _rrowStart[row]);
-      if (ch) off = lv_obj_get_y(ch) - lv_obj_get_scroll_y(_chat_history); } }
+  _chat_prog_scroll = true;
+  _crender_last_sender[0] = 0; _crender_last_outgoing = false; _crender_last_day = -999999;
+  _crender_first = true; _crender_last_ts = 0; _crender_last_footer = NULL; _crender_footer_collapsible = false;
+  ensureChatRenderCtx();
+  uint32_t prev = lv_obj_get_child_cnt(_chat_history);
+  for (int i = 0; i < m; i++) {
+    appendChatBubble(&_gather[i]);   // appends at the END = the correct (newer) position
+    uint32_t now = lv_obj_get_child_cnt(_chat_history);
+    _rrowChildN[_rrowCount++] = (int)(now - prev); prev = now;
+  }
+  _rlast = newLast;
 
-  _rfirst = newFirst; _rlast = newLast;
-  _chat_keep_scroll = true; rebuildChatHistory(); _chat_keep_scroll = false;
-
-  { int row = anchor - _rfirst;
-    if (row >= 0 && row < _rrowCount) { lv_obj_t* ch = lv_obj_get_child(_chat_history, _rrowStart[row]);
-      if (ch) { _chat_prog_scroll = true; lv_obj_scroll_to_y(_chat_history, lv_obj_get_y(ch) - off, LV_ANIM_OFF); _chat_prog_scroll = false; } } }
+  int cap = residentCap();
+  if (_rrowCount > cap) {
+    int t = _rrowCount - cap;
+    int delN = 0; for (int i = 0; i < t; i++) delN += _rrowChildN[i];
+    lv_obj_update_layout(_chat_history);
+    lv_coord_t beforeH = chatContentH(_chat_history);
+    for (int k = 0; k < delN; k++) {
+      if (!lv_obj_get_child_cnt(_chat_history)) break;
+      lv_obj_del(lv_obj_get_child(_chat_history, 0));    // delete from the front (oldest)
+    }
+    memmove(_rrowChildN, _rrowChildN + t, (size_t)(_rrowCount - t) * sizeof(int));
+    _rrowCount -= t; _rfirst += t; _sending_lbl = NULL;
+    lv_obj_update_layout(_chat_history);
+    lv_coord_t removed = beforeH - chatContentH(_chat_history);   // height of the trimmed top
+    lv_obj_scroll_to_y(_chat_history, lv_obj_get_scroll_y(_chat_history) - removed, LV_ANIM_OFF);
+  } else {
+    lv_obj_update_layout(_chat_history);
+  }
+  sb_update(_chat_history, _chat_sb);
+  _chat_prog_scroll = false;
 }
 
 // Scroll within the chat history: when it gets NEAR the top and older messages exist, request an
