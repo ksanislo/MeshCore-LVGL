@@ -14,6 +14,11 @@
 #ifndef CHAT_HISTORY_CAP
   #define CHAT_HISTORY_CAP 48
 #endif
+// Hard cap on bubbles resident at once in the virtualized chat view (bounds widgets/memory/scroll
+// cost regardless of conversation length). The live resident window slides within this.
+#ifndef CHAT_RES_MAX
+  #define CHAT_RES_MAX 64
+#endif
 
 struct UiPalette;   // ui_theme.h (full definition); only a reference is used here
 
@@ -208,12 +213,22 @@ class UITask : public AbstractUITask {
   // Chat windowed rendering: build only ~a screenful of bubbles (not all CAP), lazy-load older
   // on scroll-up. K is derived from the chat band height / the DENSEST bubble unit (a one-line
   // bubble + row gap -- footers collapse in a burst), so it adapts to screen size/orientation.
-  int             _chat_win_first = 0;      // oldest loaded-set index currently rendered
-  int             _chat_win_k = 0;          // max bubbles a screen can show (+ overscan)
+  // Virtualized scrollback: the resident bubbles cover FILE-record range [_rfirst, _rlast) of the
+  // open conversation (_chat_total = its total record count). The window is BOUNDED (~residentCap
+  // bubbles): scrolling up pages an older chunk from SD at the top and trims a chunk off the bottom;
+  // scrolling down pages newer and trims the top. _rlast == _chat_total means we're at the live tail.
+  int             _chat_total = 0;          // total persisted records in the open conversation
+  int             _rfirst = 0;              // file index of the oldest resident bubble
+  int             _rlast  = 0;              // file index just past the newest resident bubble
+  int             _chat_win_k = 0;          // max bubbles a screen can show (+ overscan); = page chunk
   bool            _chat_win_reset = true;   // next full rebuild snaps the window to the newest screenful
-  bool            _chat_want_older = false; // scrolled near top w/ older available -> expand (serviced in loop)
-  bool            _chat_keep_scroll = false;// rebuildChatHistory: skip scroll-to-bottom (expand re-anchors)
+  bool            _chat_want_older = false; // scrolled near top w/ older available -> page older (loop)
+  bool            _chat_want_newer = false; // scrolled near bottom w/ newer trimmed -> page newer (loop)
+  bool            _chat_keep_scroll = false;// rebuildChatHistory: skip scroll-to-bottom (paging re-anchors)
   bool            _chat_prog_scroll = false;// a programmatic scroll/rebuild is in progress -> ignore scroll cb
+  ChatMessage*    _gather = nullptr;        // PSRAM scratch (residentCap msgs) for gathering a range/chunk
+  int             _rrowStart[CHAT_RES_MAX]; // child index where each resident message's bubbles start
+  int             _rrowCount = 0;           // resident message count (== _rlast-_rfirst after a render)
 
   // Contact Info page (+ Path Editor sub-page). Lazily built, reused. The same
   // screen serves two modes: CINFO_VIEW (an existing contact) and CINFO_ADD
@@ -660,8 +675,12 @@ class UITask : public AbstractUITask {
   void      appendPendingChat();             // incremental: append just the new message(s), else rebuild
   bool      chatAtBottom();                  // chat history pinned to the tail (vs scrolled up reading)
   int       computeChatWinK();               // max bubbles that fit the chat band (densest unit) + overscan
-  void      expandChatOlder();               // scroll-up reached the top -> render an older chunk, re-anchor
-  static void chat_history_scroll_cb(lv_event_t* e);   // detect scroll-to-top -> request older
+  int       residentCap();                   // max resident bubbles before paging trims the far edge
+  ChatMessage* ensureGather();               // lazily allocate the PSRAM gather scratch (residentCap)
+  int       gatherRange(int first, int last, ChatMessage* out);  // copy file records [first,last) (buf+SD)
+  void      expandChatOlder();               // page an older chunk in at the top; trim the bottom; re-anchor
+  void      pageChatNewer();                 // page a newer chunk in at the bottom; trim the top; re-anchor
+  static void chat_history_scroll_cb(lv_event_t* e);   // detect scroll-to-edge -> request older/newer
   void      layoutChatBody(bool keyboard_shown);
   void      updateCharCount();   // refresh the compose char-count label (shown while typing)
   // When a bottom-docked keyboard `kb` is shown, scroll `scroll` so the focused

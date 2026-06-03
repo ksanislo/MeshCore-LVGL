@@ -3271,58 +3271,113 @@ void UITask::appendChatBubble(const ChatMessage* m) {
   _crender_first = false;
 }
 
+// Max resident bubbles before paging trims the far edge (~3 screenfuls, clamped to CHAT_RES_MAX) --
+// bounds widgets / memory / scroll cost regardless of how far back you scroll.
+int UITask::residentCap() {
+  int k = _chat_win_k > 0 ? _chat_win_k : computeChatWinK();
+  int cap = 3 * k;
+  if (cap < 24) cap = 24;
+  if (cap > CHAT_RES_MAX) cap = CHAT_RES_MAX;
+  return cap;
+}
+
+// Lazily allocate the PSRAM scratch used to gather a resident range/chunk.
+ChatMessage* UITask::ensureGather() {
+  if (!_gather) {
+    _gather = (ChatMessage*)ps_malloc(sizeof(ChatMessage) * CHAT_RES_MAX);
+    if (!_gather) _gather = (ChatMessage*)malloc(sizeof(ChatMessage) * CHAT_RES_MAX);
+  }
+  return _gather;
+}
+
+// Copy the messages for file-record range [first,last) into out (<= CHAT_RES_MAX entries), oldest-
+// first. The newest records come from the store's live RAM buffer (up-to-date status); anything older
+// is read from SD by O(1) offset. Returns the count written.
+int UITask::gatherRange(int first, int last, ChatMessage* out) {
+  if (first < 0) first = 0;
+  if (last > _chat_total) last = _chat_total;
+  if (last <= first || !out) return 0;
+  if (last - first > CHAT_RES_MAX) first = last - CHAT_RES_MAX;        // never overflow the scratch
+  const ChatMessage* bufp[CHAT_HISTORY_CAP];
+  int bufN = _msgs->messagesFor(_chat_key, bufp, CHAT_HISTORY_CAP);    // newest bufN: file [total-bufN, total)
+  int bufStart = _chat_total - bufN;
+  int n = 0;
+  int diskLast = (last < bufStart) ? last : bufStart;                 // disk portion: [first, diskLast)
+  if (first < diskLast) n += _msgs->readRecords(_chat_key, first, diskLast - first, out);
+  int bs = (first > bufStart) ? first : bufStart;                     // RAM portion: [bs, last)
+  for (int i = bs; i < last && n < CHAT_RES_MAX; i++) {
+    int bi = i - bufStart;
+    if (bi >= 0 && bi < bufN) out[n++] = *bufp[bi];
+  }
+  return n;
+}
+
 void UITask::rebuildChatHistory() {
   _chat_pending = false;   // any rebuild path satisfies a pending incoming-message refresh
   if (!_chat_history) return;
   bool prevProg = _chat_prog_scroll; _chat_prog_scroll = true;  // clean/build/scroll fire scroll cbs -> ignore them
   lv_obj_clean(_chat_history);
   _sending_lbl = NULL;  // old labels just got deleted; re-set if a sending msg renders
-
-  const ChatMessage* all[CHAT_HISTORY_CAP];
-  int n = _msgs->messagesFor(_chat_key, all, CHAT_HISTORY_CAP);
-
-  bool filtering = _search_active && _search_filter[0];
-
-  // Windowed rendering (non-search): build only the newest screenful of bubbles; scroll-up grows
-  // the window older (expandChatOlder). Search renders all matches (no window).
-  if (!filtering) {
-    if (_chat_win_reset) { _chat_win_k = computeChatWinK(); _chat_win_first = (n > _chat_win_k) ? n - _chat_win_k : 0; _chat_win_reset = false; }
-    if (_chat_win_first < 0) _chat_win_first = 0;
-    if (_chat_win_first > n) _chat_win_first = (n > _chat_win_k) ? n - _chat_win_k : 0;
-  }
-
-  const ChatMessage* shown[CHAT_HISTORY_CAP];
-  int sn = 0;
-  for (int i = (filtering ? 0 : _chat_win_first); i < n; i++) {
-    if (filtering && !containsCI(all[i]->text, _search_filter)) continue;
-    shown[sn++] = all[i];
-  }
+  _rrowCount = 0;
 
   // reset the incremental render cursor (appendChatBubble advances it)
-  _crender_last_sender[0] = 0;
-  _crender_last_outgoing = false;
-  _crender_last_day = -999999;
-  _crender_first = true;
-  _crender_last_ts = 0;
-  _crender_last_footer = NULL;
-  _crender_footer_collapsible = false;
+  _crender_last_sender[0] = 0; _crender_last_outgoing = false; _crender_last_day = -999999;
+  _crender_first = true; _crender_last_ts = 0; _crender_last_footer = NULL; _crender_footer_collapsible = false;
 
-  if (sn == 0) {
+  // Search: render all matches from the loaded RAM window (search isn't virtualized).
+  if (_search_active && _search_filter[0]) {
+    const ChatMessage* all[CHAT_HISTORY_CAP];
+    int n = _msgs->messagesFor(_chat_key, all, CHAT_HISTORY_CAP);
+    ensureChatRenderCtx();
+    int sn = 0;
+    for (int i = 0; i < n; i++) { if (containsCI(all[i]->text, _search_filter)) { appendChatBubble(all[i]); sn++; } }
+    if (sn == 0) {
+      lv_obj_t* empty = lv_label_create(_chat_history);
+      lv_label_set_text(empty, "No matches.");
+      lv_obj_set_style_text_color(empty, lv_color_hex(DIM_HEX), 0);
+      lv_obj_center(empty);
+    }
+    lv_obj_update_layout(_chat_history);
+    if (!_chat_keep_scroll) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
+    sb_update(_chat_history, _chat_sb);
+    _chat_prog_scroll = prevProg;
+    return;
+  }
+
+  // Virtualized: on open (or a tail snap) reset the resident window to the newest screenful; paging
+  // slides [_rfirst,_rlast) and calls back here with _chat_win_reset clear.
+  _chat_total = _msgs->recordCount(_chat_key);
+  if (_chat_win_reset || _rlast == 0) {
+    _chat_win_k = computeChatWinK();
+    _rlast  = _chat_total;
+    _rfirst = (_chat_total > _chat_win_k) ? _chat_total - _chat_win_k : 0;
+    _chat_win_reset = false;
+  }
+  if (_rlast > _chat_total) _rlast = _chat_total;
+  if (_rfirst < 0) _rfirst = 0;
+  if (_rfirst > _rlast) _rfirst = _rlast;
+
+  int cnt = gatherRange(_rfirst, _rlast, ensureGather());
+  _rfirst = _rlast - cnt;   // gatherRange clamps `first` to fit the scratch -> keep _rfirst consistent
+  if (cnt == 0) {
     lv_obj_t* empty = lv_label_create(_chat_history);
-    lv_label_set_text(empty, filtering ? "No matches." : "No messages yet.");
+    lv_label_set_text(empty, "No messages yet.");
     lv_obj_set_style_text_color(empty, lv_color_hex(DIM_HEX), 0);
     lv_obj_center(empty);
-    _chat_rendered_n = n;   // baseline for incremental append (0 when truly empty)
+    lv_obj_update_layout(_chat_history);
+    sb_update(_chat_history, _chat_sb);
     _chat_prog_scroll = prevProg;
     return;
   }
 
   ensureChatRenderCtx();
-  for (int i = 0; i < sn; i++) appendChatBubble(shown[i]);
-  _chat_rendered_n = n;
+  for (int i = 0; i < cnt; i++) {
+    _rrowStart[_rrowCount++] = (int)lv_obj_get_child_cnt(_chat_history);   // child index this msg starts at
+    appendChatBubble(&_gather[i]);
+  }
 
   lv_obj_update_layout(_chat_history);
-  if (!_chat_keep_scroll) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);  // bottom (open/new msg); expand re-anchors itself
+  if (!_chat_keep_scroll) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);  // bottom; paging re-anchors itself
   sb_update(_chat_history, _chat_sb);
   _chat_prog_scroll = prevProg;
 }
@@ -3341,80 +3396,61 @@ int UITask::computeChatWinK() {
   return k;
 }
 
-// Total scrollable content height of the chat history (robust: scrolled-above + viewport + below).
-static lv_coord_t chatContentH(lv_obj_t* c) {
-  return lv_obj_get_scroll_top(c) + lv_obj_get_content_height(c) + lv_obj_get_scroll_bottom(c);
+// A paging step does a BOUNDED full rebuild of the resident range (<= residentCap bubbles), then
+// re-anchors on a message present in both the old and new range so the view doesn't jump. In LVGL
+// lv_obj_get_y() is the scroll-INDEPENDENT layout position, so a message's viewport offset is
+// get_y() - scroll_y; restoring that offset after the rebuild keeps it visually fixed.
+
+// Scrolled near the TOP with older history: slide the resident window one chunk older (the chunk is
+// read from SD by gatherRange), trimming the bottom to stay <= residentCap, and re-anchor on the old
+// top message so the view holds steady.
+void UITask::expandChatOlder() {
+  if (_search_active && _search_filter[0]) return;
+  if (_rfirst <= 0) return;                          // already at the start of history
+  int chunk = _chat_win_k > 0 ? _chat_win_k : 8;
+  int cap   = residentCap();
+  int oldFirst = _rfirst;
+  int newFirst = oldFirst - chunk; if (newFirst < 0) newFirst = 0;
+  int newLast  = _rlast; if (newLast - newFirst > cap) newLast = newFirst + cap;
+  if (newFirst == oldFirst) return;
+
+  lv_coord_t off = 0;                                // viewport offset of the anchor (old top) message
+  { int row = oldFirst - _rfirst;                    // == 0 (anchor is the current top)
+    if (row >= 0 && row < _rrowCount) { lv_obj_t* ch = lv_obj_get_child(_chat_history, _rrowStart[row]);
+      if (ch) off = lv_obj_get_y(ch) - lv_obj_get_scroll_y(_chat_history); } }
+
+  _rfirst = newFirst; _rlast = newLast;
+  _chat_keep_scroll = true; rebuildChatHistory(); _chat_keep_scroll = false;
+
+  { int row = oldFirst - _rfirst;                    // anchor's new row after the slide
+    if (row >= 0 && row < _rrowCount) { lv_obj_t* ch = lv_obj_get_child(_chat_history, _rrowStart[row]);
+      if (ch) { _chat_prog_scroll = true; lv_obj_scroll_to_y(_chat_history, lv_obj_get_y(ch) - off, LV_ANIM_OFF); _chat_prog_scroll = false; } } }
 }
 
-// Scroll-up reached the top with older messages loaded: grow the window older by one screenful and
-// re-anchor scroll_y by the inserted height so the view stays put (no jump).
-void UITask::expandChatOlder() {
-  if (_chat_win_first <= 0) return;                  // nothing older in the loaded set
-  if (_search_active && _search_filter[0]) return;   // not while filtering
+// Scrolled near the BOTTOM with newer (previously trimmed) history available: slide the window one
+// chunk newer, trimming the top, and re-anchor on the old bottom message.
+void UITask::pageChatNewer() {
+  if (_search_active && _search_filter[0]) return;
+  if (_rlast >= _chat_total) return;                 // already at the live tail
+  int chunk = _chat_win_k > 0 ? _chat_win_k : 8;
+  int cap   = residentCap();
+  int oldLast  = _rlast;
+  int newLast  = oldLast + chunk; if (newLast > _chat_total) newLast = _chat_total;
+  int newFirst = _rfirst; if (newLast - newFirst > cap) newFirst = newLast - cap;
+  if (newLast == oldLast) return;
+  int anchor = oldLast - 1;                          // old bottom message
 
-  const ChatMessage* all[CHAT_HISTORY_CAP];
-  int n = _msgs->messagesFor(_chat_key, all, CHAT_HISTORY_CAP);
-  int oldFirst = _chat_win_first;
-  if (oldFirst > n) oldFirst = n;
-  int newFirst = oldFirst - (_chat_win_k > 0 ? _chat_win_k : 8);
-  if (newFirst < 0) newFirst = 0;
-  if (newFirst >= oldFirst) return;                  // nothing older to add
+  lv_coord_t off = 0;
+  { int row = anchor - _rfirst;
+    if (row >= 0 && row < _rrowCount) { lv_obj_t* ch = lv_obj_get_child(_chat_history, _rrowStart[row]);
+      if (ch) off = lv_obj_get_y(ch) - lv_obj_get_scroll_y(_chat_history); } }
 
-  _chat_prog_scroll = true;                          // suppress scroll cb across the prepend + re-anchor
-  lv_coord_t beforeH = chatContentH(_chat_history);
-  lv_coord_t beforeY = lv_obj_get_scroll_y(_chat_history);
+  _rfirst = newFirst; _rlast = newLast;
+  _chat_keep_scroll = true; rebuildChatHistory(); _chat_keep_scroll = false;
 
-  // Save the render cursor: it currently reflects the window's BOTTOM (so appendPendingChat keeps
-  // collapsing bursts for new incoming messages). The chunk render below resets+trashes it; the
-  // chunk's reset cursor never touches the saved bottom footer, so the pointer stays valid.
-  char     savSender[CHAT_PEER_NAME_MAX]; memcpy(savSender, _crender_last_sender, sizeof(savSender));
-  bool      savOut    = _crender_last_outgoing;
-  long      savDay    = _crender_last_day;
-  bool      savFirst  = _crender_first;
-  uint32_t  savTs     = _crender_last_ts;
-  lv_obj_t* savFooter = _crender_last_footer;
-  bool      savColl   = _crender_footer_collapsible;
-
-  // Incremental prepend: render ONLY the older chunk [newFirst, oldFirst) as an isolated forward run
-  // (fresh cursor), appended at the tail, then move those fresh children to the FRONT in order. The
-  // existing window's bubbles are left intact -> their text isn't re-wrapped, so an expand costs
-  // O(chunk), not O(window). (Burst/date collapse at the seam isn't reconciled -> a possible extra
-  // header/date line where a run was split across the boundary; cosmetic.)
-  uint32_t childBefore = lv_obj_get_child_cnt(_chat_history);
-  _crender_last_sender[0] = 0;
-  _crender_last_outgoing = false;
-  _crender_last_day = -999999;
-  _crender_first = true;
-  _crender_last_ts = 0;
-  _crender_last_footer = NULL;
-  _crender_footer_collapsible = false;
-  ensureChatRenderCtx();
-  for (int i = newFirst; i < oldFirst; i++) appendChatBubble(all[i]);
-  uint32_t childAfter = lv_obj_get_child_cnt(_chat_history);
-
-  // Move the freshly-appended chunk children (currently at the tail) to the front, preserving order.
-  static lv_obj_t* fresh[CHAT_HISTORY_CAP * 4];      // <=~4 children per msg (date/name/row/footer)
-  uint32_t fn = 0;
-  for (uint32_t idx = childBefore; idx < childAfter && fn < (sizeof(fresh)/sizeof(fresh[0])); idx++)
-    fresh[fn++] = lv_obj_get_child(_chat_history, idx);
-  for (uint32_t j = 0; j < fn; j++) lv_obj_move_to_index(fresh[j], (int32_t)j);
-
-  // Restore the bottom cursor so the next new-message append continues the run correctly.
-  memcpy(_crender_last_sender, savSender, sizeof(savSender));
-  _crender_last_outgoing = savOut;
-  _crender_last_day = savDay;
-  _crender_first = savFirst;
-  _crender_last_ts = savTs;
-  _crender_last_footer = savFooter;
-  _crender_footer_collapsible = savColl;
-
-  _chat_win_first = newFirst;
-
-  lv_obj_update_layout(_chat_history);
-  lv_coord_t delta = chatContentH(_chat_history) - beforeH;   // height the prepended older bubbles added
-  lv_obj_scroll_to_y(_chat_history, beforeY + delta, LV_ANIM_OFF);
-  sb_update(_chat_history, _chat_sb);
-  _chat_prog_scroll = false;
+  { int row = anchor - _rfirst;
+    if (row >= 0 && row < _rrowCount) { lv_obj_t* ch = lv_obj_get_child(_chat_history, _rrowStart[row]);
+      if (ch) { _chat_prog_scroll = true; lv_obj_scroll_to_y(_chat_history, lv_obj_get_y(ch) - off, LV_ANIM_OFF); _chat_prog_scroll = false; } } }
 }
 
 // Scroll within the chat history: when it gets NEAR the top and older messages exist, request an
@@ -3424,10 +3460,12 @@ void UITask::expandChatOlder() {
 void UITask::chat_history_scroll_cb(lv_event_t* e) {
   if (!_instance) return;
   if (_instance->_chat_prog_scroll) return;   // programmatic clean/build/re-anchor, not a user scroll
+  if (_instance->_search_active && _instance->_search_filter[0]) return;  // search isn't virtualized
   lv_obj_t* c = lv_event_get_target(e);
   lv_coord_t lead = lv_obj_get_content_height(c);   // ~one viewport of lead time
   if (lead < 80) lead = 200;
-  if (lv_obj_get_scroll_top(c) <= lead && _instance->_chat_win_first > 0) _instance->_chat_want_older = true;
+  if (lv_obj_get_scroll_top(c)    <= lead && _instance->_rfirst > 0)                  _instance->_chat_want_older = true;
+  if (lv_obj_get_scroll_bottom(c) <= lead && _instance->_rlast  < _instance->_chat_total) _instance->_chat_want_newer = true;
 }
 
 // Incremental refresh when a new message lands in the open chat: if exactly one message was
@@ -3435,41 +3473,33 @@ void UITask::chat_history_scroll_cb(lv_event_t* e) {
 // full rebuild (search active, multi-message burst, ring wrap, or anything ambiguous).
 // True when the chat history is at (or within a line of) the tail -- i.e. following live, not
 // scrolled up reading older history. Drives whether a new message auto-scrolls to the bottom.
+// True when the chat is following the LIVE tail: the resident window reaches the newest record AND
+// we're scrolled to the bottom of it. Drives whether a new message auto-scrolls (vs banner + wait).
 bool UITask::chatAtBottom() {
   if (!_chat_history) return true;
-  return lv_obj_get_scroll_bottom(_chat_history) <= 24;   // within ~a line of the newest
+  if (_rlast < _chat_total) return false;                 // resident window isn't even at the live tail
+  return lv_obj_get_scroll_bottom(_chat_history) <= 24;   // ...and within ~a line of it
 }
 
 void UITask::appendPendingChat() {
   _chat_pending = false;
   if (!_chat_history) return;
-  bool atBottom = chatAtBottom();   // capture BEFORE adding anything
   if (_search_active && _search_filter[0]) { rebuildChatHistory(); return; }
 
-  const ChatMessage* all[CHAT_HISTORY_CAP];
-  int n = _msgs->messagesFor(_chat_key, all, CHAT_HISTORY_CAP);
-  // Follow the tail if we were already there, OR the newest message is one WE sent (you always
-  // want to see your own just-sent message) -- but never yank for an incoming message arriving
-  // while you're scrolled up reading history.
-  bool follow = atBottom || (n >= 1 && all[n - 1] && all[n - 1]->outgoing);
-  if (_chat_rendered_n >= 1 && n == _chat_rendered_n + 1 && n <= CHAT_HISTORY_CAP) {
-    ensureChatRenderCtx();
-    appendChatBubble(all[n - 1]);
-    _chat_rendered_n = n;
-    lv_obj_update_layout(_chat_history);
-    // Scrolled up reading history? Leave the view put -- the new bubble waits below the fold and
-    // the banner (drainEvents) tells the reader it arrived. Only follow the tail if already there.
-    if (follow) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
-    sb_update(_chat_history, _chat_sb);
-  } else if (follow) {
-    rebuildChatHistory();                              // at the tail: full refresh + scroll-to-bottom
+  bool atBottom = chatAtBottom();   // following the live tail right now?
+  const ChatMessage* bufp[CHAT_HISTORY_CAP];
+  int bufN = _msgs->messagesFor(_chat_key, bufp, CHAT_HISTORY_CAP);
+  // Follow if we were at the tail, OR the newest is one WE sent (always show your own message).
+  bool follow = atBottom || (bufN >= 1 && bufp[bufN - 1] && bufp[bufN - 1]->outgoing);
+
+  if (follow) {
+    _chat_win_reset = true;   // snap the resident window to the newest screenful (incl. the new msg)
+    rebuildChatHistory();     // rebuilds + scrolls to bottom
   } else {
-    // Scrolled up + a multi-message/ambiguous refresh: rebuild without yanking. The window top is
-    // unchanged and new messages land below the fold, so restoring the prior scroll_y (clean reset
-    // it to 0) keeps the reader exactly where they were. Guard the restore so it doesn't arm want_older.
-    lv_coord_t beforeY = lv_obj_get_scroll_y(_chat_history);
-    _chat_keep_scroll = true; rebuildChatHistory(); _chat_keep_scroll = false;
-    _chat_prog_scroll = true; lv_obj_scroll_to_y(_chat_history, beforeY, LV_ANIM_OFF); _chat_prog_scroll = false;
+    // Scrolled up reading history: the new message is below the resident window now (on disk). Don't
+    // render it -- the banner (drainEvents) already flagged it, and scroll-down will page it in via
+    // pageChatNewer. Just refresh the total so the scroll-down trigger knows newer history exists.
+    _chat_total = _msgs->recordCount(_chat_key);
   }
 }
 
@@ -3683,6 +3713,8 @@ void UITask::openChat(const char* peer_name) {
   }
 
   _chat_win_reset = true;   // opening a (possibly different) conversation -> snap the window to its newest screenful
+  _rlast = 0; _rfirst = 0;  // force a fresh resident-window snap (rebuild recomputes from recordCount)
+  _chat_want_older = _chat_want_newer = false;
 
   // Reset any search state from a previously open conversation. Clearing the search box fires
   // VALUE_CHANGED -> chat_search_ta_event_cb; suppress its rebuild (it would run on the stale
@@ -10515,7 +10547,11 @@ void UITask::loop() {
       appendPendingChat();    // clears _chat_pending; appends just the new bubble when possible
     if (_chat_want_older && _chat_screen && lv_scr_act() == _chat_screen) {
       _chat_want_older = false;
-      expandChatOlder();      // scrolled to the top: render an older chunk + re-anchor (deferred past the fling)
+      expandChatOlder();      // scrolled near the top: page an older chunk + re-anchor (deferred past the fling)
+    }
+    if (_chat_want_newer && _chat_screen && lv_scr_act() == _chat_screen) {
+      _chat_want_newer = false;
+      pageChatNewer();        // scrolled near the bottom: page a newer chunk + re-anchor
     }
     if ((_contacts_pending || _contacts_dirty) && now - _contacts_rebuilt_ms >= 800) {
       _contacts_pending = false;
