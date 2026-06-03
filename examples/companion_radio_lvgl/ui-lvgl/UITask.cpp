@@ -2407,6 +2407,7 @@ static void addMessageText(lv_obj_t* bubble, const char* text, uint32_t fg) {
   char* w = markup;
   char* end = markup + sizeof(markup);
   const char* p = clean;
+  bool has_recolor = false;   // becomes true only if we emit a color span (mention/hashtag)
   while (*p && w < end - 16) {
     // Find the earliest interactive token from here: an @[name] mention or a
     // #hashtag channel tag. Emit the plain run before it, then the colored chip.
@@ -2432,6 +2433,7 @@ static void addMessageText(lv_obj_t* bubble, const char* text, uint32_t fg) {
       char tagged[CHAT_PEER_NAME_MAX + 1];
       int tl = snprintf(tagged, sizeof(tagged), "@%.*s", (int)(atclose - (at + 2)), at + 2);
       if (tl < 0) tl = 0; if (tl > (int)sizeof(tagged) - 1) tl = sizeof(tagged) - 1;
+      has_recolor = true;
       if (!appendRecoloredWords(w, end, tagged, tl, mc)) break;
       p = atclose + 1;
     } else {
@@ -2442,6 +2444,7 @@ static void addMessageText(lv_obj_t* bubble, const char* text, uint32_t fg) {
       uint32_t hc = s_hashtag_channel_colors ? nameColor(cname) : UI_ACCENT;
       // Recolor the whole "#tag" (the '#' included): a tag is a single word [A-Za-z0-9_-]
       // with no spaces, so it's one colored span -- and the '#' now sits inside it.
+      has_recolor = true;
       if (!appendRecoloredWords(w, end, tok, htend - tok, hc)) break;
       p = htend;
     }
@@ -2451,7 +2454,7 @@ static void addMessageText(lv_obj_t* bubble, const char* text, uint32_t fg) {
   lv_obj_t* lbl = lv_label_create(bubble);
   lv_obj_set_width(lbl, LV_PCT(100));
   lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
-  lv_label_set_recolor(lbl, true);
+  lv_label_set_recolor(lbl, has_recolor);   // skip LVGL's per-draw recolor scan on plain messages
   lv_obj_set_style_text_font(lbl, msgFont(), 0);            // emoji/unicode-capable
   lv_obj_set_style_text_color(lbl, lv_color_hex(fg), 0);  // default (non-recolored) color, per-bubble
   lv_label_set_text(lbl, markup);
@@ -3271,6 +3274,7 @@ void UITask::appendChatBubble(const ChatMessage* m) {
 void UITask::rebuildChatHistory() {
   _chat_pending = false;   // any rebuild path satisfies a pending incoming-message refresh
   if (!_chat_history) return;
+  bool prevProg = _chat_prog_scroll; _chat_prog_scroll = true;  // clean/build/scroll fire scroll cbs -> ignore them
   lv_obj_clean(_chat_history);
   _sending_lbl = NULL;  // old labels just got deleted; re-set if a sending msg renders
 
@@ -3278,9 +3282,18 @@ void UITask::rebuildChatHistory() {
   int n = _msgs->messagesFor(_chat_key, all, CHAT_HISTORY_CAP);
 
   bool filtering = _search_active && _search_filter[0];
+
+  // Windowed rendering (non-search): build only the newest screenful of bubbles; scroll-up grows
+  // the window older (expandChatOlder). Search renders all matches (no window).
+  if (!filtering) {
+    if (_chat_win_reset) { _chat_win_k = computeChatWinK(); _chat_win_first = (n > _chat_win_k) ? n - _chat_win_k : 0; _chat_win_reset = false; }
+    if (_chat_win_first < 0) _chat_win_first = 0;
+    if (_chat_win_first > n) _chat_win_first = (n > _chat_win_k) ? n - _chat_win_k : 0;
+  }
+
   const ChatMessage* shown[CHAT_HISTORY_CAP];
   int sn = 0;
-  for (int i = 0; i < n; i++) {
+  for (int i = (filtering ? 0 : _chat_win_first); i < n; i++) {
     if (filtering && !containsCI(all[i]->text, _search_filter)) continue;
     shown[sn++] = all[i];
   }
@@ -3300,6 +3313,7 @@ void UITask::rebuildChatHistory() {
     lv_obj_set_style_text_color(empty, lv_color_hex(DIM_HEX), 0);
     lv_obj_center(empty);
     _chat_rendered_n = n;   // baseline for incremental append (0 when truly empty)
+    _chat_prog_scroll = prevProg;
     return;
   }
 
@@ -3307,9 +3321,109 @@ void UITask::rebuildChatHistory() {
   for (int i = 0; i < sn; i++) appendChatBubble(shown[i]);
   _chat_rendered_n = n;
 
-  lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
   lv_obj_update_layout(_chat_history);
+  if (!_chat_keep_scroll) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);  // bottom (open/new msg); expand re-anchors itself
   sb_update(_chat_history, _chat_sb);
+  _chat_prog_scroll = prevProg;
+}
+
+// Max bubbles that can fit the chat band, using the DENSEST unit (a one-line bubble + the flex
+// row gap -- in a burst the sender header + time footer collapse away), + overscan. Derived from
+// geometry so it adapts to screen size / orientation rather than a hard-coded count.
+int UITask::computeChatWinK() {
+  lv_coord_t h = lv_obj_get_content_height(_chat_history);
+  if (h < 40) h = _screen_h;                                  // not laid out yet -> screen height
+  lv_coord_t unit = lv_font_get_line_height(msgFont()) + 16 + 6;  // text line + bubble v-pad(8+8) + pad_row
+  if (unit < 16) unit = 16;
+  int k = (int)(h / unit) + 4;                                // densest fit + a few overscan rows
+  if (k < 8) k = 8;
+  if (k > CHAT_HISTORY_CAP) k = CHAT_HISTORY_CAP;
+  return k;
+}
+
+// Total scrollable content height of the chat history (robust: scrolled-above + viewport + below).
+static lv_coord_t chatContentH(lv_obj_t* c) {
+  return lv_obj_get_scroll_top(c) + lv_obj_get_content_height(c) + lv_obj_get_scroll_bottom(c);
+}
+
+// Scroll-up reached the top with older messages loaded: grow the window older by one screenful and
+// re-anchor scroll_y by the inserted height so the view stays put (no jump).
+void UITask::expandChatOlder() {
+  if (_chat_win_first <= 0) return;                  // nothing older in the loaded set
+  if (_search_active && _search_filter[0]) return;   // not while filtering
+
+  const ChatMessage* all[CHAT_HISTORY_CAP];
+  int n = _msgs->messagesFor(_chat_key, all, CHAT_HISTORY_CAP);
+  int oldFirst = _chat_win_first;
+  if (oldFirst > n) oldFirst = n;
+  int newFirst = oldFirst - (_chat_win_k > 0 ? _chat_win_k : 8);
+  if (newFirst < 0) newFirst = 0;
+  if (newFirst >= oldFirst) return;                  // nothing older to add
+
+  _chat_prog_scroll = true;                          // suppress scroll cb across the prepend + re-anchor
+  lv_coord_t beforeH = chatContentH(_chat_history);
+  lv_coord_t beforeY = lv_obj_get_scroll_y(_chat_history);
+
+  // Save the render cursor: it currently reflects the window's BOTTOM (so appendPendingChat keeps
+  // collapsing bursts for new incoming messages). The chunk render below resets+trashes it; the
+  // chunk's reset cursor never touches the saved bottom footer, so the pointer stays valid.
+  char     savSender[CHAT_PEER_NAME_MAX]; memcpy(savSender, _crender_last_sender, sizeof(savSender));
+  bool      savOut    = _crender_last_outgoing;
+  long      savDay    = _crender_last_day;
+  bool      savFirst  = _crender_first;
+  uint32_t  savTs     = _crender_last_ts;
+  lv_obj_t* savFooter = _crender_last_footer;
+  bool      savColl   = _crender_footer_collapsible;
+
+  // Incremental prepend: render ONLY the older chunk [newFirst, oldFirst) as an isolated forward run
+  // (fresh cursor), appended at the tail, then move those fresh children to the FRONT in order. The
+  // existing window's bubbles are left intact -> their text isn't re-wrapped, so an expand costs
+  // O(chunk), not O(window). (Burst/date collapse at the seam isn't reconciled -> a possible extra
+  // header/date line where a run was split across the boundary; cosmetic.)
+  uint32_t childBefore = lv_obj_get_child_cnt(_chat_history);
+  _crender_last_sender[0] = 0;
+  _crender_last_outgoing = false;
+  _crender_last_day = -999999;
+  _crender_first = true;
+  _crender_last_ts = 0;
+  _crender_last_footer = NULL;
+  _crender_footer_collapsible = false;
+  ensureChatRenderCtx();
+  for (int i = newFirst; i < oldFirst; i++) appendChatBubble(all[i]);
+  uint32_t childAfter = lv_obj_get_child_cnt(_chat_history);
+
+  // Move the freshly-appended chunk children (currently at the tail) to the front, preserving order.
+  static lv_obj_t* fresh[CHAT_HISTORY_CAP * 4];      // <=~4 children per msg (date/name/row/footer)
+  uint32_t fn = 0;
+  for (uint32_t idx = childBefore; idx < childAfter && fn < (sizeof(fresh)/sizeof(fresh[0])); idx++)
+    fresh[fn++] = lv_obj_get_child(_chat_history, idx);
+  for (uint32_t j = 0; j < fn; j++) lv_obj_move_to_index(fresh[j], (int32_t)j);
+
+  // Restore the bottom cursor so the next new-message append continues the run correctly.
+  memcpy(_crender_last_sender, savSender, sizeof(savSender));
+  _crender_last_outgoing = savOut;
+  _crender_last_day = savDay;
+  _crender_first = savFirst;
+  _crender_last_ts = savTs;
+  _crender_last_footer = savFooter;
+  _crender_footer_collapsible = savColl;
+
+  _chat_win_first = newFirst;
+
+  lv_obj_update_layout(_chat_history);
+  lv_coord_t delta = chatContentH(_chat_history) - beforeH;   // height the prepended older bubbles added
+  lv_obj_scroll_to_y(_chat_history, beforeY + delta, LV_ANIM_OFF);
+  sb_update(_chat_history, _chat_sb);
+  _chat_prog_scroll = false;
+}
+
+// Scroll within the chat history: when it reaches the top and older messages exist, request an
+// expand (deferred to loop() so we don't rebuild mid-fling).
+void UITask::chat_history_scroll_cb(lv_event_t* e) {
+  if (!_instance) return;
+  if (_instance->_chat_prog_scroll) return;   // programmatic clean/build/re-anchor, not a user scroll
+  lv_obj_t* c = lv_event_get_target(e);
+  if (lv_obj_get_scroll_top(c) <= 8 && _instance->_chat_win_first > 0) _instance->_chat_want_older = true;
 }
 
 // Incremental refresh when a new message lands in the open chat: if exactly one message was
@@ -3465,6 +3579,7 @@ void UITask::openChat(const char* peer_name) {
     // by layoutChatBody() so it adjusts when the keyboard shows/hides.
     _chat_history = lv_obj_create(_chat_screen);
     lv_obj_add_event_cb(_chat_history, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);  // tap history -> hide kb
+    lv_obj_add_event_cb(_chat_history, chat_history_scroll_cb, LV_EVENT_SCROLL, NULL);  // scroll-to-top -> load older
     lv_obj_set_style_bg_color(_chat_history, lv_color_hex(BG_HEX), 0);
     lv_obj_set_style_bg_opa(_chat_history, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(_chat_history, 0, 0);
@@ -3541,6 +3656,8 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_add_event_cb(_chat_keyboard, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);  // color the ✓ send key
     lv_obj_add_flag(_chat_keyboard, LV_OBJ_FLAG_HIDDEN);
   }
+
+  _chat_win_reset = true;   // opening a (possibly different) conversation -> snap the window to its newest screenful
 
   // Reset any search state from a previously open conversation. Clearing the search box fires
   // VALUE_CHANGED -> chat_search_ta_event_cb; suppress its rebuild (it would run on the stale
@@ -10371,6 +10488,10 @@ void UITask::loop() {
   if (!interacting) {
     if (_chat_pending && _chat_screen && lv_scr_act() == _chat_screen)
       appendPendingChat();    // clears _chat_pending; appends just the new bubble when possible
+    if (_chat_want_older && _chat_screen && lv_scr_act() == _chat_screen) {
+      _chat_want_older = false;
+      expandChatOlder();      // scrolled to the top: render an older chunk + re-anchor (deferred past the fling)
+    }
     if ((_contacts_pending || _contacts_dirty) && now - _contacts_rebuilt_ms >= 800) {
       _contacts_pending = false;
       rebuildContactsList();   // also clears _contacts_dirty + sets _contacts_rebuilt_ms

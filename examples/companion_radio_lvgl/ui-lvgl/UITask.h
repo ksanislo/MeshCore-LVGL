@@ -205,6 +205,16 @@ class UITask : public AbstractUITask {
   long            _crender_now_day = 0;
   lv_coord_t      _crender_bubble_cap = 0;
 
+  // Chat windowed rendering: build only ~a screenful of bubbles (not all CAP), lazy-load older
+  // on scroll-up. K is derived from the chat band height / the DENSEST bubble unit (a one-line
+  // bubble + row gap -- footers collapse in a burst), so it adapts to screen size/orientation.
+  int             _chat_win_first = 0;      // oldest loaded-set index currently rendered
+  int             _chat_win_k = 0;          // max bubbles a screen can show (+ overscan)
+  bool            _chat_win_reset = true;   // next full rebuild snaps the window to the newest screenful
+  bool            _chat_want_older = false; // scrolled near top w/ older available -> expand (serviced in loop)
+  bool            _chat_keep_scroll = false;// rebuildChatHistory: skip scroll-to-bottom (expand re-anchors)
+  bool            _chat_prog_scroll = false;// a programmatic scroll/rebuild is in progress -> ignore scroll cb
+
   // Contact Info page (+ Path Editor sub-page). Lazily built, reused. The same
   // screen serves two modes: CINFO_VIEW (an existing contact) and CINFO_ADD
   // (assembling a new contact from a typed/pasted/prefilled key).
@@ -648,6 +658,9 @@ class UITask : public AbstractUITask {
   void      ensureChatRenderCtx();           // recompute tz/now-day/bubble-cap before (re)rendering
   void      appendChatBubble(const ChatMessage* m);  // render one message, advancing the render cursor
   void      appendPendingChat();             // incremental: append just the new message(s), else rebuild
+  int       computeChatWinK();               // max bubbles that fit the chat band (densest unit) + overscan
+  void      expandChatOlder();               // scroll-up reached the top -> render an older chunk, re-anchor
+  static void chat_history_scroll_cb(lv_event_t* e);   // detect scroll-to-top -> request older
   void      layoutChatBody(bool keyboard_shown);
   void      updateCharCount();   // refresh the compose char-count label (shown while typing)
   // When a bottom-docked keyboard `kb` is shown, scroll `scroll` so the focused
