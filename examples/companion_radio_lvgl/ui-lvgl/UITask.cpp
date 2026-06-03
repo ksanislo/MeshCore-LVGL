@@ -6950,6 +6950,13 @@ static int admin_bwIndex(float v) {
   for (int i = 0; i < BW_OPTS_N; i++) { float d = BW_OPTS[i] - v; if (d < 0) d = -d; if (d < bd) { bd = d; best = i; } }
   return best;
 }
+// grey out (50% opacity + non-interactive) or activate any widget
+static void admin_setEnabled(lv_obj_t* w, bool en) {
+  if (!w) return;
+  lv_obj_set_style_opa(w, en ? LV_OPA_COVER : LV_OPA_50, 0);
+  if (en) { lv_obj_clear_state(w, LV_STATE_DISABLED); lv_obj_add_flag(w, LV_OBJ_FLAG_CLICKABLE); }
+  else    { lv_obj_add_state(w, LV_STATE_DISABLED);   lv_obj_clear_flag(w, LV_OBJ_FLAG_CLICKABLE); }
+}
 
 // nth newline-separated token of `list` into out (empty if out of range).
 static void admin_nthToken(const char* list, int idx, char* out, size_t cap) {
@@ -6979,23 +6986,154 @@ int UITask::adminRowOfWidget(lv_obj_t* w) {
   return -1;
 }
 
-// --- transient admin-state cache (is_admin learned from LoginResult) -------
-UITask::AdminCred* UITask::adminCredFor(const uint8_t* pk) {
-  for (int i = 0; i < ADMIN_CRED_CACHE_N; i++)
-    if (_admin_creds[i].used && memcmp(_admin_creds[i].pubkey, pk, 6) == 0) return &_admin_creds[i];
-  return NULL;
+// --- admin login modal (explicit each time -- no auto-login) --------------
+void UITask::buildAdminLogin() {
+  if (_admin_login_popup) return;
+  lv_obj_t* card = makeModalCard(&_admin_login_popup, admin_login_dismiss_cb);
+  lv_obj_add_event_cb(card, dismiss_kb_cb, LV_EVENT_CLICKED, NULL);   // tap card empty -> hide kb
+
+  _admin_login_title = lv_label_create(card);
+  lv_obj_set_style_text_color(_admin_login_title, lv_color_hex(FG_HEX), 0);
+  lv_obj_set_style_text_font(_admin_login_title, fontHeading(), 0);
+  lv_label_set_text(_admin_login_title, "Admin login");
+
+  lv_obj_t* pf = makeField(card, "Password");
+  _admin_login_pw = makeSelTextarea(pf);
+  lv_textarea_set_one_line(_admin_login_pw, true);
+  lv_obj_set_width(_admin_login_pw, LV_PCT(100));
+  lv_obj_add_event_cb(_admin_login_pw, ta_done_cb, LV_EVENT_READY, NULL);
+  lv_obj_add_event_cb(_admin_login_pw, admin_login_pw_event_cb, LV_EVENT_ALL, NULL);
+  attachInlineEye(_admin_login_pw);
+
+  _admin_login_save = lv_checkbox_create(card);
+  lv_checkbox_set_text(_admin_login_save, "Save password");
+  lv_obj_set_style_text_color(_admin_login_save, lv_color_hex(FG_HEX), 0);
+
+  _admin_login_status = lv_label_create(card);
+  lv_label_set_long_mode(_admin_login_status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_admin_login_status, LV_PCT(100));
+  lv_obj_set_style_text_color(_admin_login_status, lv_color_hex(DIM_HEX), 0);
+  lv_label_set_text(_admin_login_status, "");
+
+  _admin_login_btn = lv_btn_create(card);
+  lv_obj_set_width(_admin_login_btn, LV_PCT(100));
+  lv_obj_set_style_bg_color(_admin_login_btn, lv_color_hex(UI_PRIMARY), 0);
+  lv_obj_add_event_cb(_admin_login_btn, admin_login_go_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t* bl = lv_label_create(_admin_login_btn);
+  lv_label_set_text(bl, "Login"); lv_obj_center(bl);
+
+  _admin_login_kb = lv_keyboard_create(_admin_login_popup);
+  lv_obj_add_event_cb(_admin_login_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);
+  lv_obj_add_event_cb(_admin_login_kb, [](lv_event_t* ev) {
+    if (_instance && (lv_event_get_code(ev) == LV_EVENT_READY || lv_event_get_code(ev) == LV_EVENT_CANCEL))
+      lv_obj_add_flag(_instance->_admin_login_kb, LV_OBJ_FLAG_HIDDEN);
+  }, LV_EVENT_ALL, NULL);
+  lv_obj_add_flag(_admin_login_kb, LV_OBJ_FLAG_HIDDEN);
 }
-void UITask::adminCacheLogin(const uint8_t* pk, bool is_admin, uint16_t ka) {
-  AdminCred* c = adminCredFor(pk);
-  if (!c) {                          // pick a free slot, else the oldest
-    c = &_admin_creds[0];
-    for (int i = 0; i < ADMIN_CRED_CACHE_N; i++) {
-      if (!_admin_creds[i].used) { c = &_admin_creds[i]; break; }
-      if (_admin_creds[i].ts_ms < c->ts_ms) c = &_admin_creds[i];
-    }
-    memcpy(c->pubkey, pk, 6); c->used = true;
+
+void UITask::openAdminLogin(const uint8_t* pubkey6, uint8_t type, const char* name, lv_obj_t* ret) {
+  buildAdminLogin();
+  memcpy(_admin_pending_pk, pubkey6, 6);
+  _admin_pending_type = type;
+  _admin_pending_ret = ret;
+  strncpy(_admin_pending_name, name ? name : "", sizeof(_admin_pending_name) - 1);
+  _admin_pending_name[sizeof(_admin_pending_name) - 1] = 0;
+  _admin_login_active = false;
+  if (_admin_login_to_timer)  { lv_timer_del(_admin_login_to_timer);  _admin_login_to_timer = NULL; }
+  if (_admin_login_btn_timer) { lv_timer_del(_admin_login_btn_timer); _admin_login_btn_timer = NULL; }
+
+  char t[CHAT_PEER_NAME_MAX + 16];
+  snprintf(t, sizeof(t), "Admin login: %s", name ? name : "");
+  lv_label_set_text(_admin_login_title, t);
+  lv_textarea_set_text(_admin_login_pw, "");
+  lv_label_set_text(_admin_login_status, "");
+  lv_obj_clear_state(_admin_login_save, LV_STATE_CHECKED);
+  admin_setEnabled(_admin_login_btn, true);
+  lv_obj_add_flag(_admin_login_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(_admin_login_popup, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(_admin_login_popup);
+}
+
+// Post the login, show "Authenticating...", grey the button for 1s (then allow a manual
+// retry), and (re)arm the 6s timeout. Each attempt resets the timeout.
+void UITask::adminLoginSend() {
+  const char* pw = lv_textarea_get_text(_admin_login_pw);
+  if (!pw || !pw[0]) { showToast("Enter a password"); return; }
+  mproxy::MeshCmd c{};
+  c.kind = mproxy::CmdKind::ServerLogin;
+  memcpy(c.pubkey, _admin_pending_pk, 6);
+  strncpy(c.password, pw, sizeof(c.password) - 1); c.password[sizeof(c.password) - 1] = 0;
+  c.save_login = lv_obj_has_state(_admin_login_save, LV_STATE_CHECKED);
+  c.auto_login = false;
+  mproxy::postCommand(c);
+  _admin_login_active = true;
+  lv_obj_add_flag(_admin_login_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_label_set_text(_admin_login_status, "Authenticating...");
+
+  admin_setEnabled(_admin_login_btn, false);   // block double-taps for ~1s
+  if (_admin_login_btn_timer) lv_timer_del(_admin_login_btn_timer);
+  _admin_login_btn_timer = lv_timer_create(admin_login_btn_reenable_cb, 1000, this);
+  lv_timer_set_repeat_count(_admin_login_btn_timer, 1);
+
+  if (_admin_login_to_timer) lv_timer_del(_admin_login_to_timer);
+  _admin_login_to_timer = lv_timer_create(admin_login_timeout_cb, 6000, this);
+  lv_timer_set_repeat_count(_admin_login_to_timer, 1);
+}
+
+// A LoginResult for the device we're logging into, routed to the modal.
+void UITask::adminLoginResult(bool ok, bool is_admin) {
+  if (_admin_login_to_timer) { lv_timer_del(_admin_login_to_timer); _admin_login_to_timer = NULL; }
+  if (ok && is_admin) {
+    if (_admin_login_btn_timer) { lv_timer_del(_admin_login_btn_timer); _admin_login_btn_timer = NULL; }
+    _admin_login_active = false;
+    lv_obj_add_flag(_admin_login_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(_admin_login_popup, LV_OBJ_FLAG_HIDDEN);
+    openAdmin(_admin_pending_pk, _admin_pending_type, _admin_pending_name, _admin_pending_ret);
+  } else {
+    lv_label_set_text(_admin_login_status, ok ? "Logged in, but not an admin on this node" : "Login failed");
+    admin_setEnabled(_admin_login_btn, true);   // let them retry
+    if (_admin_login_btn_timer) { lv_timer_del(_admin_login_btn_timer); _admin_login_btn_timer = NULL; }
   }
-  c->is_admin = is_admin; c->keep_alive = ka; c->ts_ms = millis();
+}
+
+void UITask::admin_login_go_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->adminLoginSend();
+}
+void UITask::admin_login_btn_reenable_cb(lv_timer_t* t) {
+  (void)t;
+  if (!_instance) return;
+  _instance->_admin_login_btn_timer = NULL;
+  admin_setEnabled(_instance->_admin_login_btn, true);   // manual retries allowed now
+}
+void UITask::admin_login_timeout_cb(lv_timer_t* t) {
+  (void)t;
+  if (!_instance) return;
+  _instance->_admin_login_to_timer = NULL;
+  if (_instance->_admin_login_active)
+    lv_label_set_text(_instance->_admin_login_status, "Timed out - tap Login to retry");
+}
+void UITask::admin_login_dismiss_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  UITask* s = _instance;
+  s->_admin_login_active = false;
+  if (s->_admin_login_to_timer)  { lv_timer_del(s->_admin_login_to_timer);  s->_admin_login_to_timer = NULL; }
+  if (s->_admin_login_btn_timer) { lv_timer_del(s->_admin_login_btn_timer); s->_admin_login_btn_timer = NULL; }
+  if (s->_admin_login_kb)    lv_obj_add_flag(s->_admin_login_kb, LV_OBJ_FLAG_HIDDEN);
+  if (s->_admin_login_popup) lv_obj_add_flag(s->_admin_login_popup, LV_OBJ_FLAG_HIDDEN);
+}
+void UITask::admin_login_pw_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  UITask* s = _instance;
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    lv_keyboard_set_textarea(s->_admin_login_kb, s->_admin_login_pw);
+    lv_keyboard_set_mode(s->_admin_login_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(s->_admin_login_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(s->_admin_login_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(s->_admin_login_kb);
+  }
 }
 
 // --- screen build ---------------------------------------------------------
@@ -7551,21 +7689,7 @@ void UITask::kebab_admin_cb(lv_event_t* e) {
   char nm[CHAT_PEER_NAME_MAX]; strncpy(nm, s->_chat_peer, sizeof(nm) - 1); nm[sizeof(nm) - 1] = 0;
   lv_obj_t* ret = s->_chat_screen;
   s->closeMenuPopup();
-  AdminCred* c = s->adminCredFor(pk);
-  bool fresh = c && c->is_admin &&
-               (c->keep_alive == 0 ? (millis() - c->ts_ms < 5UL * 60 * 1000)
-                                   : (millis() - c->ts_ms < (uint32_t)c->keep_alive * 1000));
-  if (fresh) {
-    s->openAdmin(pk, type, nm, ret);
-  } else {
-    s->_admin_open_after_login = true;
-    memcpy(s->_admin_pending_pk, pk, 6);
-    s->_admin_pending_type = type;
-    s->_admin_pending_ret = ret;
-    strncpy(s->_admin_pending_name, nm, sizeof(s->_admin_pending_name) - 1);
-    s->_admin_pending_name[sizeof(s->_admin_pending_name) - 1] = 0;
-    s->openLogin(pk, nm);
-  }
+  s->openAdminLogin(pk, type, nm, ret);   // always authenticate explicitly
 }
 
 // ---- Settings: category launcher + per-category panes ---------------------
@@ -11447,19 +11571,15 @@ void UITask::drainEvents() {
         break;
       }
       case mproxy::EvKind::LoginResult: {
-        if (ev.ok) {
-          adminCacheLogin(ev.pubkey, ev.is_admin, ev.keep_alive);   // remember admin state (not persisted elsewhere)
+        // Route to the admin login modal if it's the one we're authenticating; else it's the
+        // plain "Login" kebab -> just toast the outcome.
+        if (_admin_login_active && memcmp(ev.pubkey, _admin_pending_pk, 6) == 0) {
+          adminLoginResult(ev.ok, ev.is_admin);
+        } else if (ev.ok) {
           char m[48];
           snprintf(m, sizeof(m), "Logged in%s", ev.is_admin ? " (admin)" : "");
           showToast(m);
-          // If the user tapped "Admin" but wasn't logged in yet, open it now that we are.
-          if (_admin_open_after_login && memcmp(ev.pubkey, _admin_pending_pk, 6) == 0) {
-            _admin_open_after_login = false;
-            if (ev.is_admin) openAdmin(_admin_pending_pk, _admin_pending_type, _admin_pending_name, _admin_pending_ret);
-            else             showToast("Not an admin on this node");
-          }
         } else {
-          if (_admin_open_after_login) _admin_open_after_login = false;
           showToast("Login failed");
         }
         break;

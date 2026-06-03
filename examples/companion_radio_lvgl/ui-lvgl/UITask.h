@@ -564,7 +564,6 @@ class UITask : public AbstractUITask {
   // One screen, parameterized by contact type via a declarative spec table. Field values
   // are fetched on demand (get <key>); edits send set <key> <v>; actions are one-shot CLI.
   static constexpr int ADMIN_MAX_FIELDS = 24;
-  static constexpr int ADMIN_CRED_CACHE_N = 8;
   lv_obj_t*       _admin_screen = NULL;
   lv_obj_t*       _admin_body = NULL;
   lv_obj_t*       _admin_kb = NULL;
@@ -600,14 +599,22 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _admin_perm_key_ta = NULL;
   lv_obj_t*       _admin_perm_role_dd = NULL;
   lv_obj_t*       _admin_perm_kb = NULL;
-  // Transient admin-state cache (is_admin isn't persisted; learned from LoginResult)
-  struct AdminCred { uint8_t pubkey[6]; bool is_admin; uint32_t ts_ms; uint16_t keep_alive; bool used; };
-  AdminCred       _admin_creds[ADMIN_CRED_CACHE_N] = {};
-  bool            _admin_open_after_login = false;
+  // Admin login modal (explicit every time -- no auto-login). Holds the pending target while
+  // the modal is up; a successful admin reply opens the Admin screen for it.
   uint8_t         _admin_pending_pk[6] = {0};
   uint8_t         _admin_pending_type = 0;
   lv_obj_t*       _admin_pending_ret = NULL;
   char            _admin_pending_name[CHAT_PEER_NAME_MAX] = {0};
+  bool            _admin_login_active = false;    // modal is up + awaiting a reply
+  lv_obj_t*       _admin_login_popup = NULL;
+  lv_obj_t*       _admin_login_title = NULL;
+  lv_obj_t*       _admin_login_pw = NULL;
+  lv_obj_t*       _admin_login_save = NULL;       // "Save password" checkbox
+  lv_obj_t*       _admin_login_btn = NULL;
+  lv_obj_t*       _admin_login_status = NULL;     // "Authenticating..." / "Timed out" / ...
+  lv_obj_t*       _admin_login_kb = NULL;
+  lv_timer_t*     _admin_login_to_timer = NULL;   // 6s -> "Timed out"
+  lv_timer_t*     _admin_login_btn_timer = NULL;  // 1s -> re-enable the Login button
 
   // LVGL display + input. Resolution is read from the LGFX device after
   // setRotation, so this UITask doesn't care whether the variant chose
@@ -1111,9 +1118,16 @@ private:
   void      adminSetFieldValue(int row, const char* value);  // parsed "> v" -> widget
   void      adminSetFieldEnabled(int row, bool en);  // grey out / activate a field (+ its Apply)
   int       adminRowOfWidget(lv_obj_t* w);   // visible-row owning a field widget, or -1
-  AdminCred* adminCredFor(const uint8_t* pk);
-  void      adminCacheLogin(const uint8_t* pk, bool is_admin, uint16_t ka);
+  void      openAdminLogin(const uint8_t* pubkey6, uint8_t type, const char* name, lv_obj_t* ret);
+  void      buildAdminLogin();
+  void      adminLoginSend();           // post the login + arm 1s button-grey + 6s timeout + status
+  void      adminLoginResult(bool ok, bool is_admin);  // route a LoginResult to the modal
   static void kebab_admin_cb(lv_event_t* e);
+  static void admin_login_go_cb(lv_event_t* e);
+  static void admin_login_dismiss_cb(lv_event_t* e);
+  static void admin_login_pw_event_cb(lv_event_t* e);
+  static void admin_login_timeout_cb(lv_timer_t* t);
+  static void admin_login_btn_reenable_cb(lv_timer_t* t);
   static void admin_back_cb(lv_event_t* e);
   static void admin_field_event_cb(lv_event_t* e);   // textarea focus -> keyboard
   static void admin_field_refresh_cb(lv_event_t* e); // per-field Refresh (get)
