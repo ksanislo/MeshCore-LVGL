@@ -11490,17 +11490,24 @@ void UITask::loop() {
   // interacting gate keeps it smooth (an off-screen rebuild is invisible on a static screen and
   // deferred during a scroll). "Interacting" = finger down OR a flick still freewheeling.
   bool interacting = _touch_down || (int32_t)(s_scroll_until_ms - now) > 0;
+
+  // Chat history paging runs even mid-drag/fling: deferring it until motion stops made a
+  // scroll-back stall dead at the edge of the resident window until the finger lifted. It's
+  // incremental + re-anchors scroll_y by the inserted/removed height, so it stays smooth in
+  // motion (unlike the heavy list rebuilds below, which stay gated). A new incoming message
+  // (_chat_pending) still waits, so it never yanks you while you're reading.
+  if (_chat_want_older && _chat_screen && lv_scr_act() == _chat_screen) {
+    _chat_want_older = false;
+    expandChatOlder();        // scrolled near the top: page an older chunk + re-anchor
+  }
+  if (_chat_want_newer && _chat_screen && lv_scr_act() == _chat_screen) {
+    _chat_want_newer = false;
+    pageChatNewer();          // scrolled near the bottom: page a newer chunk + re-anchor
+  }
+
   if (!interacting) {
     if (_chat_pending && _chat_screen && lv_scr_act() == _chat_screen)
       appendPendingChat();    // clears _chat_pending; appends just the new bubble when possible
-    if (_chat_want_older && _chat_screen && lv_scr_act() == _chat_screen) {
-      _chat_want_older = false;
-      expandChatOlder();      // scrolled near the top: page an older chunk + re-anchor (deferred past the fling)
-    }
-    if (_chat_want_newer && _chat_screen && lv_scr_act() == _chat_screen) {
-      _chat_want_newer = false;
-      pageChatNewer();        // scrolled near the bottom: page a newer chunk + re-anchor
-    }
     if ((_contacts_pending || _contacts_dirty) && now - _contacts_rebuilt_ms >= 800) {
       _contacts_pending = false;
       rebuildContactsList();   // also clears _contacts_dirty + sets _contacts_rebuilt_ms
