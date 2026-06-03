@@ -586,6 +586,18 @@ const uint8_t* hookKey()     { return the_mesh.hookKey(); }
 bool hookIsChannel()         { return the_mesh.hookIsChannel(); }
 bool hookIsCli()             { return the_mesh.hookIsCli(); }
 
+bool savedLogin(const uint8_t* pubkey, char* out, size_t cap) {
+  if (!out || cap == 0) return false;
+  out[0] = 0;
+#if defined(ENABLE_LOGIN_STORE)
+  const auto* cred = the_mesh.findLoginCred(pubkey);   // backend store; rarely written, read here
+  if (cred) { strncpy(out, cred->password, cap - 1); out[cap - 1] = 0; return true; }
+#else
+  (void)pubkey;
+#endif
+  return false;
+}
+
 bool postCommand(const MeshCmd& cmd) { return s_cmd_q && xQueueSend(s_cmd_q, &cmd, 0) == pdTRUE; }
 bool pollEvent(UiEvent& ev)          { return s_ev_q && xQueueReceive(s_ev_q, &ev, 0) == pdTRUE; }
 

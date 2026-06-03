@@ -6567,8 +6567,14 @@ void UITask::openLogin(const uint8_t* pubkey6, const char* name) {
   sanitizeForFont(name && name[0] ? name : "server", sn, sizeof(sn));
   snprintf(t, sizeof(t), "Login: %s", sn);
   lv_label_set_text(_login_title, t);
-  lv_textarea_set_text(_login_pw_ta, "");
-  lv_obj_clear_state(_login_save_chk, LV_STATE_CHECKED);
+  char saved[16];
+  if (pubkey6 && mproxy::savedLogin(pubkey6, saved, sizeof(saved)) && saved[0]) {
+    lv_textarea_set_text(_login_pw_ta, saved);
+    lv_obj_add_state(_login_save_chk, LV_STATE_CHECKED);   // it's already saved
+  } else {
+    lv_textarea_set_text(_login_pw_ta, "");
+    lv_obj_clear_state(_login_save_chk, LV_STATE_CHECKED);
+  }
   lv_obj_clear_state(_login_auto_chk, LV_STATE_CHECKED);
   lv_obj_add_flag(_login_kb, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(_login_popup, LV_OBJ_FLAG_HIDDEN);
@@ -7045,9 +7051,16 @@ void UITask::openAdminLogin(const uint8_t* pubkey6, uint8_t type, const char* na
   char t[CHAT_PEER_NAME_MAX + 16];
   snprintf(t, sizeof(t), "Admin login: %s", name ? name : "");
   lv_label_set_text(_admin_login_title, t);
-  lv_textarea_set_text(_admin_login_pw, "");
   lv_label_set_text(_admin_login_status, "");
-  lv_obj_clear_state(_admin_login_save, LV_STATE_CHECKED);
+  // Pre-fill from a saved password if we have one (and pre-tick "Save" so it stays saved).
+  char saved[16];
+  if (mproxy::savedLogin(_admin_pending_pk, saved, sizeof(saved)) && saved[0]) {
+    lv_textarea_set_text(_admin_login_pw, saved);
+    lv_obj_add_state(_admin_login_save, LV_STATE_CHECKED);
+  } else {
+    lv_textarea_set_text(_admin_login_pw, "");
+    lv_obj_clear_state(_admin_login_save, LV_STATE_CHECKED);
+  }
   admin_setEnabled(_admin_login_btn, true);
   lv_obj_add_flag(_admin_login_kb, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(_admin_login_popup, LV_OBJ_FLAG_HIDDEN);

@@ -180,6 +180,10 @@ const uint8_t* hookKey();
 bool           hookIsChannel();
 bool           hookIsCli();
 
+// A saved server password (login store) for pre-filling a login dialog. Copies the password
+// into out and returns true if one is stored for this 6-byte pubkey, else false. Read-only.
+bool           savedLogin(const uint8_t* pubkey, char* out, size_t cap);
+
 bool postCommand(const MeshCmd& cmd);   // returns false if the queue is full
 bool pollEvent(UiEvent& ev);            // false if no event pending
 
