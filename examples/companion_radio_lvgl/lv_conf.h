@@ -118,7 +118,12 @@
 
 /* Text */
 #define LV_TXT_ENC                      LV_TXT_ENC_UTF8
-#define LV_TXT_BREAK_CHARS              " ,.;:-_"
+#define LV_TXT_BREAK_CHARS              " ,.;:"
+/* '-' and '_' intentionally removed: a #channel-name / @user_name recolor span has
+ * no spaces, so breaking mid-token at '-'/'_' would split the span and drop the
+ * color on the wrapped line (and the font has no non-breaking-hyphen glyph to swap
+ * in). Trade-off: a very long hyphenated run in plain text now wraps as a whole
+ * (long-word break is off, LV_TXT_LINE_BREAK_LONG_LEN=0) rather than at a hyphen. */
 #define LV_TXT_LINE_BREAK_LONG_LEN      0
 #define LV_TXT_LINE_BREAK_LONG_PRE_MIN_LEN 3
 #define LV_TXT_LINE_BREAK_LONG_POST_MIN_LEN 3
