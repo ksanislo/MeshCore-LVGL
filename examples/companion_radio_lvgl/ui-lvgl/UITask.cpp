@@ -9798,6 +9798,14 @@ void UITask::ota_update_cb(lv_event_t* e) {
     return;
   }
   if (!_instance->_node_prefs->ota_url[0]) { _instance->showToast("Set a firmware URL first"); return; }
+  // Pre-flight PSRAM reclaim. LVGL's object pool + the emoji glyph cache live in PSRAM, and the
+  // WiFi/lwIP RX buffers are PSRAM-backed too -- so after heavy channel/scroll use the download can
+  // stall on starved packet buffers. Free the emoji cache (up to ~768KB) first; it re-decodes from
+  // SD on demand afterward. Runs on the UI core (required for the cache's LVGL-ref drop).
+  uint32_t psram_before = ESP.getFreePsram();
+  SdSvc::emojiBitmapCacheEvict();
+  Serial.printf("[OTA] pre-flight: psram %u -> %u, largest-heap=%u\n",
+                (unsigned)psram_before, (unsigned)ESP.getFreePsram(), (unsigned)ESP.getMaxAllocHeap());
   mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::OtaUpdate; mproxy::postCommand(c);
   _instance->showToast("Downloading firmware...");   // runs on its own task; status line updates at 1 Hz
 }

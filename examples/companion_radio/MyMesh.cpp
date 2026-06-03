@@ -539,7 +539,13 @@ void MyMesh::startOtaTask() {
 // Scheme-aware: http:// (plain, for a dev laptop) vs https:// (TLS, e.g. GitHub). v1 is
 // insecure TLS + no signature check -- a SHA/signature gate comes later.
 void MyMesh::otaFromUrl() {
-  auto set = [this](const char* m) { strncpy(_ota_status, m, sizeof(_ota_status) - 1); _ota_status[sizeof(_ota_status) - 1] = 0; };
+  // Status line carries a compact memory readout (free PSRAM / largest free internal block, in KB)
+  // so if a phase hangs it also shows WHICH pool is starved -- WiFi RX buffers are PSRAM-backed, so a
+  // stall after heavy chat use usually shows low PSRAM here.
+  auto set = [this](const char* m) {
+    snprintf(_ota_status, sizeof(_ota_status), "%s p%uk h%uk", m,
+             (unsigned)(ESP.getFreePsram() / 1024), (unsigned)(ESP.getFreeHeap() / 1024));  // both O(1)
+  };
   // Any failure path: set the status AND fire the UI hook so an on-device modal can warn the
   // user (we don't reboot on failure, so a walked-away user would otherwise see nothing).
   auto fail = [this, &set](const char* m) { _ota_client = nullptr; set(m); if (_ui) _ui->otaFailed(m); };
