@@ -6912,8 +6912,8 @@ static const AdminFieldSpec ADMIN_SPEC[] = {
   { "Identity", "Name",                    "name",                 AK_TEXT,        NULL, NULL, 3, NULL },
   { NULL,       "Role",                     "role",                 AK_READONLY,    NULL, NULL, 3, NULL },
   { NULL,       "Firmware",                 "ver",                  AK_READONLY,    NULL, NULL, 3, "ver" },
-  { "Radio",    "TX power (dBm)",           "tx",                   AK_INT,         NULL, NULL, 3, NULL },
-  { NULL,       "Radio (freq,bw,sf,cr)",    "radio",                AK_RADIO_TUPLE, NULL, NULL, 3, NULL },
+  { "Radio",    "Radio (freq,bw,sf,cr)",    "radio",                AK_RADIO_TUPLE, NULL, NULL, 3, NULL },
+  { NULL,       "TX power (dBm)",           "tx",                   AK_INT,         NULL, NULL, 3, NULL },
   { "Advertising", "Advert interval (min)", "advert.interval",      AK_INT,         NULL, NULL, 3, NULL },
   { NULL,       "Flood advert interval (h)","flood.advert.interval",AK_INT,         NULL, NULL, 3, NULL },
   { "Relay",    "Repeat",                   "repeat",               AK_BOOL,        NULL, "off\non", 1, NULL },
@@ -7105,7 +7105,13 @@ void UITask::adminRebuildFields() {
       }
       case AK_RADIO_TUPLE: {
         // One composite setting (set radio freq bw sf cr) shown as a freq field + 3 dropdowns,
-        // with a single Refresh/Apply that fetches/sends all four at once.
+        // with a single Refresh/Apply -- above the group -- that fetches/sends all four at once.
+        lv_obj_t* r = makeRow(_admin_body);
+        lv_obj_t* spacer = lv_obj_create(r);        // push the two buttons to the right
+        lv_obj_remove_style_all(spacer);
+        lv_obj_set_height(spacer, 1);
+        lv_obj_set_flex_grow(spacer, 1);
+        addBtns(r, row, true, true);
         lv_obj_t* ff = makeField(_admin_body, "Frequency (MHz)");
         _admin_radio_freq = makeSelTextarea(ff);
         lv_textarea_set_one_line(_admin_radio_freq, true);
@@ -7116,12 +7122,6 @@ void UITask::adminRebuildFields() {
         _admin_radio_bw = makeDropdownField(_admin_body, "Bandwidth (kHz)", BW_OPTS_STR);
         _admin_radio_sf = makeDropdownField(_admin_body, "Spreading factor", SF_OPTS_STR);
         _admin_radio_cr = makeDropdownField(_admin_body, "Coding rate (4/x)", CR_OPTS_STR);
-        lv_obj_t* r = makeRow(_admin_body);
-        lv_obj_t* spacer = lv_obj_create(r);        // push the two buttons to the right
-        lv_obj_remove_style_all(spacer);
-        lv_obj_set_height(spacer, 1);
-        lv_obj_set_flex_grow(spacer, 1);
-        addBtns(r, row, true, true);
         w = _admin_radio_freq;   // anchor for the loading hint + row mapping
         break;
       }
