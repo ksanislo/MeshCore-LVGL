@@ -38,4 +38,9 @@ void end();            // unmount (so the card can be removed)
 bool ensureMounted();  // lazily (re)mount if needed, throttled; call before access
 void rescan();         // re-enable mounting after giving up (card (re)inserted)
 
+// Decoded-emoji bitmap cache (PSRAM), behind LVGL's image cache. Keyed by
+// (size, codepoint) so each glyph reads SD once; survives LVGL eviction.
+void emojiBitmapCacheEvict();                              // free all glyphs, reclaim PSRAM (UI thread)
+void emojiBitmapCacheStats(uint32_t* glyphs, uint32_t* bytes);  // occupancy, for diagnostics
+
 }  // namespace SdSvc

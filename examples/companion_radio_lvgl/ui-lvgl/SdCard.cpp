@@ -236,6 +236,54 @@ static bool isEmojiSrc(const void* src) {
   const char* p = (const char*)src;
   return strstr(p, "/emoji/") != nullptr;
 }
+
+// ---- persistent decoded-emoji bitmap cache (PSRAM) ----
+// LVGL's image cache (48 entries, aged) is too small for a busy public channel:
+// a history with >48 distinct emoji thrashes it, so an evicted glyph gets a fresh
+// SD read on the very next scroll frame -> ~30 SdFat opens/frame over the shared
+// HSPI bus collapses scrolling (~9fps -> ~3fps). This cache sits BEHIND LVGL's:
+// it holds each decoded glyph keyed ONLY by (size, codepoint) until explicitly
+// evicted, so when LVGL re-asks us for an evicted emoji we hand back the PSRAM
+// buffer instead of touching SD. Each distinct emoji reads SD exactly once.
+//
+// Single-threaded: open/close run only on the LVGL draw (core 1); evict must be
+// called from the UI thread too. Owned buffers are never freed on close (the
+// cache outlives LVGL's entries); they are freed only by emojiBitmapCacheEvict()
+// -- which first drops LVGL's references so nothing dangles.
+struct EmojiBmp { uint16_t size; uint32_t cp, w, h, bytes; uint8_t* data; };
+static const uint32_t EBMP_MAX_ENTRIES = 512;
+static const uint32_t EBMP_BYTE_BUDGET = 768 * 1024;   // PSRAM ceiling for cached glyphs
+static EmojiBmp* s_ebmp       = nullptr;
+static uint32_t  s_ebmp_count = 0;
+static uint32_t  s_ebmp_bytes = 0;
+
+static EmojiBmp* ebmpFind(uint16_t size, uint32_t cp) {
+  for (uint32_t i = 0; i < s_ebmp_count; i++)
+    if (s_ebmp[i].cp == cp && s_ebmp[i].size == size) return &s_ebmp[i];
+  return nullptr;
+}
+static bool ebmpOwns(const void* ptr) {
+  for (uint32_t i = 0; i < s_ebmp_count; i++) if (s_ebmp[i].data == ptr) return true;
+  return false;
+}
+// Take ownership of a freshly-decoded glyph buffer if there's room; returns true
+// if the cache now owns it (caller must NOT free it). Grow-only: once full it
+// stops caching (new glyphs stay transient, freed on close) rather than evicting
+// individually -- which keeps lifetime simple (no dangling vs LVGL's live refs).
+static bool ebmpStore(uint16_t size, uint32_t cp, uint32_t w, uint32_t h,
+                      uint32_t bytes, uint8_t* buf) {
+  if (s_ebmp_count >= EBMP_MAX_ENTRIES) return false;
+  if (s_ebmp_bytes + bytes > EBMP_BYTE_BUDGET) return false;
+  if (!s_ebmp) {
+    size_t n = sizeof(EmojiBmp) * EBMP_MAX_ENTRIES;
+    s_ebmp = (EmojiBmp*)ps_malloc(n);
+    if (!s_ebmp) s_ebmp = (EmojiBmp*)malloc(n);
+    if (!s_ebmp) return false;
+  }
+  s_ebmp[s_ebmp_count++] = { size, cp, w, h, bytes, buf };
+  s_ebmp_bytes += bytes;
+  return true;
+}
 static lv_res_t emoji_dec_info(lv_img_decoder_t* d, const void* src, lv_img_header_t* header) {
   (void)d;
   if (!isEmojiSrc(src)) return LV_RES_INV;
@@ -258,6 +306,22 @@ static lv_res_t emoji_dec_info(lv_img_decoder_t* d, const void* src, lv_img_head
 static lv_res_t emoji_dec_open(lv_img_decoder_t* d, lv_img_decoder_dsc_t* dsc) {
   (void)d;
   if (!isEmojiSrc(dsc->src)) return LV_RES_INV;
+
+  // Persistent-cache hit: hand back the PSRAM buffer, no SD touch and no alloc.
+  const char* ep = strstr((const char*)dsc->src, "/emoji/");
+  int psize; uint32_t pcp;
+  bool keyed = ep && parseEmojiPath(ep, &psize, &pcp);
+  if (keyed) {
+    EmojiBmp* hit = ebmpFind((uint16_t)psize, pcp);
+    if (hit) {
+      dsc->img_data = hit->data;
+      dsc->header.cf = LV_IMG_CF_TRUE_COLOR_ALPHA;
+      dsc->header.w  = hit->w;
+      dsc->header.h  = hit->h;
+      return LV_RES_OK;
+    }
+  }
+
   lv_fs_file_t f;
   if (lv_fs_open(&f, (const char*)dsc->src, LV_FS_MODE_RD) != LV_FS_RES_OK) return LV_RES_INV;
   uint32_t h = 0, rn = 0;
@@ -276,6 +340,11 @@ static lv_res_t emoji_dec_open(lv_img_decoder_t* d, lv_img_decoder_dsc_t* dsc) {
   }
   lv_fs_close(&f);
   if (off != bytes) { free(buf); return LV_RES_INV; }
+
+  // Cache it (keyed by size+codepoint) so this glyph never hits SD again until an
+  // explicit evict. If the cache is full it stays transient and is freed on close.
+  if (keyed) ebmpStore((uint16_t)psize, pcp, w, ht, bytes, buf);
+
   dsc->img_data = buf;
   dsc->header.cf = LV_IMG_CF_TRUE_COLOR_ALPHA;
   dsc->header.w  = w;
@@ -284,7 +353,28 @@ static lv_res_t emoji_dec_open(lv_img_decoder_t* d, lv_img_decoder_dsc_t* dsc) {
 }
 static void emoji_dec_close(lv_img_decoder_t* d, lv_img_decoder_dsc_t* dsc) {
   (void)d;
-  if (dsc->img_data) { free((void*)dsc->img_data); dsc->img_data = nullptr; }
+  if (!dsc->img_data) return;
+  if (!ebmpOwns(dsc->img_data)) free((void*)dsc->img_data);  // cache-owned buffers outlive LVGL's entry
+  dsc->img_data = nullptr;
+}
+
+// Free every cached emoji glyph and reclaim the PSRAM. Call from the UI thread
+// only (the decoder runs on the LVGL draw). LVGL may still hold img_data pointers
+// into our buffers, so drop its references FIRST (this calls emoji_dec_close on
+// each live entry, which now no-ops for owned buffers), then free ours -- nothing
+// dangles. Intended for a future memory-hungry feature (e.g. the map) that needs
+// the PSRAM back; the glyphs simply re-decode from SD on demand afterward.
+void emojiBitmapCacheEvict() {
+  lv_img_cache_invalidate_src(NULL);
+  for (uint32_t i = 0; i < s_ebmp_count; i++) free(s_ebmp[i].data);
+  s_ebmp_count = 0;
+  s_ebmp_bytes = 0;
+}
+
+// Current cache occupancy (distinct glyphs, PSRAM bytes) for diagnostics/HUD.
+void emojiBitmapCacheStats(uint32_t* glyphs, uint32_t* bytes) {
+  if (glyphs) *glyphs = s_ebmp_count;
+  if (bytes)  *bytes  = s_ebmp_bytes;
 }
 
 void registerFs() {
