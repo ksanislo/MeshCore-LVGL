@@ -7033,6 +7033,7 @@ void UITask::buildAdminScreen() {
 void UITask::adminRebuildFields() {
   _admin_field_count = 0;   // before clean: any event fired during widget deletion finds no row
   lv_obj_clean(_admin_body);
+  for (int i = 0; i < ADMIN_MAX_FIELDS; i++) _admin_apply_btn[i] = NULL;
   uint8_t bit = adminTypeBit(_admin_type);
 
   // a horizontal [input | buttons] row inside a parent
@@ -7047,7 +7048,7 @@ void UITask::adminRebuildFields() {
     return r;
   };
   // per-row Refresh (get) and Apply (set) icon buttons; row index goes in user_data
-  auto addBtns = [](lv_obj_t* row, int idx, bool refresh, bool apply) {
+  auto addBtns = [this](lv_obj_t* row, int idx, bool refresh, bool apply) {
     if (refresh) {
       lv_obj_t* b = lv_btn_create(row);
       lv_obj_set_size(b, 42, 38);
@@ -7062,6 +7063,7 @@ void UITask::adminRebuildFields() {
       lv_obj_set_user_data(b, (void*)(intptr_t)idx);
       lv_obj_add_event_cb(b, admin_field_apply_cb, LV_EVENT_CLICKED, NULL);
       lv_obj_t* l = lv_label_create(b); lv_label_set_text(l, LV_SYMBOL_OK); lv_obj_center(l);
+      _admin_apply_btn[idx] = b;
     }
   };
 
@@ -7143,6 +7145,10 @@ void UITask::adminRebuildFields() {
     _admin_widget[row] = w;
     _admin_specidx[row] = (uint8_t)i;
     _admin_field_count++;
+    // Grey out everything that has a Refresh until it loads at least once, so a checkbox/
+    // dropdown can't masquerade as a real value (and a failed refresh stays visibly inactive).
+    // Password fields are write-only (no Refresh) so they start active.
+    if (sp.kind != AK_PASSWORD) adminSetFieldEnabled(row, false);
   }
 
   // Action buttons
@@ -7273,6 +7279,7 @@ void UITask::adminSetFieldValue(int row, const char* value) {
     if (n > 1 && parts[1]) lv_dropdown_set_selected(_admin_radio_bw, admin_bwIndex(strtof(parts[1], nullptr)));
     if (n > 2 && parts[2]) { int sf = atoi(parts[2]); if (sf < 5) sf = 5; if (sf > 12) sf = 12; lv_dropdown_set_selected(_admin_radio_sf, sf - 5); }
     if (n > 3 && parts[3]) { int cr = atoi(parts[3]); if (cr < 5) cr = 5; if (cr > 8) cr = 8; lv_dropdown_set_selected(_admin_radio_cr, cr - 5); }
+    adminSetFieldEnabled(row, true);   // loaded -> activate the group
     return;
   }
   switch (sp.kind) {
@@ -7293,6 +7300,25 @@ void UITask::adminSetFieldValue(int row, const char* value) {
       lv_textarea_set_text(w, value);
       break;
   }
+  adminSetFieldEnabled(row, true);   // loaded -> activate the field + its Apply
+}
+
+// Grey out (opacity + non-interactive) or activate a field and its Apply button. The Refresh
+// button stays active so a greyed field can always be (re)loaded.
+void UITask::adminSetFieldEnabled(int row, bool en) {
+  const AdminFieldSpec& sp = ADMIN_SPEC[_admin_specidx[row]];
+  auto setW = [en](lv_obj_t* w) {
+    if (!w) return;
+    lv_obj_set_style_opa(w, en ? LV_OPA_COVER : LV_OPA_50, 0);
+    if (en) { lv_obj_clear_state(w, LV_STATE_DISABLED); lv_obj_add_flag(w, LV_OBJ_FLAG_CLICKABLE); }
+    else    { lv_obj_add_state(w, LV_STATE_DISABLED);   lv_obj_clear_flag(w, LV_OBJ_FLAG_CLICKABLE); }
+  };
+  if (sp.kind == AK_RADIO_TUPLE) {
+    setW(_admin_radio_freq); setW(_admin_radio_bw); setW(_admin_radio_sf); setW(_admin_radio_cr);
+  } else {
+    setW(_admin_widget[row]);
+  }
+  if (_admin_apply_btn[row]) setW(_admin_apply_btn[row]);
 }
 
 // --- sending sets / actions ----------------------------------------------

@@ -574,6 +574,7 @@ class UITask : public AbstractUITask {
   uint8_t         _admin_type = 0;              // ADV_TYPE_REPEATER / ADV_TYPE_ROOM (drives the spec mask)
   char            _admin_conv_key[CHAT_PEER_NAME_MAX] = {0};  // conv_key of the admin target (reply matching)
   lv_obj_t*       _admin_widget[ADMIN_MAX_FIELDS] = {0};      // visible-row -> input widget
+  lv_obj_t*       _admin_apply_btn[ADMIN_MAX_FIELDS] = {0};   // visible-row -> Apply button (NULL if none)
   uint8_t         _admin_specidx[ADMIN_MAX_FIELDS] = {0};     // visible-row -> spec index
   // Radio tuple is one logical setting (composite set radio) shown as freq field + bw/sf/cr
   // dropdowns; _admin_widget[radio row] aliases _admin_radio_freq for the loading hint.
@@ -1108,6 +1109,7 @@ private:
   void      adminSendAction(const char* cli, bool to_popup);  // send a CLI command, await its ack
   void      adminConfirm(const char* msg, const char* cmd, bool to_popup);  // confirm dialog -> adminSendAction
   void      adminSetFieldValue(int row, const char* value);  // parsed "> v" -> widget
+  void      adminSetFieldEnabled(int row, bool en);  // grey out / activate a field (+ its Apply)
   int       adminRowOfWidget(lv_obj_t* w);   // visible-row owning a field widget, or -1
   AdminCred* adminCredFor(const uint8_t* pk);
   void      adminCacheLogin(const uint8_t* pk, bool is_admin, uint16_t ka);
