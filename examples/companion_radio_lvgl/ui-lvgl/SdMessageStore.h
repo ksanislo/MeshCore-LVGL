@@ -176,6 +176,23 @@ class SdMessageStore : public MessageStore {
     char text[CHAT_MSG_TEXT_MAX];    rcGetStr(rec, RC_TXT_OFF, RC_TXT_W, text, sizeof(text));
     pushBuf(outgoing, sender, text, ts, status, 0, 0, 0, hops, bytes);
   }
+  // Parse one record block straight into a caller's ChatMessage (for random-access paging reads --
+  // does NOT touch the live _buf). RAM-only fields (ack/expiry/cli) default off; a persisted record
+  // is historical, so SENDING collapses to NONE just like rcParseInto.
+  static void rcToMsg(const char* rec, const char* peerkey, ChatMessage& m) {
+    char sc = rec[RC_ST_OFF];
+    uint8_t status = (sc >= '0' && sc <= '9') ? (uint8_t)(sc - '0') : MSG_STATUS_NONE;
+    if (status == MSG_STATUS_SENDING) status = MSG_STATUS_NONE;
+    m.outgoing  = rec[RC_DIR_OFF] == '1';
+    m.timestamp = rcGetNum(rec, RC_TS_OFF, RC_TS_W);
+    m.status    = status;
+    m.ack = 0; m.expiry_ms = 0; m.cli = 0;
+    m.hops  = (uint8_t)rcGetNum(rec, RC_HOPS_OFF, RC_HOPS_W);
+    m.bytes = (uint16_t)rcGetNum(rec, RC_BYTES_OFF, RC_BYTES_W);
+    copyBounded(m.peer, peerkey, CHAT_PEER_NAME_MAX);
+    rcGetStr(rec, RC_SND_OFF, RC_SND_W, m.sender, CHAT_PEER_NAME_MAX);
+    rcGetStr(rec, RC_TXT_OFF, RC_TXT_W, m.text, CHAT_MSG_TEXT_MAX);
+  }
   static bool rcFileIsNew(FsFile& f) {   // header magic present?
     char m[6]; f.seek(0);
     return f.read((uint8_t*)m, 6) == 6 && memcmp(m, RC_MAGIC, 6) == 0;
@@ -388,6 +405,56 @@ public:
     int n = (_count < max) ? _count : max;
     for (int i = 0; i < n; i++) out[i] = &_buf[_count - n + i];
     return n;
+  }
+
+  // Total persisted record count for a conversation (for virtualized paging). From the file when
+  // the card is up; else the RAM buffer count for the loaded conversation (no older history then).
+  int recordCount(const char* peer) override {
+    ensure();
+    if (SdSvc::ready()) {
+      char path[64]; keyPath(peer, path, sizeof(path));
+      SdSvc::Lock lk;
+      FsFile f = sd.open(path, O_RDONLY);
+      if (f.isOpen()) {
+        uint32_t sz = (uint32_t)f.size(); f.close();
+        return (sz >= (uint32_t)(2 * REC)) ? (int)((sz - REC) / REC) : 0;
+      }
+    }
+    if (_loaded[0] && strncmp(peer, _loaded, CHAT_PEER_NAME_MAX) == 0) return _count;
+    return 0;
+  }
+
+  // Random-access read of records [first, first+max) (file order, oldest-first) into `out` as COPIES
+  // -- O(1) seek, does NOT disturb the live _buf. Returns the count read. Used by the UI's virtualized
+  // scrollback to page older history beyond the resident _buf window. (Persisted status only; the live
+  // tail's up-to-date status comes from messagesFor.)
+  int readRecords(const char* peer, int first, int max, ChatMessage* out) override {
+    if (first < 0 || max <= 0) return 0;
+    ensure();
+    if (SdSvc::ready()) {
+      char path[64]; keyPath(peer, path, sizeof(path));
+      SdSvc::Lock lk;
+      FsFile f = sd.open(path, O_RDONLY);
+      if (f.isOpen()) {
+        uint32_t sz = (uint32_t)f.size();
+        int total = (sz >= (uint32_t)(2 * REC)) ? (int)((sz - REC) / REC) : 0;
+        static char block[REC];
+        int got = 0;
+        f.seek((uint32_t)REC * (1 + first));     // header is block 0
+        for (int i = 0; i < max && (first + i) < total; i++) {
+          if (f.read((uint8_t*)block, REC) != REC) break;
+          rcToMsg(block, peer, out[got++]);
+        }
+        f.close();
+        return got;
+      }
+    }
+    if (_loaded[0] && strncmp(peer, _loaded, CHAT_PEER_NAME_MAX) == 0) {
+      int got = 0;
+      for (int i = 0; i < max && (first + i) < _count; i++) out[got++] = _buf[first + i];
+      return got;
+    }
+    return 0;
   }
 
   void clearPeer(const char* peer) override {

@@ -70,6 +70,13 @@ public:
   // Returns the number written. Pointers stay valid until the next append.
   virtual int messagesFor(const char* peer, const ChatMessage** out, int max) = 0;
 
+  // Virtualized paging (persistent stores). recordCount = total persisted records for a peer;
+  // readRecords copies file records [first, first+max) (oldest-first) into `out`. Default 0 means
+  // "no paging available" -- the UI then just uses the messagesFor() window (a RAM ring has no
+  // history beyond what it holds).
+  virtual int recordCount(const char* /*peer*/) { return 0; }
+  virtual int readRecords(const char* /*peer*/, int /*first*/, int /*max*/, ChatMessage* /*out*/) { return 0; }
+
   // Drop all messages for a peer (clear that conversation's history).
   virtual void clearPeer(const char* peer) = 0;
 
