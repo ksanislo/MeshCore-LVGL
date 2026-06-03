@@ -3417,34 +3417,59 @@ void UITask::expandChatOlder() {
   _chat_prog_scroll = false;
 }
 
-// Scroll within the chat history: when it reaches the top and older messages exist, request an
-// expand (deferred to loop() so we don't rebuild mid-fling).
+// Scroll within the chat history: when it gets NEAR the top and older messages exist, request an
+// expand (deferred to loop() so we don't rebuild mid-fling). Arming a screenful early (rather than
+// AT the very top) prefetches the next chunk during the natural pause between upward flings, so the
+// older bubbles are usually already there by the time the user reaches the ceiling -- no dead stop.
 void UITask::chat_history_scroll_cb(lv_event_t* e) {
   if (!_instance) return;
   if (_instance->_chat_prog_scroll) return;   // programmatic clean/build/re-anchor, not a user scroll
   lv_obj_t* c = lv_event_get_target(e);
-  if (lv_obj_get_scroll_top(c) <= 8 && _instance->_chat_win_first > 0) _instance->_chat_want_older = true;
+  lv_coord_t lead = lv_obj_get_content_height(c);   // ~one viewport of lead time
+  if (lead < 80) lead = 200;
+  if (lv_obj_get_scroll_top(c) <= lead && _instance->_chat_win_first > 0) _instance->_chat_want_older = true;
 }
 
 // Incremental refresh when a new message lands in the open chat: if exactly one message was
 // appended and the ring hasn't wrapped, render just that one bubble; otherwise fall back to a
 // full rebuild (search active, multi-message burst, ring wrap, or anything ambiguous).
+// True when the chat history is at (or within a line of) the tail -- i.e. following live, not
+// scrolled up reading older history. Drives whether a new message auto-scrolls to the bottom.
+bool UITask::chatAtBottom() {
+  if (!_chat_history) return true;
+  return lv_obj_get_scroll_bottom(_chat_history) <= 24;   // within ~a line of the newest
+}
+
 void UITask::appendPendingChat() {
   _chat_pending = false;
   if (!_chat_history) return;
+  bool atBottom = chatAtBottom();   // capture BEFORE adding anything
   if (_search_active && _search_filter[0]) { rebuildChatHistory(); return; }
 
   const ChatMessage* all[CHAT_HISTORY_CAP];
   int n = _msgs->messagesFor(_chat_key, all, CHAT_HISTORY_CAP);
+  // Follow the tail if we were already there, OR the newest message is one WE sent (you always
+  // want to see your own just-sent message) -- but never yank for an incoming message arriving
+  // while you're scrolled up reading history.
+  bool follow = atBottom || (n >= 1 && all[n - 1] && all[n - 1]->outgoing);
   if (_chat_rendered_n >= 1 && n == _chat_rendered_n + 1 && n <= CHAT_HISTORY_CAP) {
     ensureChatRenderCtx();
     appendChatBubble(all[n - 1]);
     _chat_rendered_n = n;
-    lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
     lv_obj_update_layout(_chat_history);
+    // Scrolled up reading history? Leave the view put -- the new bubble waits below the fold and
+    // the banner (drainEvents) tells the reader it arrived. Only follow the tail if already there.
+    if (follow) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
     sb_update(_chat_history, _chat_sb);
+  } else if (follow) {
+    rebuildChatHistory();                              // at the tail: full refresh + scroll-to-bottom
   } else {
-    rebuildChatHistory();
+    // Scrolled up + a multi-message/ambiguous refresh: rebuild without yanking. The window top is
+    // unchanged and new messages land below the fold, so restoring the prior scroll_y (clean reset
+    // it to 0) keeps the reader exactly where they were. Guard the restore so it doesn't arm want_older.
+    lv_coord_t beforeY = lv_obj_get_scroll_y(_chat_history);
+    _chat_keep_scroll = true; rebuildChatHistory(); _chat_keep_scroll = false;
+    _chat_prog_scroll = true; lv_obj_scroll_to_y(_chat_history, beforeY, LV_ANIM_OFF); _chat_prog_scroll = false;
   }
 }
 
@@ -10531,14 +10556,19 @@ void UITask::drainEvents() {
         bool is_channel = strncmp(ev.conv_key, "ch_", 3) == 0;
         bool viewing = _chat_screen && lv_scr_act() == _chat_screen &&
                        strncmp(ev.conv_key, _chat_key, CHAT_PEER_NAME_MAX) == 0;
+        // "Following" = in this chat AND pinned to the tail. If you're in the chat but scrolled up
+        // reading history, treat it like a background chat for notification purposes: pop the banner
+        // (so you know something arrived) instead of yanking you to the bottom.
+        bool following = viewing && chatAtBottom();
         if (viewing) _chat_pending = true;   // defer the heavy rebuild past any active scroll (loop services it)
         if (!ev.outgoing) {
           bool muted = effectiveMuted(ev.conv_key);   // explicit choice, else mute-by-default
           if (!viewing) markUnread(ev.conv_key);   // unread mark only for chats you're not in
           if (notifyEnabled() && !muted) {
-            // Phone-style: chime on every non-muted message (viewed or not). The
-            // banner + screen-wake only fire when you're NOT already looking at it.
-            if (!viewing) onIncomingNotify(ev.conv_key, ev.sender, ev.text, is_channel);
+            // Phone-style: chime on every non-muted message (viewed or not). The banner + screen-wake
+            // fire whenever you're NOT pinned to the tail -- not looking at the chat, OR scrolled up
+            // in it (the banner doubles as a "jump to newest" tap).
+            if (!following) onIncomingNotify(ev.conv_key, ev.sender, ev.text, is_channel);
             _pending_chime = is_channel ? UIEventType::channelMessage : UIEventType::contactMessage;
           }
         }

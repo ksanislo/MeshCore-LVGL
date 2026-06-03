@@ -658,6 +658,7 @@ class UITask : public AbstractUITask {
   void      ensureChatRenderCtx();           // recompute tz/now-day/bubble-cap before (re)rendering
   void      appendChatBubble(const ChatMessage* m);  // render one message, advancing the render cursor
   void      appendPendingChat();             // incremental: append just the new message(s), else rebuild
+  bool      chatAtBottom();                  // chat history pinned to the tail (vs scrolled up reading)
   int       computeChatWinK();               // max bubbles that fit the chat band (densest unit) + overscan
   void      expandChatOlder();               // scroll-up reached the top -> render an older chunk, re-anchor
   static void chat_history_scroll_cb(lv_event_t* e);   // detect scroll-to-top -> request older
