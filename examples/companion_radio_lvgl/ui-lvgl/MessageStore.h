@@ -9,7 +9,12 @@
 // what MyMesh::newMsg hands the UI); a future SD backend can re-key by pubkey.
 
 #ifndef CHAT_MSG_TEXT_MAX
-  #define CHAT_MSG_TEXT_MAX 150
+  // Buffer size (INCLUDES the null) for a message body. 161 = MAX_TEXT_LEN (160 =
+  // 10*CIPHER_BLOCK_SIZE, the wire cap) + 1, so we can hold the longest legal
+  // message in full and never byte-truncate (which could slice a UTF-8 codepoint)
+  // at ingest. Also the fixed-record text column width (RC_TXT_W) -- widening it is
+  // backward-compatible since text is the last column and records are space-filled.
+  #define CHAT_MSG_TEXT_MAX 161
 #endif
 #ifndef CHAT_PEER_NAME_MAX
   #define CHAT_PEER_NAME_MAX 32

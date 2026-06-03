@@ -119,7 +119,9 @@ class SdMessageStore : public MessageStore {
   // delimiters, no escaping, no line scanning. Fields live at FIXED byte columns; the message
   // text is stored RAW (newlines/tabs and all) in its column and right-trimmed of pad spaces on
   // read. Each block ends with '\n' so it still opens cleanly as a text file. Reserved bytes
-  // [208,255) leave room for future fixed-position fields without changing offsets.
+  // [219,255) leave room for future fixed-position fields without changing offsets. (The text
+  // column was widened 150->161 to match the wire cap; old 150-wide records still read correctly
+  // since the extra bytes were space pad and text is the last column.)
   static const int REC = 256;
   static const int RC_TS_OFF=0,  RC_TS_W=10;   // decimal unix ts (10 digits = uint32 max)
   static const int RC_DIR_OFF=11;              // '0'/'1' outgoing
@@ -127,7 +129,7 @@ class SdMessageStore : public MessageStore {
   static const int RC_HOPS_OFF=15, RC_HOPS_W=3;
   static const int RC_BYTES_OFF=19, RC_BYTES_W=5;
   static const int RC_SND_OFF=25, RC_SND_W=CHAT_PEER_NAME_MAX;       // 32
-  static const int RC_TXT_OFF=58, RC_TXT_W=CHAT_MSG_TEXT_MAX;        // 150  (-> 208, then reserved)
+  static const int RC_TXT_OFF=58, RC_TXT_W=CHAT_MSG_TEXT_MAX;        // 161  (-> 219, then reserved)
   static constexpr const char* RC_MAGIC = "#MCHAT";                  // first 6 bytes of block 0
 
   static void rcPutNum(char* rec, int off, int w, uint32_t v) {
