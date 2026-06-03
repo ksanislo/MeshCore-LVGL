@@ -3272,7 +3272,8 @@ void UITask::appendChatBubble(const ChatMessage* m) {
                      _node_prefs && _node_prefs->clock_12h);
         int o = snprintf(ftxt, sizeof(ftxt), "%s%s", delivered ? LV_SYMBOL_OK " " : "", tbuf);
         // Diagnostic footer for incoming flood (channel) messages: how far it travelled
-        // and how big it was. hops==0xFF means a direct reception, so omit it then.
+        // (hops) and the per-hop path-hash size (1/2/3 bytes). hops==0xFF means a direct
+        // reception, so omit it then.
         if (!m->outgoing && m->hops != 0xFF && _node_prefs && _node_prefs->show_chat_meta) {
           snprintf(ftxt + o, sizeof(ftxt) - o,
                    " " LV_SYMBOL_BULLET " %u hop%s " LV_SYMBOL_BULLET " %u byte%s",
@@ -4168,7 +4169,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
     uint8_t cnt = path_len & 0x3F;                      // repeater hops
     uint8_t sz  = ((path_len >> 6) & 0x3) + 1;          // path-hash size (bytes per hop)
     ev.hops  = cnt;
-    ev.bytes = (uint16_t)cnt * sz;                      // path field length in bytes
+    ev.bytes = sz;                                      // per-hop path-hash size (1/2/3 bytes)
   }
   mproxy::pushEvent(ev);
 }
