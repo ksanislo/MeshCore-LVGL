@@ -2028,10 +2028,10 @@ void UITask::resetKbScroll() {
 
 void UITask::storeAppend(bool outgoing, const char* key, const char* sender,
                          const char* text, uint32_t ts, uint8_t status, uint32_t ack, uint32_t expiry_ms,
-                         uint32_t cli, uint8_t hops, uint16_t bytes) {
-  _rammsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms, cli, hops, bytes);  // always: recent ring
+                         uint32_t cli, uint8_t hops, uint16_t bytes, const RxMeta* meta) {
+  _rammsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms, cli, hops, bytes);  // always: recent ring (meta ignored)
 #ifdef HAS_SD_CARD
-  if (_msgs == &_sdmsgs) _sdmsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms, cli, hops, bytes);
+  if (_msgs == &_sdmsgs) _sdmsgs.append(outgoing, key, sender, text, ts, status, ack, expiry_ms, cli, hops, bytes, meta);
 #endif
 }
 
@@ -2078,8 +2078,9 @@ uint32_t UITask::postSend(bool is_channel, const uint8_t* pubkey6, int channel_i
                           const char* conv_key, const char* sender, const char* text) {
   uint32_t token = ++_send_seq;
   if (token == 0) token = ++_send_seq;   // 0 means "no token"
+  RxMeta meta{}; meta.outgoing = true; mproxy::selfLatLon(meta.our_lat, meta.our_lon);  // where we were (ack resolves async -> blank)
   storeAppend(true, conv_key, sender, text, mproxy::rtcSeconds(),
-              MSG_STATUS_SENDING, 0, millis() + 8000, token);  // provisional expiry until EV_SendResult
+              MSG_STATUS_SENDING, 0, millis() + 8000, token, 0xFF, 0, &meta);  // provisional expiry until EV_SendResult
   mproxy::MeshCmd c{};
   c.kind = mproxy::CmdKind::Send;
   c.token = token;
@@ -2118,7 +2119,8 @@ void UITask::sendCurrentMessage() {
 // CLI command to a repeater: no ACK, so show it as a plain sent bubble and post the
 // command. The reply comes back as an incoming CLI_DATA message in the same thread.
 void UITask::postCliCommand(const uint8_t* pubkey6, const char* conv_key, const char* text) {
-  storeAppend(true, conv_key, "Me", text, mproxy::rtcSeconds(), MSG_STATUS_NONE, 0, 0, 0);
+  RxMeta meta{}; meta.outgoing = true; mproxy::selfLatLon(meta.our_lat, meta.our_lon);
+  storeAppend(true, conv_key, "Me", text, mproxy::rtcSeconds(), MSG_STATUS_NONE, 0, 0, 0, 0xFF, 0, &meta);
   mproxy::MeshCmd c{};
   c.kind = mproxy::CmdKind::SendCommand;
   if (pubkey6) memcpy(c.pubkey, pubkey6, 6);
@@ -2157,8 +2159,9 @@ void UITask::resendMessage(const ChatMessage* m) {
   if (token == 0) token = ++_send_seq;
   if (!_msgs->requeue(m, 0, millis() + 8000, token)) {
     const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
+    RxMeta meta{}; meta.outgoing = true; mproxy::selfLatLon(meta.our_lat, meta.our_lon);
     storeAppend(true, _chat_key, me, text, mproxy::rtcSeconds(),
-                MSG_STATUS_SENDING, 0, millis() + 8000, token);
+                MSG_STATUS_SENDING, 0, millis() + 8000, token, 0xFF, 0, &meta);
   }
   mproxy::MeshCmd c{};
   c.kind = mproxy::CmdKind::Send;
@@ -4172,6 +4175,20 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
     ev.hops  = cnt;
     ev.bytes = sz;                                      // per-hop path-hash size (1/2/3 bytes)
   }
+  // Radio/diagnostic meta -- copy from the MyMesh hook HERE (backend core); drainEvents reads ev.* only.
+  ev.has_radio_meta = mproxy::hookRxValid();
+  ev.out_ack = 0;
+  ev.our_lat = mproxy::hookOurLat();  ev.our_lon = mproxy::hookOurLon();
+  if (ev.has_radio_meta) {
+    ev.snr = mproxy::hookRxSnr();  ev.rssi = mproxy::hookRxRssi();  ev.noise = mproxy::hookRxNoise();
+    ev.rx_header = mproxy::hookRxHeader();
+    memcpy(ev.pkt_hash, mproxy::hookRxHash(), 8);
+    ev.rx_path_len = mproxy::hookRxPathLen();
+    if (ev.rx_path_len > MAX_PATH_SIZE) ev.rx_path_len = MAX_PATH_SIZE;
+    memcpy(ev.rx_path, mproxy::hookRxPath(), ev.rx_path_len);
+    ev.sender_ts = mproxy::hookRxSenderTs();
+    ev.remote_lat = mproxy::hookRxRemoteLat();  ev.remote_lon = mproxy::hookRxRemoteLon();
+  }
   mproxy::pushEvent(ev);
 }
 
@@ -4188,6 +4205,10 @@ void UITask::sentMsg(const char* peer, const char* text) {
   strncpy(ev.text, text ? text : "", sizeof(ev.text) - 1);
   ev.ts = mproxy::rtcSeconds();
   ev.msgcount = -1;   // unchanged
+  // Outgoing meta (companion-app send): our position + expected-ack (read hook on backend core).
+  ev.has_radio_meta = false;
+  ev.out_ack = mproxy::hookOutAck();
+  ev.our_lat = mproxy::hookOurLat();  ev.our_lon = mproxy::hookOurLon();
   mproxy::pushEvent(ev);
 }
 
@@ -11548,8 +11569,23 @@ void UITask::drainEvents() {
             strncmp(ev.conv_key, _admin_conv_key, CHAT_PEER_NAME_MAX) == 0) {
           if (adminConsumeReply(ev.text)) break;
         }
+        // Build the disk-only radio meta from ev.* (UI core -- never read a hook accessor here).
+        RxMeta meta{};
+        meta.outgoing = ev.outgoing;
+        meta.has_rx   = ev.has_radio_meta;
+        meta.our_lat = ev.our_lat;  meta.our_lon = ev.our_lon;
+        if (ev.outgoing) {
+          meta.out_ack = ev.out_ack;
+        } else if (ev.has_radio_meta) {
+          meta.snr = ev.snr;  meta.rssi = ev.rssi;  meta.noise = ev.noise;  meta.header = ev.rx_header;
+          memcpy(meta.pkt_hash, ev.pkt_hash, 8);
+          meta.path_len = ev.rx_path_len;
+          memcpy(meta.path, ev.rx_path, ev.rx_path_len <= RX_PATH_MAX ? ev.rx_path_len : RX_PATH_MAX);
+          meta.sender_ts = ev.sender_ts;
+          meta.remote_lat = ev.remote_lat;  meta.remote_lon = ev.remote_lon;
+        }
         storeAppend(ev.outgoing, ev.conv_key, ev.sender, ev.text, ev.ts,
-                    MSG_STATUS_NONE, 0, 0, 0, ev.hops, ev.bytes);
+                    MSG_STATUS_NONE, 0, 0, 0, ev.hops, ev.bytes, &meta);
         // "Viewing" = the chat screen is the active screen AND it's this conversation
         // (not merely that we last opened it -- you may have navigated back home).
         bool is_channel = strncmp(ev.conv_key, "ch_", 3) == 0;

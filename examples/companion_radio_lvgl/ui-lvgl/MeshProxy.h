@@ -114,6 +114,20 @@ struct UiEvent {
   uint8_t  hops;       // incoming flood path length (0xFF = direct/unknown)
   uint16_t bytes;      // incoming message payload size (diagnostic footer)
   bool     is_cli;     // reply came as TXT_TYPE_CLI_DATA (admin/console reply, not a chat post)
+  // Radio/diagnostic meta (written disk-only). Copied from the MyMesh hook in newMsg/sentMsg
+  // (backend core); drainEvents reads ONLY these ev.* fields (never a hook accessor).
+  bool     has_radio_meta;       // incoming rx fields valid
+  int8_t   snr;        // SNR*4
+  int8_t   rssi;       // dBm
+  int16_t  noise;      // noise floor
+  uint8_t  rx_header;  // pkt->header
+  uint8_t  pkt_hash[8];
+  uint8_t  rx_path[MAX_PATH_SIZE];
+  uint8_t  rx_path_len;
+  uint32_t sender_ts;  // sender's claimed timestamp
+  int32_t  our_lat, our_lon;        // deg*1e6 at send/receive (both directions)
+  int32_t  remote_lat, remote_lon;  // sender's last-advert position (incoming DM)
+  uint32_t out_ack;    // outgoing companion-app send expected-ack
   // SendResult (+ Delivered reuses `ack`)
   uint32_t token;
   bool     ok;
@@ -179,6 +193,22 @@ bool  signalHasData();             // false until the first real sample (cold st
 const uint8_t* hookKey();
 bool           hookIsChannel();
 bool           hookIsCli();
+// Per-message radio meta accessors (read on the backend thread inside newMsg/sentMsg only).
+bool           hookRxValid();
+int8_t         hookRxSnr();
+int8_t         hookRxRssi();
+int16_t        hookRxNoise();
+uint8_t        hookRxHeader();
+const uint8_t* hookRxHash();      // 8 bytes
+const uint8_t* hookRxPath();      // MAX_PATH_SIZE bytes
+uint8_t        hookRxPathLen();
+uint32_t       hookRxSenderTs();
+int32_t        hookOurLat();
+int32_t        hookOurLon();
+int32_t        hookRxRemoteLat();
+int32_t        hookRxRemoteLon();
+uint32_t       hookOutAck();
+void           selfLatLon(int32_t& lat_e6, int32_t& lon_e6);   // our node position (UI-core safe; near-static)
 
 // A saved server password (login store) for pre-filling a login dialog. Copies the password
 // into out and returns true if one is stored for this 6-byte pubkey, else false. Read-only.

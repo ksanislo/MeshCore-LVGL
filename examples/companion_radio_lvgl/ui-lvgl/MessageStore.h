@@ -38,6 +38,29 @@ struct ChatMessage {
   uint16_t bytes;      // incoming message payload size, for the diagnostic footer. RAM-only.
 };
 
+// Disk-only radio/diagnostic metadata for the 512-byte SD record's radio half. Passed by
+// pointer to append(); the RAM ring ignores it (keeps ChatMessage lean). Captured at packet
+// receive and threaded backend->UI; fields not captured stay at their zero defaults (written
+// blank). RX_PATH_MAX mirrors src MAX_PATH_SIZE (64) without pulling in the heavy header.
+#ifndef RX_PATH_MAX
+  #define RX_PATH_MAX 64
+#endif
+struct RxMeta {
+  bool     outgoing = false;   // mirrors the append() arg (selects which columns to write)
+  bool     has_rx = false;     // incoming radio fields valid
+  int8_t   snr = 0;            // SNR*4
+  int8_t   rssi = 0;           // dBm
+  int16_t  noise = 0;
+  uint8_t  header = 0;
+  uint8_t  pkt_hash[8] = {0};
+  uint8_t  path[RX_PATH_MAX] = {0};
+  uint8_t  path_len = 0;       // raw byte count in path[]
+  uint32_t sender_ts = 0;
+  int32_t  our_lat = 0, our_lon = 0;       // deg * 1e6 (0,0 = unknown -> written blank)
+  int32_t  remote_lat = 0, remote_lon = 0;
+  uint32_t out_ack = 0;        // outgoing only
+};
+
 class MessageStore {
 public:
   virtual ~MessageStore() {}
@@ -51,7 +74,8 @@ public:
   virtual void append(bool outgoing, const char* peer, const char* sender,
                       const char* text, uint32_t ts,
                       uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0,
-                      uint32_t cli = 0, uint8_t hops = 0xFF, uint16_t bytes = 0) = 0;
+                      uint32_t cli = 0, uint8_t hops = 0xFF, uint16_t bytes = 0,
+                      const RxMeta* meta = nullptr) = 0;
 
   // Mark the (most recent) SENDING message with this ack as `status`. Returns true if found.
   virtual bool setStatusByAck(uint32_t ack, uint8_t status) = 0;
@@ -101,7 +125,9 @@ public:
   void append(bool outgoing, const char* peer, const char* sender,
               const char* text, uint32_t ts,
               uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0,
-              uint32_t cli = 0, uint8_t hops = 0xFF, uint16_t bytes = 0) override {
+              uint32_t cli = 0, uint8_t hops = 0xFF, uint16_t bytes = 0,
+              const RxMeta* meta = nullptr) override {
+    (void)meta;   // RAM ring is lean -- radio metadata is disk-only
     ChatMessage& m = _buf[_head];
     m.outgoing = outgoing;
     m.timestamp = ts;

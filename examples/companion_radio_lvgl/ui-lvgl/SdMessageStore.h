@@ -131,11 +131,25 @@ class SdMessageStore : public MessageStore {
   static const int RC_DIR_OFF=11;               // '0'/'1' outgoing
   static const int RC_ST_OFF=13;                // delivery status digit
   static const int RC_SEEN_OFF=15;              // '0'/'1' seen (reserved; unread feature wires it)
-  static const int RC_RSSI_OFF=17,  RC_RSSI_W=4;   // reserved (not captured yet)
-  static const int RC_SNR_OFF=22,   RC_SNR_W=4;    // reserved
+  static const int RC_RSSI_OFF=17,  RC_RSSI_W=4;   // last RSSI dBm (signed decimal), incoming
+  static const int RC_SNR_OFF=22,   RC_SNR_W=4;    // SNR*4 (signed decimal), incoming
   static const int RC_PMETA_OFF=27, RC_PMETA_W=2;  // path_len byte as 2 hex (count|size); blank=direct
   static const int RC_SND_OFF=30,   RC_SND_W=CHAT_PEER_NAME_MAX;   // 32  -> 30..61
   static const int RC_TXT_OFF=63,   RC_TXT_W=192;                  // 63..254 (192 col; buffer caps at CHAT_MSG_TEXT_MAX)
+  // Half 2 (radio/diagnostic) -- offsets MUST match the offline converter (convert_chatlog.py).
+  static const int RC_HDR_OFF=256,  RC_HDR_W=2;     // pkt header byte, 2 hex
+  static const int RC_HASH_OFF=259, RC_HASH_W=16;   // packet hash, 16 hex = 8 bytes
+  static const int RC_ACK_OFF=276,  RC_ACK_W=8;     // outgoing expected-ack, 8 hex = 4 bytes
+  static const int RC_NOISE_OFF=285,RC_NOISE_W=4;   // noise floor (signed decimal)
+  static const int RC_SCORE_OFF=290,RC_SCORE_W=6;   // reserved (blank for now)
+  static const int RC_FERR_OFF=297, RC_FERR_W=6;    // reserved (blank for now)
+  static const int RC_HPATH_OFF=304,RC_HPATH_W=128; // path hashes, 128 hex = 64 bytes
+  static const int RC_OLAT_OFF=433, RC_OLAT_W=11;   // our lat  "-122.123456"
+  static const int RC_OLON_OFF=445, RC_OLON_W=11;   // our lon
+  static const int RC_RTS_OFF=457,  RC_RTS_W=10;    // remote claimed ts (decimal)
+  static const int RC_RLAT_OFF=468, RC_RLAT_W=11;   // remote lat
+  static const int RC_RLON_OFF=480, RC_RLON_W=11;   // remote lon
+  static const int RC_RESV_OFF=492, RC_RESV_W=19;   // reserved (492..510), '\n' at 511
   static const char RC_NL = 0x1F;               // newline sentinel (US) stored for '\n'; restored on read
   static constexpr const char* RC_MAGIC = "#MCHAT";
 
@@ -192,10 +206,50 @@ class SdMessageStore : public MessageStore {
     *hops  = (uint8_t)(plen & 0x3F);
     *bytes = (uint16_t)((plen >> 6) + 1);
   }
-  // Build one 512-byte record block. Half 2 (radio) is left space-filled until reception logging
-  // is wired; only the single '\n' terminator at 511 is set (byte 255 stays a space).
+  // --- radio-half field writers ---
+  static void rcPutHexBytes(char* rec, int off, const uint8_t* b, int nbytes) {
+    static const char* H = "0123456789ABCDEF";
+    for (int i = 0; i < nbytes; i++) { rec[off + 2*i] = H[(b[i] >> 4) & 0xF]; rec[off + 2*i + 1] = H[b[i] & 0xF]; }
+  }
+  static void rcPutSigned(char* rec, int off, int w, int32_t v) {   // signed decimal, right-justified
+    char tmp[16]; int n = snprintf(tmp, sizeof(tmp), "%ld", (long)v);
+    if (n > w) n = w;
+    int pad = w - n;
+    for (int i = 0; i < pad; i++) rec[off + i] = ' ';
+    for (int i = 0; i < n; i++)   rec[off + pad + i] = tmp[i];
+  }
+  static void rcPutLatLon(char* rec, int off, int w, int32_t e6) {   // "-122.123456"; 0 -> blank
+    if (e6 == 0) { for (int i = 0; i < w; i++) rec[off + i] = ' '; return; }
+    int32_t a = e6 < 0 ? -e6 : e6;
+    char tmp[20];
+    snprintf(tmp, sizeof(tmp), "%s%ld.%06ld", e6 < 0 ? "-" : "", (long)(a / 1000000), (long)(a % 1000000));
+    rcPutStr(rec, off, w, tmp);   // left-justify, space-pad, truncate to w
+  }
+  // Write the radio/diagnostic half from captured meta (everything not set stays the memset space).
+  static void rcFormatRadio(char* rec, const RxMeta& m) {
+    rcPutLatLon(rec, RC_OLAT_OFF, RC_OLAT_W, m.our_lat);   // our position, both directions
+    rcPutLatLon(rec, RC_OLON_OFF, RC_OLON_W, m.our_lon);
+    if (m.outgoing) {
+      if (m.out_ack) {
+        uint8_t ab[4] = { (uint8_t)(m.out_ack >> 24), (uint8_t)(m.out_ack >> 16),
+                          (uint8_t)(m.out_ack >> 8),  (uint8_t)m.out_ack };
+        rcPutHexBytes(rec, RC_ACK_OFF, ab, 4);
+      }
+    } else if (m.has_rx) {
+      rcPutSigned(rec, RC_RSSI_OFF, RC_RSSI_W, (int32_t)m.rssi);   // chat-half signal slots
+      rcPutSigned(rec, RC_SNR_OFF,  RC_SNR_W,  (int32_t)m.snr);
+      rcPutHexBytes(rec, RC_HDR_OFF,  &m.header, 1);
+      rcPutHexBytes(rec, RC_HASH_OFF, m.pkt_hash, 8);
+      rcPutSigned(rec, RC_NOISE_OFF, RC_NOISE_W, (int32_t)m.noise);
+      if (m.path_len) rcPutHexBytes(rec, RC_HPATH_OFF, m.path, m.path_len <= 64 ? m.path_len : 64);
+      rcPutNum(rec, RC_RTS_OFF, RC_RTS_W, m.sender_ts);
+      rcPutLatLon(rec, RC_RLAT_OFF, RC_RLAT_W, m.remote_lat);
+      rcPutLatLon(rec, RC_RLON_OFF, RC_RLON_W, m.remote_lon);
+    }
+  }
+  // Build one 512-byte record block. The radio half is space-filled unless `meta` is supplied.
   static void rcFormat(char* rec, bool outgoing, uint8_t status, uint8_t hops, uint16_t bytes,
-                       uint32_t ts, const char* sender, const char* text) {
+                       uint32_t ts, const char* sender, const char* text, const RxMeta* meta = nullptr) {
     memset(rec, ' ', REC);
     rcPutNum(rec, RC_TS_OFF, RC_TS_W, ts);
     rec[RC_DIR_OFF]  = outgoing ? '1' : '0';
@@ -204,6 +258,7 @@ class SdMessageStore : public MessageStore {
     rcPutPath(rec, hops, bytes);
     rcPutStr(rec, RC_SND_OFF, RC_SND_W, sender);
     rcPutText(rec, text);
+    if (meta) rcFormatRadio(rec, *meta);
     rec[REC - 1] = '\n';
   }
   // Parse one 512-byte record block into the RAM ring (status SENDING -> NONE: not in-flight).
@@ -412,10 +467,11 @@ public:
   void append(bool outgoing, const char* peer, const char* sender,
               const char* text, uint32_t ts,
               uint8_t status = MSG_STATUS_NONE, uint32_t ack = 0, uint32_t expiry_ms = 0,
-              uint32_t cli = 0, uint8_t hops = 0xFF, uint16_t bytes = 0) override {
+              uint32_t cli = 0, uint8_t hops = 0xFF, uint16_t bytes = 0,
+              const RxMeta* meta = nullptr) override {
     if (ensure()) {
       static char rec[REC];
-      rcFormat(rec, outgoing, status, hops, bytes, ts, sender, text);  // one fixed 256B block
+      rcFormat(rec, outgoing, status, hops, bytes, ts, sender, text, meta);  // one fixed 512B block
       char path[64];
       keyPath(peer, path, sizeof(path));
       bool opened = false, wrote = false;

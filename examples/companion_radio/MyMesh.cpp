@@ -865,6 +865,11 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
   return checkConnectionsAck(data);
 }
 
+void MyMesh::ourLatLon(int32_t &lat_e6, int32_t &lon_e6) const {
+  lat_e6 = (int32_t)(sensors.node_lat * 1000000.0);
+  lon_e6 = (int32_t)(sensors.node_lon * 1000000.0);
+}
+
 void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt,
                           uint32_t sender_timestamp, const uint8_t *extra, int extra_len, const char *text) {
   int i = 0;
@@ -908,6 +913,8 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   if (should_display && _ui) {
     setHookKey(from.id.pub_key, false);
     setHookCli(txt_type == TXT_TYPE_CLI_DATA);   // let the UI route admin/console replies
+    setHookRx(pkt, &from, sender_timestamp, (int8_t)(pkt->getSNR() * 4), (int8_t)_radio->getLastRSSI(),
+              (int16_t)_radio->getNoiseFloor(), (int32_t)(sensors.node_lat * 1000000.0), (int32_t)(sensors.node_lon * 1000000.0));
     _ui->newMsg(path_len, from.name, text, offline_queue_len);
     // MESH_PROXY (dual-core): newMsg() enqueues a UI event; the UI core fires the
     // chime from drainEvents (mute/toggle/viewing-aware). Don't ring it from core 0.
@@ -1025,6 +1032,8 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   }
   if (_ui) {
     setHookKey(channel.secret, true);
+    setHookRx(pkt, nullptr, timestamp, (int8_t)(pkt->getSNR() * 4), (int8_t)_radio->getLastRSSI(),
+              (int16_t)_radio->getNoiseFloor(), (int32_t)(sensors.node_lat * 1000000.0), (int32_t)(sensors.node_lon * 1000000.0));
     _ui->newMsg(path_len, channel_name, text, offline_queue_len);
   }
 #endif
@@ -1585,6 +1594,7 @@ void MyMesh::handleCmdFrame(size_t len) {
 #ifdef DISPLAY_CLASS
         if (_ui && result != MSG_SEND_FAILED) {
           setHookKey(recipient->id.pub_key, false);
+          setHookOut(expected_ack, (int32_t)(sensors.node_lat * 1000000.0), (int32_t)(sensors.node_lon * 1000000.0));
           _ui->sentMsg(recipient->name, text);
         }
 #endif
@@ -1629,6 +1639,7 @@ void MyMesh::handleCmdFrame(size_t len) {
 #ifdef DISPLAY_CLASS
         if (_ui) {
           setHookKey(channel.channel.secret, true);
+          setHookOut(0, (int32_t)(sensors.node_lat * 1000000.0), (int32_t)(sensors.node_lon * 1000000.0));  // no ack for channel sends
           _ui->sentMsg(channel.name, text);
         }
 #endif

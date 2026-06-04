@@ -585,6 +585,21 @@ bool signalHasData() { return s_sig_seen; }
 const uint8_t* hookKey()     { return the_mesh.hookKey(); }
 bool hookIsChannel()         { return the_mesh.hookIsChannel(); }
 bool hookIsCli()             { return the_mesh.hookIsCli(); }
+bool           hookRxValid()     { return the_mesh.hookRxValid(); }
+int8_t         hookRxSnr()       { return the_mesh.hookRxSnr(); }
+int8_t         hookRxRssi()      { return the_mesh.hookRxRssi(); }
+int16_t        hookRxNoise()     { return the_mesh.hookRxNoise(); }
+uint8_t        hookRxHeader()    { return the_mesh.hookRxHeader(); }
+const uint8_t* hookRxHash()      { return the_mesh.hookRxHash(); }
+const uint8_t* hookRxPath()      { return the_mesh.hookRxPath(); }
+uint8_t        hookRxPathLen()   { return the_mesh.hookRxPathLen(); }
+uint32_t       hookRxSenderTs()  { return the_mesh.hookRxSenderTs(); }
+int32_t        hookOurLat()      { return the_mesh.hookOurLat(); }
+int32_t        hookOurLon()      { return the_mesh.hookOurLon(); }
+int32_t        hookRxRemoteLat() { return the_mesh.hookRxRemoteLat(); }
+int32_t        hookRxRemoteLon() { return the_mesh.hookRxRemoteLon(); }
+uint32_t       hookOutAck()      { return the_mesh.hookOutAck(); }
+void           selfLatLon(int32_t& lat_e6, int32_t& lon_e6) { the_mesh.ourLatLon(lat_e6, lon_e6); }
 
 bool savedLogin(const uint8_t* pubkey, char* out, size_t cap) {
   if (!out || cap == 0) return false;

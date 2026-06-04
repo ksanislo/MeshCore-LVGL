@@ -162,7 +162,7 @@ class UITask : public AbstractUITask {
   void storeAppend(bool outgoing, const char* key, const char* sender,
                    const char* text, uint32_t ts,
                    uint8_t status = 0, uint32_t ack = 0, uint32_t expiry_ms = 0, uint32_t cli = 0,
-                   uint8_t hops = 0xFF, uint16_t bytes = 0);
+                   uint8_t hops = 0xFF, uint16_t bytes = 0, const RxMeta* meta = nullptr);
   lv_obj_t*       _chat_screen;
   lv_obj_t*       _chat_title;          // contact name in the chat top bar
   lv_obj_t*       _chat_avatar;         // avatar circle in the chat top bar (branding)

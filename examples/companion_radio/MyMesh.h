@@ -296,6 +296,22 @@ public:
   const uint8_t* hookKey() const { return _hook_key; }
   bool hookIsChannel() const { return _hook_is_channel; }
   bool hookIsCli() const { return _hook_is_cli; }
+  // Per-message radio/diagnostic metadata, stashed at receive/send for the UI to log (disk-only).
+  bool     hookRxValid() const   { return _hook_rx_valid; }
+  int8_t   hookRxSnr() const      { return _hook_rx_snr; }
+  int8_t   hookRxRssi() const     { return _hook_rx_rssi; }
+  int16_t  hookRxNoise() const    { return _hook_rx_noise; }
+  uint8_t  hookRxHeader() const   { return _hook_rx_header; }
+  const uint8_t* hookRxHash() const { return _hook_rx_hash; }
+  const uint8_t* hookRxPath() const { return _hook_rx_path; }
+  uint8_t  hookRxPathLen() const  { return _hook_rx_path_len; }
+  uint32_t hookRxSenderTs() const { return _hook_rx_sender_ts; }
+  int32_t  hookOurLat() const     { return _hook_our_lat; }
+  int32_t  hookOurLon() const     { return _hook_our_lon; }
+  int32_t  hookRxRemoteLat() const { return _hook_rx_remote_lat; }
+  int32_t  hookRxRemoteLon() const { return _hook_rx_remote_lon; }
+  uint32_t hookOutAck() const     { return _hook_out_ack; }
+  void     ourLatLon(int32_t& lat_e6, int32_t& lon_e6) const;  // our node position (deg*1e6); defined in .cpp
 
   // Local display-name overrides, stored OUTSIDE the contact record (a small
   // RAM table persisted to /disp_names) so they survive advert name overwrites.
@@ -383,8 +399,45 @@ private:
   uint8_t _hook_key[6] = {0};   // identity of the msg currently handed to the UI
   bool _hook_is_channel = false;
   bool _hook_is_cli = false;    // the msg handed to the UI is a CLI_DATA (admin/console) reply
-  void setHookKey(const uint8_t* k6, bool is_channel) { memcpy(_hook_key, k6, 6); _hook_is_channel = is_channel; _hook_is_cli = false; }
+  // Per-message radio/diagnostic metadata (set at receive/send, read by the LVGL UI for disk logging)
+  int8_t   _hook_rx_snr = 0;
+  int8_t   _hook_rx_rssi = 0;
+  int16_t  _hook_rx_noise = 0;
+  uint8_t  _hook_rx_header = 0;
+  uint8_t  _hook_rx_hash[MAX_HASH_SIZE] = {0};
+  uint8_t  _hook_rx_path[MAX_PATH_SIZE] = {0};
+  uint8_t  _hook_rx_path_len = 0;
+  uint32_t _hook_rx_sender_ts = 0;
+  int32_t  _hook_our_lat = 0, _hook_our_lon = 0;
+  int32_t  _hook_rx_remote_lat = 0, _hook_rx_remote_lon = 0;
+  bool     _hook_rx_valid = false;
+  uint32_t _hook_out_ack = 0;
+  void setHookKey(const uint8_t* k6, bool is_channel) { memcpy(_hook_key, k6, 6); _hook_is_channel = is_channel; _hook_is_cli = false; _hook_rx_valid = false; }
   void setHookCli(bool v) { _hook_is_cli = v; }
+  // Incoming message radio meta. `from` may be NULL (channel posts have no per-sender contact).
+  void setHookRx(mesh::Packet* pkt, const ContactInfo* from, uint32_t sender_ts,
+                 int8_t snr_x4, int8_t rssi, int16_t noise, int32_t our_lat_e6, int32_t our_lon_e6) {
+    _hook_rx_snr = snr_x4; _hook_rx_rssi = rssi; _hook_rx_noise = noise;
+    _hook_rx_header = pkt ? pkt->header : 0;
+    if (pkt) {
+      pkt->calculatePacketHash(_hook_rx_hash);
+      uint8_t plen = pkt->getPathByteLen();
+      if (plen > MAX_PATH_SIZE) plen = MAX_PATH_SIZE;
+      memcpy(_hook_rx_path, pkt->path, plen);
+      _hook_rx_path_len = plen;
+    } else { _hook_rx_path_len = 0; }
+    _hook_rx_sender_ts  = sender_ts;
+    _hook_our_lat = our_lat_e6; _hook_our_lon = our_lon_e6;
+    _hook_rx_remote_lat = from ? from->gps_lat : 0;
+    _hook_rx_remote_lon = from ? from->gps_lon : 0;
+    _hook_rx_valid = true;
+  }
+  // Outgoing message meta (our send): our position + the expected-ack (0 if none, e.g. channel).
+  void setHookOut(uint32_t expected_ack, int32_t our_lat_e6, int32_t our_lon_e6) {
+    _hook_out_ack = expected_ack;
+    _hook_our_lat = our_lat_e6; _hook_our_lon = our_lon_e6;
+    _hook_rx_valid = false;
+  }
 
   void writeOKFrame();
   void writeErrFrame(uint8_t err_code);
