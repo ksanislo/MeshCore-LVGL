@@ -158,6 +158,10 @@ class UITask : public AbstractUITask {
   MessageStore* _msgs;   // -> _rammsgs or _sdmsgs, chosen at begin() from the setting
   uint32_t      _sd_off_ts;  // RTC time saving was disabled (0 = not off; for backfill)
   lv_obj_t*     _sd_btn = nullptr;       // top-bar red SD-card icon (mount when missing)
+  lv_obj_t*     _batt_icon = nullptr;    // top-bar battery gauge (icon-only; optional power monitor)
+  double        _batt_soc_mah = 0;       // coulomb-counted remaining capacity estimate
+  bool          _batt_soc_init = false;  // seeded from voltage yet?
+  uint32_t      _batt_last_ms = 0;       // last sample time (for the dt integration)
   bool          _sd_prev_ready = false;  // last-seen SD mounted state (to mark _sd_off_ts on removal)
   // Append to the RAM ring always (keeps recent history for the toggle) and to
   // the SD store when persistence is active.
@@ -429,6 +433,9 @@ class UITask : public AbstractUITask {
   // Telemetry policy (who may request our base/location/environment telemetry).
   lv_obj_t*       _set_telem_base_dd;
   lv_obj_t*       _set_telem_loc_dd;
+  lv_obj_t*       _set_pwrmon_dd = nullptr;    // Power monitor select (None/INA219)
+  lv_obj_t*       _set_batt_type_dd = nullptr; // Battery chemistry/cells
+  lv_obj_t*       _set_batt_cap_ta = nullptr;  // Battery capacity (mAh)
   lv_obj_t*       _set_telem_env_dd;
   // Advanced section.
   lv_obj_t*       _set_autoadd_chk;     // auto-add heard contacts (inverse of manual_add_contacts)
@@ -982,6 +989,7 @@ private:
   void        updateWifiFieldStates();          // grey/enable IP fields per DHCP/override
   void        refreshNetStatus();               // update status labels + live IP fields
   void        refreshGpsStatus();               // update the GPS debug line
+  void        updateBatteryGauge();             // sample the power monitor + drive the top-bar gauge
   static void set_avatar_cb(lv_event_t* e);
   static void set_theme_cb(lv_event_t* e);
   static void theme_async_cb(void* unused);   // deferred theme rebuild (lv_async_call)
@@ -1006,6 +1014,9 @@ private:
   static void set_mutedef_cb(lv_event_t* e);
   // Phase-1 additions: telemetry policy + advanced toggles + share-me.
   static void set_telem_cb(lv_event_t* e);          // user_data 0/1/2 = base/loc/env
+  static void set_pwrmon_cb(lv_event_t* e);         // power-monitor select
+  static void set_batt_type_cb(lv_event_t* e);      // battery type select
+  void        commitBattCapacity();                 // save the capacity field
   static void set_autoadd_cb(lv_event_t* e);
   static void set_autoadd_hops_cb(lv_event_t* e);
   static void set_rxboost_cb(lv_event_t* e);

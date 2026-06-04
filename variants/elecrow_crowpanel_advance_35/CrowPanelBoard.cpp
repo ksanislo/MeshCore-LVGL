@@ -59,3 +59,44 @@ void CrowPanelBoard::begin() {
 extern "C" void board_set_backlight(uint8_t duty) {
   ledcWrite(BL_LEDC_CHANNEL, duty);
 }
+
+// ---- INA219 battery monitor -------------------------------------------------
+// On the shared touch I2C bus (PIN_TOUCH_SDA/SCL), alongside the GT911 and the
+// PCF8563 RTC. We take the same board_i2c_lock and re-assert the bus pins per
+// access (touch reconfigures them on every read), exactly like CrowPanelRTCClock.
+extern bool board_i2c_lock(uint32_t timeout_ms);
+extern void board_i2c_unlock();
+
+static bool ina219_read16(uint8_t reg, uint16_t& out) {
+  if (!board_i2c_lock(100)) return false;
+  Wire.end();                                   // drop whatever state the LGFX touch driver left on
+  Wire.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL);     // I2C port 0 (it shares these pins); clean re-init
+  Wire.setClock(100000);                        // 100 kHz: robust on the multi-drop touch bus
+  bool ok = false;
+  for (int attempt = 0; attempt < 4 && !ok; attempt++) {   // contended bus -> retry a few times
+    Wire.beginTransmission(INA219_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(true) != 0) { delay(1); continue; }   // STOP (not repeated-start)
+    if (Wire.requestFrom((int)INA219_ADDR, 2) != 2) { delay(1); continue; }
+    out = ((uint16_t)Wire.read() << 8) | (uint8_t)Wire.read();
+    ok = true;
+  }
+  board_i2c_unlock();
+  return ok;
+}
+
+uint16_t CrowPanelBoard::getBattMilliVolts() {
+  if (_power_monitor != 1) return 0;             // no monitor selected -> don't touch I2C
+  uint16_t raw;
+  if (!ina219_read16(0x02, raw)) return 0;       // bus-voltage reg; 0 = sensor absent/no ACK
+  return (uint16_t)((raw >> 3) * 4);             // bits[15:3], 4 mV/LSB
+}
+
+int32_t CrowPanelBoard::getBattCurrentMa() {
+  if (_power_monitor != 1) return 0;
+  uint16_t raw;
+  if (!ina219_read16(0x01, raw)) return 0;        // shunt-voltage reg (signed), 10 uV/LSB
+  // I[mA] = Vshunt[uV] / Rshunt[mOhm] = (raw*10) / R_mOhm. Negated: this board's shunt IN+/IN- are
+  // wired so the raw sign is inverted vs our convention -> make + = charging, - = discharging.
+  return -(((int32_t)(int16_t)raw * 10) / (int32_t)INA219_SHUNT_MILLIOHM);
+}

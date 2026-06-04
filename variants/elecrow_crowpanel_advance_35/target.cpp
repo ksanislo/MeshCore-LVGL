@@ -138,6 +138,27 @@ bool board_i2c_lock(uint32_t timeout_ms) {
   return xSemaphoreTake(s_i2c_mtx, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
 void board_i2c_unlock() { if (s_i2c_mtx) xSemaphoreGive(s_i2c_mtx); }
+
+// Battery hooks for the variant-agnostic UI (override the weak defaults in UITask). INA219 read.
+int  board_batt_millivolts() { return (int)board.getBattMilliVolts(); }
+int  board_batt_current_ma() { return board.getBattCurrentMa(); }
+void board_set_power_monitor(int type) { board.setPowerMonitor((uint8_t)type); }  // 0 None, 1 INA219
+
+// I2C bus scan (diagnostic, used by Node Info when the INA219 isn't found): which 7-bit addresses
+// ACK on the shared touch bus. Expect 0x14/0x5D (GT911 touch), 0x51 (PCF8563 RTC), 0x40-ish (INA219).
+int board_i2c_scan(uint8_t* out, int maxn) {
+  if (!board_i2c_lock(200)) return 0;
+  Wire.end();                            // clean re-init off the LGFX touch driver's state
+  Wire.begin(P_TOUCH_SDA, P_TOUCH_SCL);
+  Wire.setClock(100000);
+  int cnt = 0;
+  for (uint8_t a = 0x08; a <= 0x77 && cnt < maxn; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) out[cnt++] = a;
+  }
+  board_i2c_unlock();
+  return cnt;
+}
 int  board_touch_int_pin() { return P_TOUCH_INT; }   // UITask uses this to drive touch off the INT
 
 bool radio_init() {

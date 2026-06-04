@@ -91,4 +91,9 @@ struct NodePrefs {  // persisted to file
   uint16_t sigmeter_decay_s;    // s: linear decay span after the hold (default 100)
   uint8_t  show_chat_meta;      // 1 = show per-message diagnostics (hops/bytes, ack count) in chat (default off)
   char     ota_url[96];         // firmware .bin URL for OTA (dev: http://<laptop>:port/firmware.bin)
+  // Optional battery / power monitor (off by default; never required). Drives the fuel-gauge
+  // estimate + top-bar icon. Defaulted before read, so old/short prefs files keep these off.
+  uint8_t  power_monitor;       // 0 = None (feature off), 1 = INA219 (room for more I2C/UART later)
+  uint8_t  batt_type;           // 0 = 1S Li-ion, 1 = 2S Li-ion, 2 = 1S LiFePO4 (sets the V->% curve)
+  uint16_t batt_capacity_mah;   // pack capacity for coulomb counting (0 -> default 5000)
 };

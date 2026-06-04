@@ -48,6 +48,10 @@ extern "C" __attribute__((weak)) void board_rtc_set_time(uint32_t epoch) {
 __attribute__((weak)) int  board_touch_int_pin() { return -1; }
 __attribute__((weak)) bool board_i2c_lock(uint32_t ms) { (void)ms; return true; }
 __attribute__((weak)) void board_i2c_unlock() {}
+__attribute__((weak)) int  board_batt_millivolts() { return -1; }  // <0 = board has no battery sensor
+__attribute__((weak)) int  board_batt_current_ma() { return 0; }   // signed mA (+charge / -discharge)
+__attribute__((weak)) int  board_i2c_scan(uint8_t* out, int maxn) { (void)out; (void)maxn; return 0; }
+__attribute__((weak)) void board_set_power_monitor(int type) { (void)type; }  // select battery sensor
 
 // Interrupt-driven touch state (CrowPanel). The ISR notifies a high-priority touch task;
 // the task does the GT911 I2C read the instant the finger lands -- off the (possibly slow)
@@ -483,6 +487,14 @@ lv_obj_t* UITask::buildHomeScreen() {
   }
   lv_obj_align_to(_sig_meter, _clock_label, LV_ALIGN_OUT_LEFT_MID, -6, 0);
 
+  // Battery gauge (icon-only): shown by loop() only when a power monitor is configured AND reading.
+  // Left of the signal meter; the level glyph + color come from the fuel-gauge estimate. Hidden default.
+  _batt_icon = lv_label_create(header);
+  lv_label_set_text(_batt_icon, LV_SYMBOL_BATTERY_FULL);
+  lv_obj_set_style_text_font(_batt_icon, &lv_font_montserrat_16, 0);
+  lv_obj_align_to(_batt_icon, _sig_meter, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+  lv_obj_add_flag(_batt_icon, LV_OBJ_FLAG_HIDDEN);
+
 #ifdef HAS_SD_CARD
   // SD-mount button: a red SD-card icon shown (by loop()) ONLY when persist-history is on but the
   // card isn't mounted. Tapping it does a user-initiated (re)mount -- we never auto-mount on access
@@ -496,7 +508,7 @@ lv_obj_t* UITask::buildHomeScreen() {
     lv_obj_set_style_text_font(sdl, &lv_font_montserrat_20, 0);    // ~1.5x the 14px header (more visible)
     lv_obj_set_style_text_color(sdl, lv_color_hex(UI_ALERT), 0);   // red = card missing
     lv_obj_center(sdl); }
-  lv_obj_align_to(_sd_btn, _sig_meter, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+  lv_obj_align_to(_sd_btn, _batt_icon, LV_ALIGN_OUT_LEFT_MID, -6, 0);   // left of the battery gauge
   lv_obj_add_flag(_sd_btn, LV_OBJ_FLAG_HIDDEN);
 #endif
 
@@ -6766,6 +6778,19 @@ void UITask::refreshNodeInfo() {
   n += snprintf(buf + n, sizeof(buf) - n, "Uptime: %ud %uh %um %us\n", d, h, m, sec);
   n += snprintf(buf + n, sizeof(buf) - n, "Free RAM: %u KB (min %u)\n", freeRam, minRam);
   n += snprintf(buf + n, sizeof(buf) - n, "Free PSRAM: %u KB\n", freePs);
+  {  // battery via the board hook (INA219 on CrowPanel); <0 = board has no sensor -> omit
+    int bmv = board_batt_millivolts();
+    if (bmv > 0)
+      n += snprintf(buf + n, sizeof(buf) - n, "Battery: %d.%03d V  %+d mA\n",
+                    bmv / 1000, bmv % 1000, board_batt_current_ma());
+    else if (bmv == 0) {   // sensor didn't ACK @0x40 -> scan the bus to find it / prove the bus works
+      uint8_t addrs[16];
+      int na = board_i2c_scan(addrs, 16);
+      n += snprintf(buf + n, sizeof(buf) - n, "Battery: no INA219@0x40; I2C:");
+      for (int k = 0; k < na; k++) n += snprintf(buf + n, sizeof(buf) - n, " %02X", addrs[k]);
+      n += snprintf(buf + n, sizeof(buf) - n, "%s\n", na ? "" : " (none!)");
+    }
+  }
 #ifdef HAS_SD_CARD
   n += snprintf(buf + n, sizeof(buf) - n, "SD: %s\n", SdSvc::ready() ? "ok" : "none");
 #endif
@@ -8536,6 +8561,14 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
 #endif
 
   body = _set_pane_body[CAT_POWER];   // reboot belongs under Power & Lock
+
+  // ----- Battery / power monitor (optional; None by default) -----------------
+  _set_pwrmon_dd = makeDropdownField(body, "Power monitor", "None\nINA219");
+  lv_obj_add_event_cb(_set_pwrmon_dd, set_pwrmon_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  _set_batt_type_dd = makeDropdownField(body, "Battery type", "Li-ion 1S\nLi-ion 2S\nLiFePO4 1S");
+  lv_obj_add_event_cb(_set_batt_type_dd, set_batt_type_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  _set_batt_cap_ta = makeNumberField(body, "Capacity (mAh)", set_radio_ta_event_cb);
+
   // Reboot button -- handy on battery, and a clean software restart (esp_restart)
   // vs the hardware RESET line.
   lv_obj_t* reboot = lv_btn_create(body);
@@ -8559,6 +8592,13 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
 void UITask::populateSettings() {
   if (!_node_prefs) return;
   lv_textarea_set_text(_set_name_ta, _node_prefs->node_name);
+
+  if (_set_pwrmon_dd)    lv_dropdown_set_selected(_set_pwrmon_dd, _node_prefs->power_monitor);
+  if (_set_batt_type_dd) lv_dropdown_set_selected(_set_batt_type_dd, _node_prefs->batt_type);
+  if (_set_batt_cap_ta) {
+    char b[8]; snprintf(b, sizeof(b), "%u", _node_prefs->batt_capacity_mah ? _node_prefs->batt_capacity_mah : 5000);
+    lv_textarea_set_text(_set_batt_cap_ta, b);
+  }
 
   updateOwnerProfile();
 
@@ -8877,6 +8917,7 @@ void UITask::set_kb_event_cb(lv_event_t* e) {
     else if (_instance->_set_active_ta == _instance->_set_lat_ta ||
              _instance->_set_active_ta == _instance->_set_lon_ta) _instance->commitPosition();
     else if (_instance->_set_active_ta == _instance->_set_tz_ta) _instance->commitTz();
+    else if (_instance->_set_active_ta == _instance->_set_batt_cap_ta) _instance->commitBattCapacity();
     _instance->_set_active_ta = NULL;
     lv_obj_add_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
     _instance->resetKbScroll();
@@ -10251,6 +10292,29 @@ void UITask::set_telem_cb(lv_event_t* e) {
   pushPrefs();
 }
 
+void UITask::set_pwrmon_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  _instance->_node_prefs->power_monitor = (uint8_t)lv_dropdown_get_selected(lv_event_get_target(e));
+  _instance->_batt_soc_init = false;   // re-seed the fuel gauge for the (new/removed) source
+  pushPrefs();
+}
+
+void UITask::set_batt_type_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  _instance->_node_prefs->batt_type = (uint8_t)lv_dropdown_get_selected(lv_event_get_target(e));
+  _instance->_batt_soc_init = false;   // curve changed -> re-seed from voltage
+  pushPrefs();
+}
+
+void UITask::commitBattCapacity() {
+  if (!_node_prefs || !_set_batt_cap_ta) return;
+  long v = atol(lv_textarea_get_text(_set_batt_cap_ta));
+  if (v < 0) v = 0; else if (v > 65535) v = 65535;
+  _node_prefs->batt_capacity_mah = (uint16_t)v;
+  _batt_soc_init = false;
+  pushPrefs();
+}
+
 void UITask::set_autoadd_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
@@ -10750,6 +10814,68 @@ void UITask::mqtt_save_cb(lv_event_t* e) {
   lv_obj_add_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
   _instance->refreshNetStatus();   // show/hide the status line for the new state
   _instance->showToast(p->mqtt_enabled ? "MQTT connecting..." : "MQTT off");
+}
+
+// ---- Battery fuel gauge (optional power monitor) ----------------------------
+// At-rest open-circuit-voltage -> SoC%, per cell (descending {mV,pct}, linear interp). Coarse but
+// adequate; used to seed the estimate at boot and to correct coulomb-counting drift near rest.
+static int batt_ocv_pct(int cell_mv, uint8_t type) {
+  static const int liion[][2]   = {{4200,100},{4100,90},{4000,80},{3900,70},{3800,60},{3750,55},
+                                    {3700,45},{3650,38},{3600,30},{3550,20},{3500,12},{3400,6},{3300,3},{3000,0}};
+  static const int lifepo4[][2]  = {{3450,100},{3350,95},{3300,85},{3250,65},{3200,50},{3150,35},
+                                    {3100,25},{3000,12},{2900,5},{2500,0}};
+  const int (*t)[2] = (type == 2) ? lifepo4 : liion;
+  int n = (type == 2) ? (int)(sizeof(lifepo4)/sizeof(lifepo4[0])) : (int)(sizeof(liion)/sizeof(liion[0]));
+  if (cell_mv >= t[0][0]) return 100;
+  if (cell_mv <= t[n-1][0]) return 0;
+  for (int i = 1; i < n; i++)
+    if (cell_mv >= t[i][0])
+      return t[i][1] + (cell_mv - t[i][0]) * (t[i-1][1] - t[i][1]) / (t[i-1][0] - t[i][0]);
+  return 0;
+}
+
+// Sample the monitor (when configured), update the coulomb-counted SoC, and drive the top-bar icon.
+// Hidden whenever there's no monitor selected or no live reading -- the feature is fully optional.
+void UITask::updateBatteryGauge() {
+  if (!_batt_icon) return;
+  uint8_t mon = _node_prefs ? _node_prefs->power_monitor : 0;
+  board_set_power_monitor(mon);   // keep the board gate (and telemetry's getBatt*) in sync with the pref
+  int mv = mon ? board_batt_millivolts() : 0;
+  if (mv <= 0) { lv_obj_add_flag(_batt_icon, LV_OBJ_FLAG_HIDDEN); _batt_soc_init = false; return; }
+  int ma = board_batt_current_ma();   // + charging, - discharging
+
+  uint8_t type = _node_prefs->batt_type;
+  int cells = (type == 1) ? 2 : 1;    // 0/2 = 1S, 1 = 2S
+  double cap = _node_prefs->batt_capacity_mah ? (double)_node_prefs->batt_capacity_mah : 5000.0;
+  int vpct = batt_ocv_pct(mv / cells, type);
+
+  uint32_t now = millis();
+  if (!_batt_soc_init) { _batt_soc_mah = vpct / 100.0 * cap; _batt_soc_init = true; _batt_last_ms = now; }
+  _batt_soc_mah += (double)ma * (now - _batt_last_ms) / 3600000.0;   // coulomb count (mAh)
+  _batt_last_ms = now;
+  if (_batt_soc_mah < 0) _batt_soc_mah = 0;
+  if (_batt_soc_mah > cap) _batt_soc_mah = cap;
+  // Anchor to voltage: strong near rest (terminal V ~= OCV), weak under load (let coulomb-count lead).
+  bool rest = (ma > -60 && ma < 60);
+  _batt_soc_mah += (vpct / 100.0 * cap - _batt_soc_mah) * (rest ? 0.05 : 0.003);
+
+  int pct = (int)(_batt_soc_mah / cap * 100.0 + 0.5);
+  if (pct < 0) pct = 0; else if (pct > 100) pct = 100;
+  bool charging = ma > 30;
+
+  const char* sym = charging      ? LV_SYMBOL_CHARGE
+                  : pct >= 90     ? LV_SYMBOL_BATTERY_FULL
+                  : pct >= 65     ? LV_SYMBOL_BATTERY_3
+                  : pct >= 40     ? LV_SYMBOL_BATTERY_2
+                  : pct >= 15     ? LV_SYMBOL_BATTERY_1
+                                  : LV_SYMBOL_BATTERY_EMPTY;
+  uint32_t col = charging  ? 0x34D399       // green while charging
+               : pct <= 15 ? UI_ALERT       // red when low
+               : pct <= 35 ? 0xF59E0B       // amber
+                           : UI_FG_STRONG;  // normal
+  lv_label_set_text(_batt_icon, sym);
+  lv_obj_set_style_text_color(_batt_icon, lv_color_hex(col), 0);
+  lv_obj_clear_flag(_batt_icon, LV_OBJ_FLAG_HIDDEN);
 }
 
 void UITask::refreshGpsStatus() {
@@ -11505,6 +11631,10 @@ void UITask::loop() {
         lv_obj_align_to(_sig_meter, _clock_label, LV_ALIGN_OUT_LEFT_MID, -6, 0);
         refreshSignalMeter();
       }
+      if (_batt_icon) {   // fuel-gauge sample + icon (hidden unless a monitor is configured & reading)
+        lv_obj_align_to(_batt_icon, _sig_meter, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+        updateBatteryGauge();
+      }
 #ifdef HAS_SD_CARD
       if (_sd_btn) {   // red SD icon when we want SD history but the card isn't mounted
         SdSvc::pollPresence();   // notice a pulled card (no-op while unmounted -> never stalls the bus)
@@ -11515,7 +11645,7 @@ void UITask::loop() {
         bool show_sd = _node_prefs && _node_prefs->persist_history && !rdy;
         if (show_sd) {
           lv_obj_clear_flag(_sd_btn, LV_OBJ_FLAG_HIDDEN);
-          lv_obj_align_to(_sd_btn, _sig_meter, LV_ALIGN_OUT_LEFT_MID, -6, 0);  // follow the (re-sized) meter
+          lv_obj_align_to(_sd_btn, _batt_icon, LV_ALIGN_OUT_LEFT_MID, -6, 0);  // follow the battery gauge
         } else {
           lv_obj_add_flag(_sd_btn, LV_OBJ_FLAG_HIDDEN);
         }
