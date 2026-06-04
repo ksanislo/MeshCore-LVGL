@@ -1032,7 +1032,18 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   }
   if (_ui) {
     setHookKey(channel.secret, true);
-    setHookRx(pkt, nullptr, timestamp, (int8_t)(pkt->getSNR() * 4), (int8_t)_radio->getLastRSSI(),
+    // Channel posts carry no per-sender contact. Match the "<name>: " prefix to one of our contacts
+    // (exact-name) and use their advertised position -- correct in private channels where we know the
+    // senders, good-enough or a clean miss in public ones (verified exact, so no wrong-contact match).
+    const ContactInfo* sc = nullptr;
+    const char* sep = strstr(text, ": ");
+    size_t slen = sep ? (size_t)(sep - text) : 0;
+    if (slen > 0 && slen < 32) {
+      char sname[32]; memcpy(sname, text, slen); sname[slen] = 0;
+      ContactInfo* m = searchContactsByPrefix(sname);
+      if (m && strcmp(m->name, sname) == 0) sc = m;
+    }
+    setHookRx(pkt, sc, timestamp, (int8_t)(pkt->getSNR() * 4), (int8_t)_radio->getLastRSSI(),
               (int16_t)_radio->getNoiseFloor(), (int32_t)(sensors.node_lat * 1000000.0), (int32_t)(sensors.node_lon * 1000000.0));
     _ui->newMsg(path_len, channel_name, text, offline_queue_len);
   }
