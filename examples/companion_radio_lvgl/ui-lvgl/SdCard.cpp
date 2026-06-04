@@ -423,7 +423,9 @@ bool begin() {
 }
 
 void end() {
-  if (s_mounted) { Lock lk; sd.end(); }
+  // Stop USING the card, but do NOT tear down the SdFat object: keeping the card + volume alive lets
+  // a soft remount of the SAME card (sd_card_begin) reuse it instead of a destructive CMD0 re-init
+  // (which a still-powered card rejects). The real sd.end() happens only in a cold re-init / swap.
   s_mounted = false;
 }
 

@@ -276,13 +276,9 @@ void setup() {
 #endif
 
 #if defined(ELECROW_CROWPANEL_ADVANCE_35) && (ENV_INCLUDE_GPS == 1)
-  // CrowPanel has no on-board sensors, so sensors.begin() does nothing but the GPS
-  // boot-detect probe (a ~1s delay()). Skip it -- and the GPS bring-up -- unless GPS
-  // is actually enabled, so a unit with nothing on the rear UART plug never stalls.
-  if (the_mesh.getNodePrefs()->gps_enabled) {
-    sensors.begin();
-    the_mesh.applyGpsPrefs();
-  }
+  // CrowPanel GPS bring-up is DEFERRED to after ui_task.begin() (see below): the GPS UART (17/18)
+  // sits next to the GT911 touch I2C (15/16) on the connector edge, and an active GPS UART during the
+  // touch controller's I2C bring-up intermittently re-opens the boot "no touch" race. Nothing here.
 #else
   sensors.begin();
   #if ENV_INCLUDE_GPS == 1
@@ -307,6 +303,20 @@ void setup() {
   ui_task.begin(disp, &sensors, the_mesh.getNodePrefs());  // still want to pass this in as dependency, as prefs might be moved
 #endif
 
+#if defined(ELECROW_CROWPANEL_ADVANCE_35) && (ENV_INCLUDE_GPS == 1)
+  // GPS UART up only NOW -- after the GT911 touch controller is fully configured in ui_task.begin()
+  // above. The GPS UART (17/18) is adjacent to the touch I2C (15/16) on the connector; an active UART
+  // during the GT911 I2C bring-up intermittently leaves it ACKing but never reporting touch (the boot
+  // no-touch race). meshTask is still parked on s_ui_ready, so applyGpsPrefs() doesn't race the_mesh.
+  // (Explicit pins: the shared initBasicGPS() calls Serial1.setPins() before begin(), a no-op on ESP32
+  // since the UART driver isn't up yet to attach pins -- so we install the driver on 17/18 first.)
+  if (the_mesh.getNodePrefs()->gps_enabled) {
+    Serial1.begin(GPS_BAUD_RATE, SERIAL_8N1, PIN_GPS_TX, PIN_GPS_RX);
+    sensors.begin();
+    the_mesh.applyGpsPrefs();
+  }
+#endif
+
 #ifdef MESH_PROXY
   s_ui_ready = true;   // UI is up: release the core-0 mesh backend to start running
   // Watchdog the UI loop (core 1). The task WDT only watches core-0 idle, so a *soft* hang
@@ -329,6 +339,15 @@ static void meshTask(void*) {
   // intermittently wedged core 1's init -- stuck at "Loading...").
   while (!s_ui_ready) vTaskDelay(1);
   for (;;) {
+    // Radio quiesce: while the UI does a runtime SD (re)mount, stop touching the radio entirely so
+    // our long shared-bus hold can't interleave with the_mesh.loop() and wedge the SX1262 into a
+    // no-yield busy-spin (TASK_WDT). We ack idle and just tick (idle/WDT still run). See MeshProxy.h.
+    if (mproxy::radioPauseRequested()) {
+      mproxy::setRadioIdle(true);
+      vTaskDelay(2);
+      continue;
+    }
+    mproxy::setRadioIdle(false);
     mproxy::drainCommands(the_mesh);    // execute UI-posted commands against the_mesh
     if (!the_mesh.getNodePrefs()->radio_off)   // radio kill-switch: don't transmit/receive
       the_mesh.loop();                  // process mesh; the 5 callbacks enqueue events

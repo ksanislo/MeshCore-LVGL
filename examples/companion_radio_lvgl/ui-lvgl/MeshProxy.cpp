@@ -394,6 +394,14 @@ void pushEvent(const UiEvent& ev) {
   if (s_ev_q) xQueueSend(s_ev_q, &ev, 0);
 }
 
+// Radio quiesce handshake (see MeshProxy.h). Two volatile flags, one writer each -> no lock needed.
+static volatile bool s_radio_pause_req = false;  // written by UI, read by meshTask
+static volatile bool s_radio_idle      = false;  // written by meshTask, read by UI
+void requestRadioPause(bool on) { s_radio_pause_req = on; if (!on) s_radio_idle = false; }
+bool radioPauseRequested()      { return s_radio_pause_req; }
+void setRadioIdle(bool idle)    { s_radio_idle = idle; }
+bool radioIdle()                { return s_radio_idle; }
+
 const char* firmwareVersion() { return FIRMWARE_VERSION; }   // from MyMesh.h
 
 void updateStats(MyMesh& mesh) {

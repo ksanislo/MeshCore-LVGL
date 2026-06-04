@@ -398,11 +398,36 @@ void MyMesh::wifiLoop() {
   // first packet arrives, so we wait for a plausibly-real value (> 2021-01-01).
   if (up && getNodePrefs()->ntp_enabled) {
     uint32_t now_ms = millis();
+
+    // GPS-preferred clock source. GPS already writes the RTC itself (provider loop) whenever it has a
+    // fix -- it works offline and in BLE mode, so it's the universal source and NTP must not fight it.
+    // While GPS has a live fix it OWNS the clock and we skip the NTP write. When the fix drops we keep
+    // GPS as the source for a short grace (GPS_CLOCK_HANDBACK_MS) to ride out brief signal flicker;
+    // once the grace elapses we hand back to NTP and force an immediate re-sync (don't wait for the
+    // hourly tick) so the clock keeps getting corrected. (No GPS in this build -> NTP owns, as before.)
+    const uint32_t GPS_CLOCK_HANDBACK_MS = 15000;
+    bool gps_owns_clock = false;
+#if ENV_INCLUDE_GPS == 1
+    auto loc = sensors.getLocationProvider();
+    bool gps_fix = getNodePrefs()->gps_enabled && loc && loc->isValid();
+    if (gps_fix) {
+      _gps_lost_ms = 0;
+      gps_owns_clock = true;
+    } else if (_gps_owned_clock) {              // had the clock, fix just dropped -> grace, then hand off
+      if (_gps_lost_ms == 0) _gps_lost_ms = now_ms ? now_ms : 1;
+      gps_owns_clock = (now_ms - _gps_lost_ms) < GPS_CLOCK_HANDBACK_MS;
+      if (!gps_owns_clock) _ntp_next_check_ms = now_ms;   // grace elapsed -> let NTP take over now
+    }
+    _gps_owned_clock = gps_owns_clock;
+#endif
+
     if (_ntp_next_check_ms == 0 || now_ms >= _ntp_next_check_ms) {
       time_t t = time(nullptr);
       if (t > 1609459200) {                 // 2021-01-01: SNTP has set the clock
-        getRTCClock()->setCurrentTime((uint32_t)t);
-        _ntp_synced = true;
+        if (!gps_owns_clock) {              // GPS-preferred: only adopt NTP when GPS isn't keeping time
+          getRTCClock()->setCurrentTime((uint32_t)t);
+          _ntp_synced = true;
+        }
         _ntp_next_check_ms = now_ms + 3600000UL;   // re-check hourly once synced
       } else {
         _ntp_next_check_ms = now_ms + 2000;        // not resolved yet; poll soon

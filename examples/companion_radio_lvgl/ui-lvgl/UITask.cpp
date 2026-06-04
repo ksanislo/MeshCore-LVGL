@@ -489,10 +489,11 @@ lv_obj_t* UITask::buildHomeScreen() {
   // (that blocks sd.begin() on the UI core and freezes LVGL). Left of the signal meter; hidden by default.
   _sd_btn = lv_btn_create(header);
   lv_obj_remove_style_all(_sd_btn);
-  lv_obj_set_size(_sd_btn, 22, HEADER_H);
+  lv_obj_set_size(_sd_btn, 30, HEADER_H);
   lv_obj_add_event_cb(_sd_btn, sd_mount_cb, LV_EVENT_CLICKED, NULL);
   { lv_obj_t* sdl = lv_label_create(_sd_btn);
     lv_label_set_text(sdl, LV_SYMBOL_SD_CARD);
+    lv_obj_set_style_text_font(sdl, &lv_font_montserrat_20, 0);    // ~1.5x the 14px header (more visible)
     lv_obj_set_style_text_color(sdl, lv_color_hex(UI_ALERT), 0);   // red = card missing
     lv_obj_center(sdl); }
   lv_obj_align_to(_sd_btn, _sig_meter, LV_ALIGN_OUT_LEFT_MID, -6, 0);
@@ -7982,6 +7983,7 @@ void UITask::openProfile(lv_obj_t* return_screen) {
   buildProfileScreen();
   _profile_return_screen = return_screen;
   updateOwnerProfile();   // refresh hero (name/avatar/key) from current prefs
+  refreshProfilePosition();   // seed lat/lon from the live position (build-once screen never re-filled it)
   if (_profile_kb) lv_obj_add_flag(_profile_kb, LV_OBJ_FLAG_HIDDEN);
   lv_obj_scroll_to_y(_profile_body, 0, LV_ANIM_OFF);
   lv_scr_load(_profile_screen);
@@ -8561,15 +8563,7 @@ void UITask::populateSettings() {
   updateOwnerProfile();
 
 
-  if (_set_lat_ta && _set_lon_ta && _sensors) {
-    char latb[20] = "", lonb[20] = "";
-    if (_sensors->node_lat != 0.0 || _sensors->node_lon != 0.0) {
-      snprintf(latb, sizeof(latb), "%.6f", _sensors->node_lat);
-      snprintf(lonb, sizeof(lonb), "%.6f", _sensors->node_lon);
-    }
-    lv_textarea_set_text(_set_lat_ta, latb);
-    lv_textarea_set_text(_set_lon_ta, lonb);
-  }
+  refreshProfilePosition();
   if (_set_sharepos) {
     if (_node_prefs->advert_loc_policy == ADVERT_LOC_SHARE)
       lv_obj_add_state(_set_sharepos, LV_STATE_CHECKED);
@@ -8762,6 +8756,30 @@ void UITask::updateOwnerProfile() {
     lv_label_set_text(_prof_key, snip);
     if (mproxy::selfPubKey()) setHeroTarget(_prof_hero, mproxy::selfPubKey(), ADV_TYPE_CHAT, clean);
   }
+}
+
+// Fill the profile lat/lon fields from the live node position (sensors.node_lat/lon -- the same value
+// the BLE app and adverts use). The fields are otherwise only seeded by populateSettings() at boot,
+// when no GPS fix exists yet, and openProfile() rebuilds the page without re-seeding -- so the position
+// never showed. Called on profile open and ~1 Hz while it's up. Skips a focused field (manual editing).
+void UITask::refreshProfilePosition() {
+  if (!_set_lat_ta || !_set_lon_ta || !_sensors) return;
+  // Skip only while actually editing (keyboard up) so we don't stomp typed input. We must NOT use
+  // LV_STATE_FOCUSED here: the profile screen leaves a field focused after load, which would block
+  // every live refresh even though nothing is being edited.
+  if (_profile_kb && !lv_obj_has_flag(_profile_kb, LV_OBJ_FLAG_HIDDEN)) return;
+  bool have = (_sensors->node_lat != 0.0 || _sensors->node_lon != 0.0);  // a set/advertised position
+#if ENV_INCLUDE_GPS
+  LocationProvider* gps = _sensors->getLocationProvider();
+  if (gps && gps->isValid()) have = true;   // a real fix at 0,0 is still a position (0,0 is valid)
+#endif
+  char latb[20] = "", lonb[20] = "";         // blank only when genuinely unset
+  if (have) {
+    snprintf(latb, sizeof(latb), "%.6f", _sensors->node_lat);
+    snprintf(lonb, sizeof(lonb), "%.6f", _sensors->node_lon);
+  }
+  lv_textarea_set_text(_set_lat_ta, latb);
+  lv_textarea_set_text(_set_lon_ta, lonb);
 }
 
 void UITask::applyRadioSettings() {
@@ -10162,7 +10180,7 @@ void UITask::set_history_cb(lv_event_t* e) {
   // keeps being fed either way (storeAppend), so the recent view never blanks; on
   // re-enable we backfill the card with anything that arrived while saving was off.
   if (on) {
-    _instance->_sdmsgs.begin();             // (re)mount + reload from card
+    _instance->sdMountQuiesced();           // (re)mount + reload (radio quiesced -> no core-0 TASK_WDT)
     if (_instance->_sd_off_ts)
       _instance->_rammsgs.replayInto(&_instance->_sdmsgs, _instance->_sd_off_ts);
     _instance->_sd_off_ts = 0;
@@ -10179,17 +10197,32 @@ void UITask::set_history_cb(lv_event_t* e) {
 #endif
 }
 
+// Mount the SD with the radio quiesced. The card shares the radio's HSPI bus; at runtime a mount's
+// long bus-hold interleaves with meshTask's the_mesh.loop() and wedges the SX1262 into a no-yield
+// busy-spin (core-0 TASK_WDT). We recreate the boot condition: ask meshTask to park, wait for its
+// idle ack (bounded), do the mount with the radio untouched, then release. Returns ready().
+bool UITask::sdMountQuiesced() {
+#ifdef MESH_PROXY
+  mproxy::requestRadioPause(true);
+  uint32_t t0 = millis();
+  while (!mproxy::radioIdle() && (uint32_t)(millis() - t0) < 250) delay(2);  // let meshTask leave the radio path
+#endif
+  _sdmsgs.begin();                          // rescan + bounded mount attempts (settle + retry on CMD0)
+#ifdef MESH_PROXY
+  mproxy::requestRadioPause(false);         // resume the radio (it sat in RX, untouched)
+#endif
+  return _sdmsgs.ready();
+}
+
 // Top-bar SD-card icon tap: a user-initiated (re)mount. We never auto-mount on access (that blocks
-// sd.begin() on the UI core and freezes LVGL), so this is the one deliberate attempt -- begin()
-// rescans (clears the give-up flag) + tries once. On success, backfill anything that arrived while
-// unmounted and go live; otherwise report no card. (Only shown when persist-history is on.)
+// sd.begin() on the UI core and freezes LVGL), so this is the one deliberate attempt. On success,
+// backfill anything that arrived while unmounted and go live; otherwise report the failure.
 void UITask::sd_mount_cb(lv_event_t* e) {
   (void)e;
   if (!_instance) return;
 #ifdef HAS_SD_CARD
   UITask* s = _instance;
-  s->_sdmsgs.begin();                       // rescan + one mount attempt (may briefly block if no card)
-  if (s->_sdmsgs.ready()) {
+  if (s->sdMountQuiesced()) {
     if (s->_sd_off_ts) s->_rammsgs.replayInto(&s->_sdmsgs, s->_sd_off_ts);  // persist msgs from the outage
     s->_sd_off_ts = 0;
     s->_sd_prev_ready = true;
@@ -10197,6 +10230,10 @@ void UITask::sd_mount_cb(lv_event_t* e) {
     if (s->_chat_screen && lv_scr_act() == s->_chat_screen) s->rebuildChatHistory();
     s->_contacts_dirty = true;              // "latest" sort reads the store
     s->showToast("SD card mounted");
+  } else if (sd_last_err_code) {
+    char msg[48];
+    snprintf(msg, sizeof(msg), "SD mount failed (e%02X d%02X)", sd_last_err_code, sd_last_err_data);
+    s->showToast(msg);                      // surface the real SdFat error (untethered diagnostic)
   } else {
     s->showToast("No SD card found");
   }
@@ -11491,6 +11528,9 @@ void UITask::loop() {
       }
       if (_set_active_pane == _set_pane_body[CAT_TELEMETRY]) refreshGpsStatus();
       if (_set_active_pane == _set_pane_body[CAT_DISPLAY]) refreshTimeFields();  // tick the set-time boxes
+#if ENV_INCLUDE_GPS
+      if (_profile_screen && lv_scr_act() == _profile_screen) refreshProfilePosition();  // live pos while profile open
+#endif
     }
   }
 

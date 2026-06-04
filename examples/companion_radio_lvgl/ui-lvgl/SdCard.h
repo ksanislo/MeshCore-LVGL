@@ -22,6 +22,8 @@
 //   }
 
 extern SdFs sd;  // the shared filesystem handle (defined in the variant)
+extern volatile uint8_t sd_last_err_code;  // SdFat error from the last failed mount (diagnostic)
+extern volatile uint8_t sd_last_err_data;
 
 namespace SdSvc {
 

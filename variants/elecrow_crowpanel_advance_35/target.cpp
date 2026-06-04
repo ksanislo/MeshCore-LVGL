@@ -60,11 +60,47 @@ SdFs sd;
 void sd_bus_to_sd()   { lora_spi.end(); lora_spi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS); }
 void sd_bus_to_lora() { lora_spi.end(); lora_spi.begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI); }
 
+volatile uint8_t  sd_last_err_code = 0;  // SdFat sdErrorCode() from the last failed cold mount (diag)
+volatile uint8_t  sd_last_err_data = 0;
+static   cid_t    s_card_cid;            // CID of the mounted card -- distinguishes a warm reinsert of
+static   bool     s_have_cid = false;    // the SAME card (reuse) from a genuinely swapped/new card (re-init)
+volatile uint32_t sd_dbg_soft = 0;       // soft-remount decision bits (diagnostic): 1=have_cid&card
+                                         // 2=readCID ok  4=CID match  8=fatType!=0  0x10=reused
+
 bool sd_card_begin() {
   sd_bus_to_sd();
-  sd.end();   // clean (re)mount -- lets a re-inserted card be picked up
-  // SHARED_SPI: SdFat re-acquires the bus per access, matching our re-pin model.
-  bool ok = sd.begin(SdSpiConfig(PIN_SD_CS, SHARED_SPI, SD_SCK_MHZ(20), &lora_spi));
+  // SOFT remount first. JTAG proved a runtime re-mount of a still-present card answers CMD0 with
+  // R1=0x00 ("not idle" = already initialized): the card was never power-cycled (a quick reinsert, or
+  // a spurious removal detection), so a destructive sd.end()+sd.begin() can't reset it and fails (e01)
+  // -- yet the card is perfectly usable and its filesystem is still live. So don't tear it down: if
+  // the SAME card (matched by CID) is present and the volume is still mounted, just keep using it.
+  // A genuinely cold/new card won't answer CMD10 (or its CID won't match) -> falls through to re-init.
+  sd_dbg_soft = 0;
+  if (s_have_cid && sd.card()) {
+    sd_dbg_soft |= 1;
+    cid_t cid;
+    bool cidok = sd.card()->readCID(&cid);
+    if (cidok) sd_dbg_soft |= 2;
+    bool match = cidok && memcmp(&cid, &s_card_cid, sizeof(cid_t)) == 0;
+    if (match) sd_dbg_soft |= 4;
+    if (sd.vol()->fatType() != 0) sd_dbg_soft |= 8;
+    if (match && (sd_dbg_soft & 8)) {
+      sd_dbg_soft |= 0x10;
+      sd_bus_to_lora();
+      return true;   // same card, FS live -> reuse the existing init, no CMD0 reset needed
+    }
+  }
+  // COLD init: boot, or a genuinely new / power-cycled card. Bounded 2 attempts (each fails fast, so
+  // we stay well under the 5s task-WDT even with no card). On success, remember the CID for next time.
+  delay(5);
+  bool ok = false;
+  for (int attempt = 0; attempt < 2 && !ok; attempt++) {
+    if (attempt) delay(20);
+    sd.end();
+    ok = sd.begin(SdSpiConfig(PIN_SD_CS, SHARED_SPI, SD_SCK_MHZ(20), &lora_spi));
+  }
+  if (!ok) { sd_last_err_code = sd.sdErrorCode(); sd_last_err_data = sd.sdErrorData(); }
+  else { s_have_cid = sd.card() && sd.card()->readCID(&s_card_cid); }
   sd_bus_to_lora();
   return ok;
 }

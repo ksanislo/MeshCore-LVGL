@@ -159,6 +159,8 @@ protected:
   bool _wifi_was_up = false;          // edge-detect link-up to (re)arm NTP
   bool _ntp_synced = false;           // NTP has set the RTC at least once
   uint32_t _ntp_next_check_ms = 0;    // next time() poll / re-sync (millis)
+  bool     _gps_owned_clock = false;  // GPS-preferred time: GPS held the clock last pass (NTP deferred)
+  uint32_t _gps_lost_ms = 0;          // millis the GPS fix dropped (0 = healthy; grace before NTP takes over)
   char _preset_status[40] = "";       // last preset-update result, for the UI
   char _ota_status[48] = "idle";      // last OTA result/progress, for the UI
   volatile bool _ota_busy = false;    // an OTA task is running (one at a time)

@@ -889,6 +889,7 @@ class UITask : public AbstractUITask {
   void      buildSettingsTab(lv_obj_t* parent);
   void      populateSettings();
   void      updateOwnerProfile();   // fill the Settings owner-profile hero
+  void      refreshProfilePosition();  // fill the profile lat/lon fields from the live node position
   void      commitNodeName();
   void      applyRadioSettings();
   static void set_name_ta_event_cb(lv_event_t* e);
@@ -992,6 +993,7 @@ private:
   int  buildThemeOptions(char* out, size_t cap, const char* sel, int* sel_idx);  // dropdown options + selected index
   static void set_history_cb(lv_event_t* e);
   static void sd_mount_cb(lv_event_t* e);   // top-bar SD icon -> user-initiated (re)mount
+  bool sdMountQuiesced();                    // (re)mount with the radio paused (boot condition); returns ready()
   static void category_row_cb(lv_event_t* e);
   static void settings_back_cb(lv_event_t* e);
   static void settings_tab_changed_cb(lv_event_t* e);

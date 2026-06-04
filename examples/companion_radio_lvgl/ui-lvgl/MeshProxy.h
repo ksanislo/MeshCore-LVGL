@@ -153,6 +153,16 @@ bool publishIfChanged(MyMesh& mesh);   // rebuild + publish snapshot if anything
 void updateStats(MyMesh& mesh);        // refresh the live node-stats buffer (call each backend loop)
 void pushEvent(const UiEvent& ev);     // enqueue a cooked callback result
 
+// Radio quiesce handshake (for a runtime SD (re)mount). The SD card shares the radio's HSPI bus;
+// at boot a mount is safe because meshTask is still parked on s_ui_ready, but at runtime meshTask's
+// the_mesh.loop() interleaves radio ops with our long bus-hold and wedges the SX1262 into a no-yield
+// busy-spin (TASK_WDT on core-0 idle). The UI requests a pause, waits for meshTask to ack idle, does
+// the mount with the radio quiescent (the boot condition), then releases. Safe cross-core (volatile).
+void requestRadioPause(bool on);       // UI: ask meshTask to stop touching the radio
+bool radioPauseRequested();            // meshTask: is a pause requested?
+void setRadioIdle(bool idle);          // meshTask: ack that it is not in the radio path
+bool radioIdle();                      // UI: has meshTask acked idle?
+
 // ---- UI side ---------------------------------------------------------------
 void beginUiRead();                // pin the published snapshot for this UI pass (no-op single-core)
 void endUiRead();
