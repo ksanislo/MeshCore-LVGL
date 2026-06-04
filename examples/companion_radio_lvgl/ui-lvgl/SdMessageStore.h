@@ -112,25 +112,32 @@ class SdMessageStore : public MessageStore {
     dst[cap - 1] = 0;
   }
 
-  // ---- Fixed-width record log format -------------------------------------------------------
-  // /chat/<key>.log is an array of fixed 256-byte blocks of printable text. Block 0 is a header
-  // ("#MCHAT ..."); block N>=1 is record N-1. So offset = 256*N always lands on the header or a
-  // record start, count = (size-256)/256, and any message is random-accessible in O(1) -- no
-  // delimiters, no escaping, no line scanning. Fields live at FIXED byte columns; the message
-  // text is stored RAW (newlines/tabs and all) in its column and right-trimmed of pad spaces on
-  // read. Each block ends with '\n' so it still opens cleanly as a text file. Reserved bytes
-  // [219,255) leave room for future fixed-position fields without changing offsets. (The text
-  // column was widened 150->161 to match the wire cap; old 150-wide records still read correctly
-  // since the extra bytes were space pad and text is the last column.)
-  static const int REC = 256;
-  static const int RC_TS_OFF=0,  RC_TS_W=10;   // decimal unix ts (10 digits = uint32 max)
-  static const int RC_DIR_OFF=11;              // '0'/'1' outgoing
-  static const int RC_ST_OFF=13;               // status digit
-  static const int RC_HOPS_OFF=15, RC_HOPS_W=3;
-  static const int RC_BYTES_OFF=19, RC_BYTES_W=5;
-  static const int RC_SND_OFF=25, RC_SND_W=CHAT_PEER_NAME_MAX;       // 32
-  static const int RC_TXT_OFF=58, RC_TXT_W=CHAT_MSG_TEXT_MAX;        // 161  (-> 219, then reserved)
-  static constexpr const char* RC_MAGIC = "#MCHAT";                  // first 6 bytes of block 0
+  // ---- Fixed-width record log format (v1, 512-byte blocks) ---------------------------------
+  // /chat/<key>.log is an array of fixed 512-byte blocks of printable text. Block 0 is a header
+  // ("#MCHAT v1 512 ..."); block N>=1 is record N-1. So offset = 512*N always lands on the header
+  // or a record start, count = (size-512)/512, any message is O(1) random-access -- no delimiters,
+  // no escaping, no line scanning. Fields live at FIXED byte columns. Each record has ONE '\n'
+  // (the terminator at 511) so it is exactly one line for awk/grep/sed even when the message is
+  // multi-line: newlines in the text column are stored as a 0x1F sentinel and restored on read.
+  //
+  // The 512B record is two meaningful 256B halves:
+  //   Half 1 (0..255)   CHAT     -- everything to render a bubble; chat scrollback reads only this.
+  //   Half 2 (256..510) RADIO    -- reception/diagnostic fields (rssi/snr/path/positions/hashes...),
+  //                                 reserved + space-filled for now; populated when reception
+  //                                 logging is wired. byte 255 is a space (no mid-record newline).
+  static const int REC = 512;
+  // Half 1 (chat)
+  static const int RC_TS_OFF=0,   RC_TS_W=10;   // decimal unix ts
+  static const int RC_DIR_OFF=11;               // '0'/'1' outgoing
+  static const int RC_ST_OFF=13;                // delivery status digit
+  static const int RC_SEEN_OFF=15;              // '0'/'1' seen (reserved; unread feature wires it)
+  static const int RC_RSSI_OFF=17,  RC_RSSI_W=4;   // reserved (not captured yet)
+  static const int RC_SNR_OFF=22,   RC_SNR_W=4;    // reserved
+  static const int RC_PMETA_OFF=27, RC_PMETA_W=2;  // path_len byte as 2 hex (count|size); blank=direct
+  static const int RC_SND_OFF=30,   RC_SND_W=CHAT_PEER_NAME_MAX;   // 32  -> 30..61
+  static const int RC_TXT_OFF=63,   RC_TXT_W=192;                  // 63..254 (192 col; buffer caps at CHAT_MSG_TEXT_MAX)
+  static const char RC_NL = 0x1F;               // newline sentinel (US) stored for '\n'; restored on read
+  static constexpr const char* RC_MAGIC = "#MCHAT";
 
   static void rcPutNum(char* rec, int off, int w, uint32_t v) {
     for (int i = w - 1; i >= 0; i--) { rec[off + i] = (char)('0' + (v % 10)); v /= 10; }
@@ -150,35 +157,69 @@ class SdMessageStore : public MessageStore {
     int n = (end < dcap - 1) ? end : dcap - 1;
     memcpy(dst, rec + off, (size_t)n); dst[n] = 0;
   }
-  // Build one 256-byte record block from fields.
+  // Text column: store newline-safe (0x0A -> 0x1F) so each record stays one line; restore on read.
+  static void rcPutText(char* rec, const char* s) {
+    int i = 0;
+    for (; s && s[i] && i < RC_TXT_W; i++) { char c = s[i]; rec[RC_TXT_OFF + i] = (c == '\n') ? RC_NL : c; }
+    for (; i < RC_TXT_W; i++) rec[RC_TXT_OFF + i] = ' ';
+  }
+  static void rcGetText(const char* rec, char* dst, int dcap) {
+    int end = RC_TXT_W; while (end > 0 && rec[RC_TXT_OFF + end - 1] == ' ') end--;
+    int n = (end < dcap - 1) ? end : dcap - 1;
+    for (int i = 0; i < n; i++) { char c = rec[RC_TXT_OFF + i]; dst[i] = (c == RC_NL) ? '\n' : c; }
+    dst[n] = 0;
+  }
+  static int rcHexNibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+  }
+  // path_meta: the packet's path_len byte (low 6 bits = hop count, high 2 bits = hash_size-1),
+  // stored as 2 hex. Direct/unknown (hops 0xFF) -> blank. bytes is the per-hop hash size (1..4).
+  static void rcPutPath(char* rec, uint8_t hops, uint16_t bytes) {
+    if (hops == 0xFF) { rec[RC_PMETA_OFF] = ' '; rec[RC_PMETA_OFF + 1] = ' '; return; }
+    uint8_t sz = (bytes >= 1 && bytes <= 4) ? (uint8_t)bytes : 1;
+    uint8_t plen = (uint8_t)((((sz - 1) & 0x3) << 6) | (hops & 0x3F));
+    static const char* H = "0123456789ABCDEF";
+    rec[RC_PMETA_OFF]     = H[(plen >> 4) & 0xF];
+    rec[RC_PMETA_OFF + 1] = H[plen & 0xF];
+  }
+  static void rcGetPath(const char* rec, uint8_t* hops, uint16_t* bytes) {
+    int hi = rcHexNibble(rec[RC_PMETA_OFF]), lo = rcHexNibble(rec[RC_PMETA_OFF + 1]);
+    if (hi < 0 || lo < 0) { *hops = 0xFF; *bytes = 0; return; }   // blank/invalid -> direct
+    uint8_t plen = (uint8_t)((hi << 4) | lo);
+    *hops  = (uint8_t)(plen & 0x3F);
+    *bytes = (uint16_t)((plen >> 6) + 1);
+  }
+  // Build one 512-byte record block. Half 2 (radio) is left space-filled until reception logging
+  // is wired; only the single '\n' terminator at 511 is set (byte 255 stays a space).
   static void rcFormat(char* rec, bool outgoing, uint8_t status, uint8_t hops, uint16_t bytes,
                        uint32_t ts, const char* sender, const char* text) {
     memset(rec, ' ', REC);
     rcPutNum(rec, RC_TS_OFF, RC_TS_W, ts);
-    rec[RC_DIR_OFF] = outgoing ? '1' : '0';
-    rec[RC_ST_OFF]  = (char)('0' + (status % 10));
-    rcPutNum(rec, RC_HOPS_OFF, RC_HOPS_W, hops);
-    rcPutNum(rec, RC_BYTES_OFF, RC_BYTES_W, bytes);
+    rec[RC_DIR_OFF]  = outgoing ? '1' : '0';
+    rec[RC_ST_OFF]   = (char)('0' + (status % 10));
+    rec[RC_SEEN_OFF] = '0';                 // new record: unseen (reserved column)
+    rcPutPath(rec, hops, bytes);
     rcPutStr(rec, RC_SND_OFF, RC_SND_W, sender);
-    rcPutStr(rec, RC_TXT_OFF, RC_TXT_W, text);
+    rcPutText(rec, text);
     rec[REC - 1] = '\n';
   }
-  // Parse one 256-byte record block into the RAM ring (status SENDING -> NONE: not in-flight).
+  // Parse one 512-byte record block into the RAM ring (status SENDING -> NONE: not in-flight).
   void rcParseInto(const char* rec) {
     uint32_t ts = rcGetNum(rec, RC_TS_OFF, RC_TS_W);
     bool outgoing = rec[RC_DIR_OFF] == '1';
     char sc = rec[RC_ST_OFF];
     uint8_t status = (sc >= '0' && sc <= '9') ? (uint8_t)(sc - '0') : MSG_STATUS_NONE;
     if (status == MSG_STATUS_SENDING) status = MSG_STATUS_NONE;
-    uint8_t  hops  = (uint8_t)rcGetNum(rec, RC_HOPS_OFF, RC_HOPS_W);
-    uint16_t bytes = (uint16_t)rcGetNum(rec, RC_BYTES_OFF, RC_BYTES_W);
+    uint8_t hops; uint16_t bytes; rcGetPath(rec, &hops, &bytes);
     char sender[CHAT_PEER_NAME_MAX]; rcGetStr(rec, RC_SND_OFF, RC_SND_W, sender, sizeof(sender));
-    char text[CHAT_MSG_TEXT_MAX];    rcGetStr(rec, RC_TXT_OFF, RC_TXT_W, text, sizeof(text));
+    char text[CHAT_MSG_TEXT_MAX];    rcGetText(rec, text, sizeof(text));
     pushBuf(outgoing, sender, text, ts, status, 0, 0, 0, hops, bytes);
   }
-  // Parse one record block straight into a caller's ChatMessage (for random-access paging reads --
-  // does NOT touch the live _buf). RAM-only fields (ack/expiry/cli) default off; a persisted record
-  // is historical, so SENDING collapses to NONE just like rcParseInto.
+  // Parse one record block straight into a caller's ChatMessage (random-access paging; does NOT
+  // touch the live _buf). RAM-only fields default off; persisted SENDING collapses to NONE.
   static void rcToMsg(const char* rec, const char* peerkey, ChatMessage& m) {
     char sc = rec[RC_ST_OFF];
     uint8_t status = (sc >= '0' && sc <= '9') ? (uint8_t)(sc - '0') : MSG_STATUS_NONE;
@@ -187,11 +228,10 @@ class SdMessageStore : public MessageStore {
     m.timestamp = rcGetNum(rec, RC_TS_OFF, RC_TS_W);
     m.status    = status;
     m.ack = 0; m.expiry_ms = 0; m.cli = 0;
-    m.hops  = (uint8_t)rcGetNum(rec, RC_HOPS_OFF, RC_HOPS_W);
-    m.bytes = (uint16_t)rcGetNum(rec, RC_BYTES_OFF, RC_BYTES_W);
+    rcGetPath(rec, &m.hops, &m.bytes);
     copyBounded(m.peer, peerkey, CHAT_PEER_NAME_MAX);
     rcGetStr(rec, RC_SND_OFF, RC_SND_W, m.sender, CHAT_PEER_NAME_MAX);
-    rcGetStr(rec, RC_TXT_OFF, RC_TXT_W, m.text, CHAT_MSG_TEXT_MAX);
+    rcGetText(rec, m.text, CHAT_MSG_TEXT_MAX);
   }
   static bool rcFileIsNew(FsFile& f) {   // header magic present?
     char m[6]; f.seek(0);
@@ -200,8 +240,9 @@ class SdMessageStore : public MessageStore {
   static void rcMakeHeader(char* hdr) {
     memset(hdr, ' ', REC);
     memcpy(hdr, RC_MAGIC, 6);
-    rcPutStr(hdr, 7, 4, "v1");
-    rcPutStr(hdr, 12, 4, "256");
+    rcPutStr(hdr, 7, 4, "v1");           // version label stays v1; the "512" distinguishes the size
+    rcPutStr(hdr, 12, 4, "512");
+    // header free space [16..] reserved for seen_floor / unread_count (wired by the unread feature)
     hdr[REC - 1] = '\n';
   }
 
