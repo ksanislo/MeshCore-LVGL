@@ -11470,6 +11470,7 @@ void UITask::loop() {
       }
 #ifdef HAS_SD_CARD
       if (_sd_btn) {   // red SD icon when we want SD history but the card isn't mounted
+        SdSvc::pollPresence();   // notice a pulled card (no-op while unmounted -> never stalls the bus)
         bool rdy = _sdmsgs.ready();
         if (_sd_prev_ready && !rdy && !_sd_off_ts)
           _sd_off_ts = mproxy::rtcSeconds();   // card just went away -> mark for backfill on remount

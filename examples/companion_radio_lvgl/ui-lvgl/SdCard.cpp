@@ -21,6 +21,7 @@ namespace SdSvc {
 
 static bool     s_mounted = false;
 static uint32_t s_retry_ms = 0;   // last (re)mount attempt
+static uint32_t s_probe_ms = 0;   // last liveness probe (presence poll)
 static int      s_fail_count = 0;
 static bool     s_gave_up = false;  // no card: stop hammering the bus (each failed
                                     // mount stalls the shared HSPI while it times out)
@@ -40,9 +41,27 @@ bool ensureMounted() {
   uint32_t now = millis();
   if (s_retry_ms != 0 && (uint32_t)(now - s_retry_ms) < 3000) return false;  // throttle
   s_retry_ms = now ? now : 1;
-  s_mounted = sd_card_begin();   // variant re-pins, mounts, restores the bus
+  // sd_card_begin() re-pins the shared bus (sd_bus_to_sd..sd_bus_to_lora); hold the HSPI mutex
+  // across it or it races the radio on core 0 (boot works only because the mesh waits on s_ui_ready).
+  hspi_lock();
+  s_mounted = sd_card_begin();
+  hspi_unlock();
   if (!s_mounted && ++s_fail_count >= 3) s_gave_up = true;  // give up -> graceful no-SD
   return s_mounted;
+}
+
+// Liveness probe for a card we believe is mounted (this board has no card-detect pin). Reads the
+// CSD register -- fast, and fails fast on a pulled card, unlike the slow init in ensureMounted() --
+// so we can cheaply notice removal and flip ready() false (the top-bar SD icon then reappears).
+// No-op while unmounted, so the bus is NEVER touched when no card is present (no stalls). ~1 Hz.
+void pollPresence() {
+  if (!s_mounted) return;          // never probe when we think there's no card -> no stall
+  uint32_t now = millis();
+  if (s_probe_ms != 0 && (uint32_t)(now - s_probe_ms) < 1500) return;  // throttle bus contention
+  s_probe_ms = now ? now : 1;
+  Lock lk;                          // hspi_lock + re-pin to SD (restored on scope exit)
+  if (sd.card() == nullptr || sd.card()->sectorCount() == 0)
+    s_mounted = false;             // card pulled -> next sd_card_begin() re-inits cleanly
 }
 
 // ---- lv_fs driver (drive 'S:') so LVGL can read SD files (emoji images, etc.) ----
