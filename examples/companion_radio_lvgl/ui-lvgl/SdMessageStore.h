@@ -28,11 +28,13 @@ class SdMessageStore : public MessageStore {
   bool _dir_ok;                      // /chat exists on the currently-mounted card
   bool _loaded_has_older = false;    // the loaded window started mid-file -> older history exists
 
-  // Ensure the card is mounted (via the shared service, which throttles retries
-  // and recovers a re-inserted card) and that our /chat dir exists. Resets the
-  // loaded conversation after a fresh (re)mount so it reloads from the card.
+  // Check (do NOT attempt) that the card is mounted, and that our /chat dir exists. We use the
+  // check-only ready() here, never ensureMounted(): a mount attempt blocks on sd.begin() when the
+  // card is missing/dead, and this runs on the UI core (drainEvents/append + chat render), so an
+  // auto-mount would freeze LVGL. Mounting is user-initiated only (boot begin() + the top-bar
+  // SD button); on physical removal a failed append calls end(), flipping ready() false.
   bool ensure() {
-    if (!SdSvc::ensureMounted()) { _dir_ok = false; return false; }
+    if (!SdSvc::ready()) { _dir_ok = false; return false; }
     if (!_dir_ok) {
       SdSvc::Lock lk;
       if (!sd.exists("/chat")) sd.mkdir("/chat");

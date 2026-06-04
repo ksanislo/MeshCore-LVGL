@@ -157,6 +157,8 @@ class UITask : public AbstractUITask {
 #endif
   MessageStore* _msgs;   // -> _rammsgs or _sdmsgs, chosen at begin() from the setting
   uint32_t      _sd_off_ts;  // RTC time saving was disabled (0 = not off; for backfill)
+  lv_obj_t*     _sd_btn = nullptr;       // top-bar red SD-card icon (mount when missing)
+  bool          _sd_prev_ready = false;  // last-seen SD mounted state (to mark _sd_off_ts on removal)
   // Append to the RAM ring always (keeps recent history for the toggle) and to
   // the SD store when persistence is active.
   void storeAppend(bool outgoing, const char* key, const char* sender,
@@ -989,6 +991,7 @@ private:
   void applyTheme(const UiPalette& pal);      // swap g_ui_palette + rebuild the UI in place
   int  buildThemeOptions(char* out, size_t cap, const char* sel, int* sel_idx);  // dropdown options + selected index
   static void set_history_cb(lv_event_t* e);
+  static void sd_mount_cb(lv_event_t* e);   // top-bar SD icon -> user-initiated (re)mount
   static void category_row_cb(lv_event_t* e);
   static void settings_back_cb(lv_event_t* e);
   static void settings_tab_changed_cb(lv_event_t* e);

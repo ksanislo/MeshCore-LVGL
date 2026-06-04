@@ -483,6 +483,22 @@ lv_obj_t* UITask::buildHomeScreen() {
   }
   lv_obj_align_to(_sig_meter, _clock_label, LV_ALIGN_OUT_LEFT_MID, -6, 0);
 
+#ifdef HAS_SD_CARD
+  // SD-mount button: a red SD-card icon shown (by loop()) ONLY when persist-history is on but the
+  // card isn't mounted. Tapping it does a user-initiated (re)mount -- we never auto-mount on access
+  // (that blocks sd.begin() on the UI core and freezes LVGL). Left of the signal meter; hidden by default.
+  _sd_btn = lv_btn_create(header);
+  lv_obj_remove_style_all(_sd_btn);
+  lv_obj_set_size(_sd_btn, 22, HEADER_H);
+  lv_obj_add_event_cb(_sd_btn, sd_mount_cb, LV_EVENT_CLICKED, NULL);
+  { lv_obj_t* sdl = lv_label_create(_sd_btn);
+    lv_label_set_text(sdl, LV_SYMBOL_SD_CARD);
+    lv_obj_set_style_text_color(sdl, lv_color_hex(UI_ALERT), 0);   // red = card missing
+    lv_obj_center(sdl); }
+  lv_obj_align_to(_sd_btn, _sig_meter, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+  lv_obj_add_flag(_sd_btn, LV_OBJ_FLAG_HIDDEN);
+#endif
+
   // ----- tabbed body (tabs pinned to bottom) -----
   _tabview = lv_tabview_create(scr, LV_DIR_BOTTOM, TABBAR_H);
   lv_obj_set_size(_tabview, _screen_w, _screen_h - HEADER_H);
@@ -10163,6 +10179,30 @@ void UITask::set_history_cb(lv_event_t* e) {
 #endif
 }
 
+// Top-bar SD-card icon tap: a user-initiated (re)mount. We never auto-mount on access (that blocks
+// sd.begin() on the UI core and freezes LVGL), so this is the one deliberate attempt -- begin()
+// rescans (clears the give-up flag) + tries once. On success, backfill anything that arrived while
+// unmounted and go live; otherwise report no card. (Only shown when persist-history is on.)
+void UITask::sd_mount_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+#ifdef HAS_SD_CARD
+  UITask* s = _instance;
+  s->_sdmsgs.begin();                       // rescan + one mount attempt (may briefly block if no card)
+  if (s->_sdmsgs.ready()) {
+    if (s->_sd_off_ts) s->_rammsgs.replayInto(&s->_sdmsgs, s->_sd_off_ts);  // persist msgs from the outage
+    s->_sd_off_ts = 0;
+    s->_sd_prev_ready = true;
+    s->_msgs = &s->_sdmsgs;
+    if (s->_chat_screen && lv_scr_act() == s->_chat_screen) s->rebuildChatHistory();
+    s->_contacts_dirty = true;              // "latest" sort reads the store
+    s->showToast("SD card mounted");
+  } else {
+    s->showToast("No SD card found");
+  }
+#endif
+}
+
 void UITask::set_telem_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   lv_obj_t* dd = lv_event_get_target(e);
@@ -11428,6 +11468,21 @@ void UITask::loop() {
         lv_obj_align_to(_sig_meter, _clock_label, LV_ALIGN_OUT_LEFT_MID, -6, 0);
         refreshSignalMeter();
       }
+#ifdef HAS_SD_CARD
+      if (_sd_btn) {   // red SD icon when we want SD history but the card isn't mounted
+        bool rdy = _sdmsgs.ready();
+        if (_sd_prev_ready && !rdy && !_sd_off_ts)
+          _sd_off_ts = mproxy::rtcSeconds();   // card just went away -> mark for backfill on remount
+        _sd_prev_ready = rdy;
+        bool show_sd = _node_prefs && _node_prefs->persist_history && !rdy;
+        if (show_sd) {
+          lv_obj_clear_flag(_sd_btn, LV_OBJ_FLAG_HIDDEN);
+          lv_obj_align_to(_sd_btn, _sig_meter, LV_ALIGN_OUT_LEFT_MID, -6, 0);  // follow the (re-sized) meter
+        } else {
+          lv_obj_add_flag(_sd_btn, LV_OBJ_FLAG_HIDDEN);
+        }
+      }
+#endif
       // Live-refresh the Network status lines (1 Hz) while a Network pane is open.
       if (_set_active_pane == _set_pane_body[CAT_WIFI] ||
           _set_active_pane == _set_pane_body[CAT_MQTT]) {
@@ -11449,10 +11504,9 @@ void UITask::loop() {
   }
 
 #ifdef HAS_SD_CARD
-  // Surface SD persistence problems instead of silently dropping history.
-  static bool sd_warned = false;
+  // "No SD card" is now shown by the persistent red SD icon in the top bar (tap to mount) -- no
+  // repeating toast. Still surface a write failure (a distinct, actionable event).
   static uint32_t sd_err_toast_ms = 0;
-  if (!sd_warned && now > 4000) { sd_warned = true; if (!_msgs->ready()) showToast("No SD card: history off"); }
   if (_msgs->takeWriteError() && now - sd_err_toast_ms > 15000) {  // throttle: don't spam per message
     sd_err_toast_ms = now;
     showToast("SD write failed - not saved");

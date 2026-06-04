@@ -128,7 +128,7 @@ static EmojiIndex* getIndex(int size) {
   bool known;
   EmojiIndex* c = findCached(size, &known);
   if (known) return c;
-  if (!ensureMounted()) return nullptr;
+  if (!ready()) return nullptr;   // check-only: never auto-mount (would stall the UI); mount is user-initiated
   Lock lk;
   char bpath[24];
   snprintf(bpath, sizeof(bpath), "/emoji/%d.bin", size);
@@ -156,7 +156,7 @@ static const EmojiEntry* findEntry(const EmojiIndex* idx, uint32_t cp) {
 
 static void* fs_open(lv_fs_drv_t* drv, const char* path, lv_fs_mode_t mode) {
   (void)drv; (void)mode;
-  if (!ensureMounted()) return nullptr;
+  if (!ready()) return nullptr;   // check-only: never auto-mount (would stall the UI); mount is user-initiated
   // Hold the HSPI mutex for the whole open..close span (released in fs_close, or
   // on each failure path below). LVGL keeps the handle open across read/seek, so
   // we can't use the RAII Lock here -- the lock must outlive this function.
