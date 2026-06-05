@@ -397,9 +397,8 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_ota_status;      // OTA status label
   lv_obj_t*       _set_ota_btn;         // "Update firmware" button (greyed when no IP)
   lv_obj_t*       _set_ota_lbl;         // its label -> toggles to "Cancel upgrade" while downloading
-  lv_obj_t*       _set_ota_curlatest;   // "Current X / Latest Y" version label
-  lv_obj_t*       _set_ota_morechk;     // "Additional options" disclosure checkbox
-  lv_obj_t*       _set_ota_release_field;// makeField column wrapping the release dropdown (hide as a unit)
+  lv_obj_t*       _set_ota_curlatest;   // "Current: X" / "Latest: Y" version label (two lines)
+  lv_obj_t*       _set_ota_release_field;// makeField column wrapping the release dropdown
   lv_obj_t*       _set_ota_release_dd;  // release picker dropdown (shown when Additional options is on)
   lv_obj_t*       _set_ota_prerel_chk;  // "Include pre-releases" checkbox
   lv_obj_t*       _set_ota_customchk;   // "Custom URL" checkbox (shown only under pre-release)
@@ -1011,7 +1010,6 @@ private:
   static void presets_update_cb(lv_event_t* e); // "Update radio presets"
   static void set_ota_url_event_cb(lv_event_t* e); // OTA URL field: kb on focus, commit on defocus
   static void ota_update_cb(lv_event_t* e);     // "Update firmware" -> resolve source -> post OtaUpdate
-  static void ota_more_options_cb(lv_event_t* e);  // "Additional options" disclosure toggle
   static void ota_prerelease_cb(lv_event_t* e);    // include pre-releases (saved) -> re-fetch + rebuild list
   static void ota_custom_url_cb(lv_event_t* e);    // custom-URL mode (saved) -> reveal URL field
   static void ota_release_dd_cb(lv_event_t* e);    // release picked -> refresh current/latest hint
@@ -1250,7 +1248,7 @@ public:
       _set_wifi_gw(NULL), _set_wifi_dns(NULL), _set_wifi_status(NULL),
       _set_ntp_en(NULL), _set_ntp_server(NULL), _set_ntp_status(NULL), _set_preset_status(NULL),
       _set_ota_url_ta(NULL), _set_ota_url_field(NULL), _set_ota_status(NULL), _set_ota_btn(NULL), _set_ota_lbl(NULL),
-      _set_ota_curlatest(NULL), _set_ota_morechk(NULL), _set_ota_release_field(NULL), _set_ota_release_dd(NULL),
+      _set_ota_curlatest(NULL), _set_ota_release_field(NULL), _set_ota_release_dd(NULL),
       _set_ota_prerel_chk(NULL), _set_ota_customchk(NULL), _ota_dd_count(0),
       _nodeinfo_body(NULL), _nodeinfo_kb(NULL),
       _otafail_popup(NULL), _otafail_lbl(NULL),
