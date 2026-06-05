@@ -1,4 +1,10 @@
 #include "MyMesh.h"
+#include "BatteryState.h"
+
+// Fuel-gauge state (written by the UI estimator, read here for telemetry). -1 pct = no monitor.
+volatile int g_batt_pct = -1;
+volatile int g_batt_mv = 0;
+volatile int g_batt_ma = 0;
 
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
@@ -1139,7 +1145,7 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
 
     if (permissions & TELEM_PERM_BASE) { // only respond if base permission bit is set
       telemetry.reset();
-      telemetry.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
+      if (g_batt_pct >= 0) { telemetry.addVoltage(TELEM_CHANNEL_SELF, g_batt_mv / 1000.0f); telemetry.addPercentage(TELEM_CHANNEL_SELF, (uint32_t)g_batt_pct); }  // fuel gauge: V + %, only with a monitor
       // query other sensors -- target specific
       sensors.querySensors(permissions, telemetry);
 
@@ -2182,7 +2188,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     }
   } else if (cmd_frame[0] == CMD_SEND_TELEMETRY_REQ && len == 4) {  // 'self' telemetry request
     telemetry.reset();
-    telemetry.addVoltage(TELEM_CHANNEL_SELF, (float)board.getBattMilliVolts() / 1000.0f);
+    if (g_batt_pct >= 0) { telemetry.addVoltage(TELEM_CHANNEL_SELF, g_batt_mv / 1000.0f); telemetry.addPercentage(TELEM_CHANNEL_SELF, (uint32_t)g_batt_pct); }  // fuel gauge: V + %, only with a monitor
     // query other sensors -- target specific
     sensors.querySensors(0xFF, telemetry);
 

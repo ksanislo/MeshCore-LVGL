@@ -1,6 +1,7 @@
 #include "UITask.h"
 #include "meshcore_assets.h"
 #include "MeshProxy.h"                  // UI talks to the backend only through this
+#include "BatteryState.h"               // g_batt_* shared with the backend telemetry
 #include "ui_theme.h"                   // UI kit: color/layout tokens, avatar palette
 #include <helpers/AdvertDataHelpers.h>  // ADV_TYPE_*
 #include <helpers/ContactInfo.h>        // ContactInfo (read-model copies)
@@ -488,11 +489,12 @@ lv_obj_t* UITask::buildHomeScreen() {
   lv_obj_align_to(_sig_meter, _clock_label, LV_ALIGN_OUT_LEFT_MID, -6, 0);
 
   // Battery gauge (icon-only): shown by loop() only when a power monitor is configured AND reading.
-  // Left of the signal meter; the level glyph + color come from the fuel-gauge estimate. Hidden default.
+  // Sits between the clock and the signal meter (loop() tucks the meter back to the clock when it's
+  // hidden, so there's no gap). The level glyph + color come from the fuel-gauge estimate. Hidden default.
   _batt_icon = lv_label_create(header);
   lv_label_set_text(_batt_icon, LV_SYMBOL_BATTERY_FULL);
   lv_obj_set_style_text_font(_batt_icon, &lv_font_montserrat_16, 0);
-  lv_obj_align_to(_batt_icon, _sig_meter, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+  lv_obj_align_to(_batt_icon, _clock_label, LV_ALIGN_OUT_LEFT_MID, -8, 0);
   lv_obj_add_flag(_batt_icon, LV_OBJ_FLAG_HIDDEN);
 
 #ifdef HAS_SD_CARD
@@ -508,7 +510,7 @@ lv_obj_t* UITask::buildHomeScreen() {
     lv_obj_set_style_text_font(sdl, &lv_font_montserrat_20, 0);    // ~1.5x the 14px header (more visible)
     lv_obj_set_style_text_color(sdl, lv_color_hex(UI_ALERT), 0);   // red = card missing
     lv_obj_center(sdl); }
-  lv_obj_align_to(_sd_btn, _batt_icon, LV_ALIGN_OUT_LEFT_MID, -6, 0);   // left of the battery gauge
+  lv_obj_align_to(_sd_btn, _sig_meter, LV_ALIGN_OUT_LEFT_MID, -6, 0);   // left of the signal meter
   lv_obj_add_flag(_sd_btn, LV_OBJ_FLAG_HIDDEN);
 #endif
 
@@ -6778,11 +6780,11 @@ void UITask::refreshNodeInfo() {
   n += snprintf(buf + n, sizeof(buf) - n, "Uptime: %ud %uh %um %us\n", d, h, m, sec);
   n += snprintf(buf + n, sizeof(buf) - n, "Free RAM: %u KB (min %u)\n", freeRam, minRam);
   n += snprintf(buf + n, sizeof(buf) - n, "Free PSRAM: %u KB\n", freePs);
-  {  // battery via the board hook (INA219 on CrowPanel); <0 = board has no sensor -> omit
+  if (_node_prefs && _node_prefs->power_monitor) {  // battery diagnostics only when a monitor is selected
     int bmv = board_batt_millivolts();
     if (bmv > 0)
-      n += snprintf(buf + n, sizeof(buf) - n, "Battery: %d.%03d V  %+d mA\n",
-                    bmv / 1000, bmv % 1000, board_batt_current_ma());
+      n += snprintf(buf + n, sizeof(buf) - n, "Battery: %d.%03d V  %+d mA  (%d%%)\n",
+                    bmv / 1000, bmv % 1000, board_batt_current_ma(), g_batt_pct);
     else if (bmv == 0) {   // sensor didn't ACK @0x40 -> scan the bus to find it / prove the bus works
       uint8_t addrs[16];
       int na = board_i2c_scan(addrs, 16);
@@ -10838,10 +10840,18 @@ static int batt_ocv_pct(int cell_mv, uint8_t type) {
 // Hidden whenever there's no monitor selected or no live reading -- the feature is fully optional.
 void UITask::updateBatteryGauge() {
   if (!_batt_icon) return;
+  // Keep sampling through an OTA on purpose: with no power switch / Li-ion cutoff on this board, the
+  // SoC estimate is the only "charge me" signal, and a slow update is exactly when you want it live.
+  // One INA219 read every 5 s is negligible bus/heap load; if memory's ever truly tight, cut elsewhere.
   uint8_t mon = _node_prefs ? _node_prefs->power_monitor : 0;
   board_set_power_monitor(mon);   // keep the board gate (and telemetry's getBatt*) in sync with the pref
   int mv = mon ? board_batt_millivolts() : 0;
-  if (mv <= 0) { lv_obj_add_flag(_batt_icon, LV_OBJ_FLAG_HIDDEN); _batt_soc_init = false; return; }
+  if (mv <= 0) {                       // no monitor / no reading -> gauge off + no battery telemetry
+    lv_obj_add_flag(_batt_icon, LV_OBJ_FLAG_HIDDEN);
+    _batt_soc_init = false; _batt_learn_anchor = -1; _batt_rest_since = 0;
+    g_batt_pct = -1; g_batt_mv = 0; g_batt_ma = 0;
+    return;
+  }
   int ma = board_batt_current_ma();   // + charging, - discharging
 
   uint8_t type = _node_prefs->batt_type;
@@ -10849,19 +10859,47 @@ void UITask::updateBatteryGauge() {
   double cap = _node_prefs->batt_capacity_mah ? (double)_node_prefs->batt_capacity_mah : 5000.0;
   int vpct = batt_ocv_pct(mv / cells, type);
 
+  double vsoc = vpct / 100.0;
   uint32_t now = millis();
-  if (!_batt_soc_init) { _batt_soc_mah = vpct / 100.0 * cap; _batt_soc_init = true; _batt_last_ms = now; }
-  _batt_soc_mah += (double)ma * (now - _batt_last_ms) / 3600000.0;   // coulomb count (mAh)
+  if (!_batt_soc_init) { _batt_soc_mah = vsoc * cap; _batt_soc_init = true; _batt_last_ms = now; }
+  double dt_h = (double)(uint32_t)(now - _batt_last_ms) / 3600000.0;
   _batt_last_ms = now;
+  _batt_soc_mah += (double)ma * dt_h;          // coulomb count (mAh)
   if (_batt_soc_mah < 0) _batt_soc_mah = 0;
   if (_batt_soc_mah > cap) _batt_soc_mah = cap;
   // Anchor to voltage: strong near rest (terminal V ~= OCV), weak under load (let coulomb-count lead).
   bool rest = (ma > -60 && ma < 60);
-  _batt_soc_mah += (vpct / 100.0 * cap - _batt_soc_mah) * (rest ? 0.05 : 0.003);
+  _batt_soc_mah += (vsoc * cap - _batt_soc_mah) * (rest ? 0.05 : 0.003);
+
+  // Auto-learn capacity: at a settled rest point with a big SoC swing since the last rest anchor,
+  // true capacity ~= |coulomb moved| / |SoC change|. Blend it in + persist, so the tracked state
+  // self-corrects over real cycles (critical here -- there's no safety cutoff, so SoC is the warning).
+  _batt_learn_mah += (double)ma * dt_h;
+  bool atrest = (ma > -40 && ma < 40);
+  if (!atrest) _batt_rest_since = 0;
+  else if (_batt_rest_since == 0) _batt_rest_since = now;
+  else if ((uint32_t)(now - _batt_rest_since) > 90000) {   // ~90s settled -> terminal V ≈ OCV
+    if (_batt_learn_anchor >= 0) {
+      double dsoc = vsoc - _batt_learn_anchor; if (dsoc < 0) dsoc = -dsoc;
+      double moved = _batt_learn_mah; if (moved < 0) moved = -moved;
+      if (dsoc > 0.30) {                                    // need a big swing to trust it
+        double learned = moved / dsoc;
+        if (learned > cap * 0.4 && learned < cap * 2.5) {   // sanity vs current estimate
+          double nc = cap * 0.7 + learned * 0.3;            // slow blend
+          if (nc < 200) nc = 200; else if (nc > 30000) nc = 30000;
+          _node_prefs->batt_capacity_mah = (uint16_t)(nc + 0.5);
+          pushPrefs();
+        }
+      }
+    }
+    _batt_learn_anchor = vsoc; _batt_learn_mah = 0; _batt_rest_since = now;   // (re)anchor here
+  }
 
   int pct = (int)(_batt_soc_mah / cap * 100.0 + 0.5);
   if (pct < 0) pct = 0; else if (pct > 100) pct = 100;
   bool charging = ma > 30;
+
+  g_batt_pct = pct; g_batt_mv = mv; g_batt_ma = ma;   // publish for the backend telemetry report
 
   const char* sym = charging      ? LV_SYMBOL_CHARGE
                   : pct >= 90     ? LV_SYMBOL_BATTERY_FULL
@@ -11605,6 +11643,11 @@ void UITask::loop() {
     const char* pin = _node_prefs ? _node_prefs->lock_pin : nullptr;
     if (!_locked && _node_prefs && _node_prefs->auto_lock && pin && strlen(pin) >= 4) showLock();
   }
+  // Fuel gauge: sample + integrate at 1 Hz REGARDLESS of the backlight state, so coulomb counting
+  // (and the low-battery warning it backs) keeps running while the screen is off. Cheap; reads the
+  // monitor only when one is configured. The icon it updates is just a hidden widget when off.
+  if (_batt_icon && (uint32_t)(now - _batt_tick_ms) >= 5000) { _batt_tick_ms = now; updateBatteryGauge(); }
+
   // While the screen is off, skip the clock repaint and list rebuilds: nothing is
   // visible, and a per-second clock update would needlessly invalidate + flush.
   // lv_timer_handler still runs below so touch can wake us.
@@ -11627,13 +11670,17 @@ void UITask::loop() {
       }
       strncpy(_clock_text, buf, sizeof(_clock_text) - 1); _clock_text[sizeof(_clock_text) - 1] = 0;
       renderClock(_clock_blink != 0);   // re-render with the current blink phase (same width either way)
-      if (_sig_meter) {   // re-anchor to the (re-sized) clock, then update the bars
-        lv_obj_align_to(_sig_meter, _clock_label, LV_ALIGN_OUT_LEFT_MID, -6, 0);
-        refreshSignalMeter();
+      // Header cluster, right -> left: clock | battery | signal | SD. The battery sits between the
+      // clock and the meter when shown; when there's no monitor it's hidden and the meter tucks up
+      // against the clock (no gap).
+      lv_obj_t* sig_anchor = _clock_label;
+      if (_batt_icon && !lv_obj_has_flag(_batt_icon, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_align_to(_batt_icon, _clock_label, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+        sig_anchor = _batt_icon;
       }
-      if (_batt_icon) {   // fuel-gauge sample + icon (hidden unless a monitor is configured & reading)
-        lv_obj_align_to(_batt_icon, _sig_meter, LV_ALIGN_OUT_LEFT_MID, -8, 0);
-        updateBatteryGauge();
+      if (_sig_meter) {   // re-anchor to the (re-sized) clock / battery, then update the bars
+        lv_obj_align_to(_sig_meter, sig_anchor, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+        refreshSignalMeter();
       }
 #ifdef HAS_SD_CARD
       if (_sd_btn) {   // red SD icon when we want SD history but the card isn't mounted
@@ -11645,7 +11692,7 @@ void UITask::loop() {
         bool show_sd = _node_prefs && _node_prefs->persist_history && !rdy;
         if (show_sd) {
           lv_obj_clear_flag(_sd_btn, LV_OBJ_FLAG_HIDDEN);
-          lv_obj_align_to(_sd_btn, _batt_icon, LV_ALIGN_OUT_LEFT_MID, -6, 0);  // follow the battery gauge
+          lv_obj_align_to(_sd_btn, _sig_meter, LV_ALIGN_OUT_LEFT_MID, -6, 0);  // follow the signal meter
         } else {
           lv_obj_add_flag(_sd_btn, LV_OBJ_FLAG_HIDDEN);
         }

@@ -162,6 +162,10 @@ class UITask : public AbstractUITask {
   double        _batt_soc_mah = 0;       // coulomb-counted remaining capacity estimate
   bool          _batt_soc_init = false;  // seeded from voltage yet?
   uint32_t      _batt_last_ms = 0;       // last sample time (for the dt integration)
+  uint32_t      _batt_tick_ms = 0;       // 1 Hz estimator tick (runs even while the backlight is off)
+  double        _batt_learn_mah = 0;     // coulomb accumulated since the last rest anchor (auto-learn)
+  double        _batt_learn_anchor = -1; // voltage-SoC at the last rest anchor (-1 = none)
+  uint32_t      _batt_rest_since = 0;    // when the pack entered rest (0 = under load)
   bool          _sd_prev_ready = false;  // last-seen SD mounted state (to mark _sd_off_ts on removal)
   // Append to the RAM ring always (keeps recent history for the toggle) and to
   // the SD store when persistence is active.
