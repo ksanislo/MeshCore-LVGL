@@ -146,6 +146,69 @@ static uint8_t s_mention_user_colors   = 1;
 static uint8_t s_hashtag_channel_colors = 1;
 static uint8_t s_channel_sender_colors = 1;   // channel bubbles: brand+color the sender header
 
+// (Re)allocate the full double buffer: two DMA-capable internal buffers for pipelined flush. Bigger
+// => fewer flush chunks => less per-transaction overhead; fall back to fewer lines if DMA RAM is tight.
+void UITask::allocBigDrawBuf() {
+  size_t buf_pixels = 0;
+  for (uint16_t lines = kBufferLines; lines >= 24; lines -= 8) {
+    size_t px = (size_t)_screen_w * lines;
+    size_t bytes = px * sizeof(lv_color_t);
+    _buf1 = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    _buf2 = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (_buf1 && _buf2) { buf_pixels = px; break; }
+    if (_buf1) { heap_caps_free(_buf1); _buf1 = NULL; }
+    if (_buf2) { heap_caps_free(_buf2); _buf2 = NULL; }
+  }
+  _buf_px = buf_pixels;
+  lv_disp_draw_buf_init(&_draw_buf, _buf1, _buf2, buf_pixels);
+}
+
+// Shrink the LVGL draw buffers to free internal DMA RAM during an OTA, then restore. The TLS context
+// (~16KB in + 16KB out) and lwIP need INTERNAL RAM and CANNOT live in PSRAM in this framework build
+// (mbedTLS is compiled with INTERNAL_MEM_ALLOC + a fixed 16KB content length), so HTTPS OTA only fits
+// if we hand back our ~40-80KB of draw buffers for the duration. Drops to one tiny single buffer while
+// downloading (the progress screen just flushes in more chunks); restored on cancel/fail -- a
+// successful OTA reboots. MUST run on the UI thread, between lv_timer_handler() passes; we drain the
+// in-flight async flush DMA first so we never free a buffer the SPI engine is still reading.
+void UITask::setLowMemDrawBuf(bool low) {
+  if (low == _lvbuf_lowmem) return;
+  if (_lgfx) { _lgfx->endWrite(); _lgfx->waitDMA(); }   // close + drain the open flush transaction
+  if (low) {
+    if (_buf2) { heap_caps_free(_buf2); _buf2 = NULL; }
+    if (_buf1) { heap_caps_free(_buf1); _buf1 = NULL; }
+    size_t px = (size_t)_screen_w * 16;                 // ~10KB single buffer renders the progress UI
+    _buf1 = (lv_color_t*)heap_caps_malloc(px * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!_buf1) { px = (size_t)_screen_w * 8;           // last-ditch, even smaller
+      _buf1 = (lv_color_t*)heap_caps_malloc(px * sizeof(lv_color_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL); }
+    lv_disp_draw_buf_init(&_draw_buf, _buf1, NULL, _buf1 ? px : 0);
+    _lvbuf_lowmem = true;
+  } else {
+    if (_buf1) { heap_caps_free(_buf1); _buf1 = NULL; }
+    allocBigDrawBuf();                                   // rebuild the full double buffer
+    _lvbuf_lowmem = false;
+  }
+  lv_disp_drv_update(lv_disp_get_default(), &_disp_drv);
+  if (lv_scr_act()) lv_obj_invalidate(lv_scr_act());     // full repaint into the new buffer(s)
+}
+
+// Battery sampler, pinned to core 0 (the mesh core) at the mesh task's priority so it yields to packet
+// crypto -- the INA219 read is a slow, churny, non-critical I2C poll, so getting "stuck behind a decrypt"
+// is fine and far better than stalling the UI/OTA core. Publishes raw mV/mA into volatiles the UI-core
+// estimator consumes; it never touches LVGL. board_batt_*() take the cross-core I2C mutex, so this
+// serializes cleanly with the touch/RTC accesses on core 1.
+void UITask::battSampleTask(void* arg) {
+  UITask* self = static_cast<UITask*>(arg);
+  for (;;) {
+    uint8_t mon = self->_node_prefs ? self->_node_prefs->power_monitor : 0;
+    board_set_power_monitor(mon);                  // gate the board read + telemetry's getBatt*()
+    int mv = mon ? board_batt_millivolts() : 0;
+    int ma = mv > 0 ? board_batt_current_ma() : 0;
+    self->_batt_raw_mv = mv;
+    self->_batt_raw_ma = ma;
+    vTaskDelay(pdMS_TO_TICKS(5000));
+  }
+}
+
 void UITask::disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
   if (!_instance || !_instance->_lgfx) {
     lv_disp_flush_ready(drv);
@@ -3949,6 +4012,12 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   if (node_prefs) _node_prefs_store = *node_prefs;
   _node_prefs = &_node_prefs_store;
   _last_snap_version = mproxy::snapshotVersion();
+
+  // Clipboard text buffer lives in PSRAM -- it's cold (only touched on a user copy) and doesn't need
+  // fast internal RAM. Fall back to internal if PSRAM is somehow unavailable.
+  _clip_text = (char*)ps_malloc(kClipTextCap);
+  if (!_clip_text) _clip_text = (char*)malloc(kClipTextCap);
+  if (_clip_text) _clip_text[0] = 0;
   _instance = this;
   loadPresetTable();   // seed radio presets (compiled list, or the flash override if present)
 
@@ -4013,19 +4082,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 #endif
 
   // Two DMA-capable internal buffers for double-buffered, pipelined flush.
-  // Bigger buffers => fewer flush chunks => less per-transaction overhead.
-  // Fall back to fewer lines if internal DMA RAM is tight.
-  size_t buf_pixels = 0;
-  for (uint16_t lines = kBufferLines; lines >= 24; lines -= 8) {
-    size_t px = (size_t)_screen_w * lines;
-    size_t bytes = px * sizeof(lv_color_t);
-    _buf1 = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    _buf2 = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (_buf1 && _buf2) { buf_pixels = px; break; }
-    if (_buf1) { heap_caps_free(_buf1); _buf1 = NULL; }
-    if (_buf2) { heap_caps_free(_buf2); _buf2 = NULL; }
-  }
-  lv_disp_draw_buf_init(&_draw_buf, _buf1, _buf2, buf_pixels);
+  allocBigDrawBuf();
 
   lv_disp_drv_init(&_disp_drv);
   _disp_drv.hor_res  = _screen_w;
@@ -4089,6 +4146,11 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 #endif
 
   reportCrashIfAny();   // if the last boot panicked, save a decodable report (SD or SPIFFS)
+
+  // Spawn the battery sampler on core 0 (mesh core), priority 1 (== meshTask, so it time-slices and
+  // yields under load) -- AFTER display/touch is fully up, so it never races the one-time touch init on
+  // the shared I2C bus. Small stack: it only does a register read. No-op on boards with no battery hooks.
+  xTaskCreatePinnedToCore(battSampleTask, "batt", 3072, this, 1, nullptr, 0);
 
   _started = true;
   _last_tick_ms = millis();
@@ -6781,10 +6843,10 @@ void UITask::refreshNodeInfo() {
   n += snprintf(buf + n, sizeof(buf) - n, "Free RAM: %u KB (min %u)\n", freeRam, minRam);
   n += snprintf(buf + n, sizeof(buf) - n, "Free PSRAM: %u KB\n", freePs);
   if (_node_prefs && _node_prefs->power_monitor) {  // battery diagnostics only when a monitor is selected
-    int bmv = board_batt_millivolts();
+    int bmv = _batt_raw_mv;            // latest core-0 sample; no UI-core I2C read
     if (bmv > 0)
       n += snprintf(buf + n, sizeof(buf) - n, "Battery: %d.%03d V  %+d mA  (%d%%)\n",
-                    bmv / 1000, bmv % 1000, board_batt_current_ma(), g_batt_pct);
+                    bmv / 1000, bmv % 1000, _batt_raw_ma, g_batt_pct);
     else if (bmv == 0) {   // sensor didn't ACK @0x40 -> scan the bus to find it / prove the bus works
       uint8_t addrs[16];
       int na = board_i2c_scan(addrs, 16);
@@ -8979,8 +9041,10 @@ void UITask::set_screen_cb(lv_event_t* e) {
 void UITask::clipSet(uint8_t kind, const char* text, const uint8_t* pubkey,
                      const char* name, uint8_t type) {
   if (!text) text = "";
-  strncpy(_clip_text, text, sizeof(_clip_text) - 1);
-  _clip_text[sizeof(_clip_text) - 1] = 0;
+  if (_clip_text) {
+    strncpy(_clip_text, text, kClipTextCap - 1);
+    _clip_text[kClipTextCap - 1] = 0;
+  }
   _clip_kind = kind;
   if (pubkey) memcpy(_clip_pubkey, pubkey, PUB_KEY_SIZE);
   else        memset(_clip_pubkey, 0, PUB_KEY_SIZE);
@@ -10840,19 +10904,19 @@ static int batt_ocv_pct(int cell_mv, uint8_t type) {
 // Hidden whenever there's no monitor selected or no live reading -- the feature is fully optional.
 void UITask::updateBatteryGauge() {
   if (!_batt_icon) return;
-  // Keep sampling through an OTA on purpose: with no power switch / Li-ion cutoff on this board, the
-  // SoC estimate is the only "charge me" signal, and a slow update is exactly when you want it live.
-  // One INA219 read every 5 s is negligible bus/heap load; if memory's ever truly tight, cut elsewhere.
-  uint8_t mon = _node_prefs ? _node_prefs->power_monitor : 0;
-  board_set_power_monitor(mon);   // keep the board gate (and telemetry's getBatt*) in sync with the pref
-  int mv = mon ? board_batt_millivolts() : 0;
+  // Consume the latest sample published by the core-0 sampler task (battSampleTask). The actual INA219
+  // I2C read -- slow, churny, and not UI/perf-critical -- runs off this core so it can never stall the
+  // UI or an in-progress OTA; here we only do the (cheap) coulomb math + icon, which must stay on the
+  // UI core because LVGL isn't thread-safe. The estimate keeps running through an OTA on purpose: with
+  // no power switch / Li-ion cutoff on this board, the SoC is the only "charge me" signal.
+  int mv = _batt_raw_mv;               // 0 = no monitor / no reading (sampler already applied the gate)
   if (mv <= 0) {                       // no monitor / no reading -> gauge off + no battery telemetry
     lv_obj_add_flag(_batt_icon, LV_OBJ_FLAG_HIDDEN);
     _batt_soc_init = false; _batt_learn_anchor = -1; _batt_rest_since = 0;
     g_batt_pct = -1; g_batt_mv = 0; g_batt_ma = 0;
     return;
   }
-  int ma = board_batt_current_ma();   // + charging, - discharging
+  int ma = _batt_raw_ma;              // + charging, - discharging
 
   uint8_t type = _node_prefs->batt_type;
   int cells = (type == 1) ? 2 : 1;    // 0/2 = 1S, 1 = 2S
@@ -11838,6 +11902,11 @@ void UITask::loop() {
   }  // end if(!_display_off)
 
   lv_timer_handler();   // always: renders dirty areas (none while off) + polls touch (wakes us)
+
+  // After the render/flush pass (DMA may still be draining): shrink the draw buffers while an OTA is
+  // downloading so the TLS/lwIP stacks get the internal RAM they need (they can't go to PSRAM here),
+  // and restore the full buffers once it ends. Edge-driven + cheap; no-op when state is unchanged.
+  setLowMemDrawBuf(mproxy::otaBusy());
 
   // Fire any pending notification chime AFTER the wake + banner draw above, so the
   // slow first flush precedes the first note instead of stretching it. Subsequent

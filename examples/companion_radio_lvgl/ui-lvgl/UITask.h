@@ -167,6 +167,8 @@ class UITask : public AbstractUITask {
   double        _batt_learn_anchor = -1; // voltage-SoC at the last rest anchor (-1 = none)
   uint32_t      _batt_rest_since = 0;    // when the pack entered rest (0 = under load)
   uint32_t      _batt_soc_save_ms = 0;   // last time we checkpointed SoC to prefs (flash-wear throttle)
+  volatile int  _batt_raw_mv = 0;        // latest INA sample (mV), published by battSampleTask on core 0
+  volatile int  _batt_raw_ma = 0;        // latest INA sample (mA, signed); estimator reads these, no I2C
   bool          _sd_prev_ready = false;  // last-seen SD mounted state (to mark _sd_off_ts on removal)
   // Append to the RAM ring always (keeps recent history for the toggle) and to
   // the SD store when persistence is active.
@@ -506,7 +508,8 @@ class UITask : public AbstractUITask {
   // "<hex:type:name>" token + parsed parts); any other selection is CLIP_PLAIN.
   enum ClipKind : uint8_t { CLIP_EMPTY, CLIP_PLAIN, CLIP_CONTACT_REF, CLIP_MENTION };
   char            _crash_note[96];    // one-shot "crash report saved" toast, surfaced from loop()
-  char            _clip_text[1024];   // longest copyable today is the ~150B msg body
+  static constexpr size_t kClipTextCap = 1024;  // longest copyable today is the ~150B msg body
+  char*           _clip_text = nullptr;         // PSRAM (kClipTextCap) -- cold, doesn't need fast RAM
   uint8_t         _clip_kind;
   uint8_t         _clip_pubkey[PUB_KEY_SIZE];   // valid when kind == CLIP_CONTACT_REF
   char            _clip_name[CHAT_PEER_NAME_MAX];
@@ -640,8 +643,14 @@ class UITask : public AbstractUITask {
   lv_disp_draw_buf_t _draw_buf;
   lv_color_t*        _buf1;
   lv_color_t*        _buf2;
+  size_t             _buf_px = 0;          // pixels in the full (double) buffer; for low-mem restore
+  bool               _lvbuf_lowmem = false;// true while shrunk for an OTA (single tiny buffer)
   lv_disp_drv_t      _disp_drv;
   lv_indev_drv_t     _indev_drv;
+
+  void allocBigDrawBuf();        // (re)allocate the full DMA double buffer (with the fallback ladder)
+  void setLowMemDrawBuf(bool low);  // shrink/restore the draw buffer to free internal RAM during OTA
+  static void battSampleTask(void* arg);  // core-0 task: poll the INA219 + publish raw mV/mA (off the UI core)
 
   static UITask* _instance;
   static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p);
@@ -1259,8 +1268,7 @@ public:
         _chat_key[0] = 0;
         _banner_key[0] = 0;
         _search_filter[0] = 0;
-        _clip_text[0] = 0;
-        _crash_note[0] = 0;
+        _crash_note[0] = 0;   // _clip_text is PSRAM-allocated in begin()
         _joinch_name[0] = 0;
         _chinfo_name[0] = 0;
         memset(_chinfo_secret, 0, sizeof(_chinfo_secret));
