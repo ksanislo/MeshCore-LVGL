@@ -96,4 +96,7 @@ struct NodePrefs {  // persisted to file
   uint8_t  power_monitor;       // 0 = None (feature off), 1 = INA219 (room for more I2C/UART later)
   uint8_t  batt_type;           // 0 = 1S Li-ion, 1 = 2S Li-ion, 2 = 1S LiFePO4 (sets the V->% curve)
   uint16_t batt_capacity_mah;   // pack capacity for coulomb counting (0 -> default 5000)
+  uint16_t batt_soc_pmille;     // last fuel-gauge SoC, permille of full (0..1000); 0xFFFF = unset.
+                                // Periodically snapshotted so SoC survives a reboot (no power switch
+                                // on this board) instead of reseeding from a load-sagged voltage.
 };

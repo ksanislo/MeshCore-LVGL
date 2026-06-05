@@ -166,6 +166,7 @@ class UITask : public AbstractUITask {
   double        _batt_learn_mah = 0;     // coulomb accumulated since the last rest anchor (auto-learn)
   double        _batt_learn_anchor = -1; // voltage-SoC at the last rest anchor (-1 = none)
   uint32_t      _batt_rest_since = 0;    // when the pack entered rest (0 = under load)
+  uint32_t      _batt_soc_save_ms = 0;   // last time we checkpointed SoC to prefs (flash-wear throttle)
   bool          _sd_prev_ready = false;  // last-seen SD mounted state (to mark _sd_off_ts on removal)
   // Append to the RAM ring always (keeps recent history for the toggle) and to
   // the SD store when persistence is active.

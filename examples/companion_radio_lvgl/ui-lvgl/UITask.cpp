@@ -10861,7 +10861,18 @@ void UITask::updateBatteryGauge() {
 
   double vsoc = vpct / 100.0;
   uint32_t now = millis();
-  if (!_batt_soc_init) { _batt_soc_mah = vsoc * cap; _batt_soc_init = true; _batt_last_ms = now; }
+  if (!_batt_soc_init) {
+    // Seed from the SoC we snapshotted before power-down so we don't relearn from scratch (and so a
+    // load-sagged boot voltage doesn't read falsely low). But if the saved value disagrees with the
+    // voltage estimate by a lot, the pack was charged/drained while off -> it's stale, use voltage.
+    double seed = vsoc;
+    uint16_t ps = _node_prefs->batt_soc_pmille;
+    if (ps <= 1000) {
+      double psoc = ps / 1000.0;
+      if (psoc - vsoc < 0.25 && vsoc - psoc < 0.25) seed = psoc;
+    }
+    _batt_soc_mah = seed * cap; _batt_soc_init = true; _batt_last_ms = now;
+  }
   double dt_h = (double)(uint32_t)(now - _batt_last_ms) / 3600000.0;
   _batt_last_ms = now;
   _batt_soc_mah += (double)ma * dt_h;          // coulomb count (mAh)
@@ -10870,6 +10881,19 @@ void UITask::updateBatteryGauge() {
   // Anchor to voltage: strong near rest (terminal V ~= OCV), weak under load (let coulomb-count lead).
   bool rest = (ma > -60 && ma < 60);
   _batt_soc_mah += (vsoc * cap - _batt_soc_mah) * (rest ? 0.05 : 0.003);
+
+  // Snapshot SoC to flash so it survives a reboot (no power switch on this board -> no clean-shutdown
+  // hook, so we checkpoint periodically). Bounded for flash wear: only when it has moved >=3% AND at
+  // least 5 min since the last save. (Capacity is already persisted by the auto-learn block below.)
+  uint16_t pmille = (uint16_t)(_batt_soc_mah / cap * 1000.0 + 0.5);
+  if (pmille > 1000) pmille = 1000;
+  uint16_t saved = _node_prefs->batt_soc_pmille;
+  uint16_t diff  = (saved > 1000) ? 1000 : (pmille > saved ? pmille - saved : saved - pmille);
+  if (diff >= 30 && (uint32_t)(now - _batt_soc_save_ms) >= 300000) {
+    _node_prefs->batt_soc_pmille = pmille;
+    _batt_soc_save_ms = now;
+    pushPrefs();
+  }
 
   // Auto-learn capacity: at a settled rest point with a big SoC swing since the last rest anchor,
   // true capacity ~= |coulomb moved| / |SoC change|. Blend it in + persist, so the tracked state
