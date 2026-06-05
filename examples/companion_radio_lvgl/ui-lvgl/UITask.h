@@ -403,9 +403,10 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_ota_release_dd;  // release picker dropdown (shown when Additional options is on)
   lv_obj_t*       _set_ota_prerel_chk;  // "Include pre-releases" checkbox
   lv_obj_t*       _set_ota_customchk;   // "Custom URL" checkbox (shown only under pre-release)
-  lv_obj_t*       _set_ota_refresh_btn; // re-fetch the GitHub release list
   int             _ota_dd_map[16];      // dropdown visible index -> backend release index
   int             _ota_dd_count;        // entries currently in the dropdown / _ota_dd_map
+  bool            _ota_was_fetching = false;  // edge-detect fetch completion -> force a dropdown rebuild
+  uint32_t        _ota_last_check_ms = 0;     // millis of the last release check (0 = never; drives auto-recheck)
   lv_obj_t*       _nodeinfo_body;       // Node Info scroll container (for kb raise)
   lv_obj_t*       _nodeinfo_kb;         // keyboard for the OTA URL field on the Node Info screen
   lv_obj_t*       _otafail_popup;       // "firmware update failed" modal (backdrop)
@@ -1014,7 +1015,6 @@ private:
   static void ota_prerelease_cb(lv_event_t* e);    // include pre-releases (saved) -> re-fetch + rebuild list
   static void ota_custom_url_cb(lv_event_t* e);    // custom-URL mode (saved) -> reveal URL field
   static void ota_release_dd_cb(lv_event_t* e);    // release picked -> refresh current/latest hint
-  static void ota_refresh_cb(lv_event_t* e);       // re-fetch the GitHub release list
   void        updateOtaFieldStates();           // show/hide the disclosure controls; grey when no IP
   void        rebuildOtaReleaseList();          // (re)populate the dropdown from the backend cache
   void        wifiApplyFromForm();              // gather WiFi fields -> prefs -> ApplyWifi
@@ -1251,7 +1251,7 @@ public:
       _set_ntp_en(NULL), _set_ntp_server(NULL), _set_ntp_status(NULL), _set_preset_status(NULL),
       _set_ota_url_ta(NULL), _set_ota_url_field(NULL), _set_ota_status(NULL), _set_ota_btn(NULL), _set_ota_lbl(NULL),
       _set_ota_curlatest(NULL), _set_ota_morechk(NULL), _set_ota_release_field(NULL), _set_ota_release_dd(NULL),
-      _set_ota_prerel_chk(NULL), _set_ota_customchk(NULL), _set_ota_refresh_btn(NULL), _ota_dd_count(0),
+      _set_ota_prerel_chk(NULL), _set_ota_customchk(NULL), _ota_dd_count(0),
       _nodeinfo_body(NULL), _nodeinfo_kb(NULL),
       _otafail_popup(NULL), _otafail_lbl(NULL),
       _set_mqtt_en(NULL), _set_mqtt_host(NULL), _set_mqtt_port(NULL), _set_mqtt_user(NULL), _set_mqtt_pw(NULL),

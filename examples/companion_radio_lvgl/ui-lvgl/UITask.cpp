@@ -6820,15 +6820,8 @@ void UITask::buildNodeInfoScreen() {
   lv_label_set_long_mode(_set_ota_curlatest, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_color(_set_ota_curlatest, lv_color_hex(FG_HEX), 0);
   lv_label_set_text(_set_ota_curlatest, "");
-  // Re-fetch the GitHub release list.
-  _set_ota_refresh_btn = lv_btn_create(body);
-  lv_obj_set_width(_set_ota_refresh_btn, LV_PCT(100));
-  lv_obj_set_style_bg_opa(_set_ota_refresh_btn, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(_set_ota_refresh_btn, 1, 0);
-  lv_obj_set_style_border_color(_set_ota_refresh_btn, lv_color_hex(UI_BORDER), 0);
-  lv_obj_add_event_cb(_set_ota_refresh_btn, ota_refresh_cb, LV_EVENT_CLICKED, NULL);
-  { lv_obj_t* rl = lv_label_create(_set_ota_refresh_btn);
-    lv_label_set_text(rl, LV_SYMBOL_REFRESH " Check for updates"); lv_obj_center(rl); }
+  // (The release list auto-refreshes on open -- fresh boot or a stale check -- so there's no manual
+  // "check for updates" button; fast dev iteration goes through Custom URL instead.)
   // "Additional options" disclosure -> reveals the release picker + pre-release toggle.
   _set_ota_morechk = lv_checkbox_create(body);
   lv_checkbox_set_text(_set_ota_morechk, "Additional options");
@@ -6945,11 +6938,17 @@ void UITask::refreshNodeInfo() {
   if (_set_ota_url_ta && _set_ota_url_ta != _set_active_ta && p && p->ota_custom_url)
     lv_textarea_set_text(_set_ota_url_ta, p->ota_url);
 
-  // Pick up a freshly-arrived release list (the backend fetch finishes asynchronously) and (re)build
-  // the dropdown once when it changes, preserving the user's selection.
+  // Pick up a freshly-arrived release list and (re)build the dropdown -- on a count change OR right
+  // after a fetch completes (falling edge of releasesFetching), so an auto-refresh always repaints the
+  // current/latest line + dropdown without the user navigating away. Selection is preserved by tag.
   static int s_last_rel_count = -1;
+  bool fetching = mproxy::releasesFetching();
   int relc = mproxy::otaReleaseCount();
-  if (relc != s_last_rel_count) { s_last_rel_count = relc; rebuildOtaReleaseList(); }
+  if (relc != s_last_rel_count || (_ota_was_fetching && !fetching)) {
+    s_last_rel_count = relc;
+    rebuildOtaReleaseList();
+  }
+  _ota_was_fetching = fetching;
 
   // Current vs latest line. "Latest" = the newest visible release (dropdown is sorted newest-first).
   if (_set_ota_curlatest) {
@@ -7011,10 +7010,14 @@ void UITask::openNodeInfo() {
     setChk(_set_ota_morechk, _node_prefs->ota_prerelease || _node_prefs->ota_custom_url);
     if (_set_ota_url_ta) lv_textarea_set_text(_set_ota_url_ta, _node_prefs->ota_url);
   }
-  // Kick a release-list fetch if WiFi is up and nothing is cached yet (1 Hz timer surfaces the result).
+  // Auto-check for new releases on open: fresh boot (never checked), empty cache, or a stale check
+  // (>15 min). No manual button -- the 1 Hz timer surfaces the result. Fast dev iteration uses Custom URL.
   char ip[24], mask[24], gw[24], dns[24];
   mproxy::wifiIpInfo(ip, mask, gw, dns, 24);
-  if (ip[0] && mproxy::otaReleaseCount() == 0) mproxy::updateReleases();
+  const uint32_t OTA_CHECK_INTERVAL_MS = 15u * 60u * 1000u;
+  uint32_t now = millis();
+  bool stale = (_ota_last_check_ms == 0) || (uint32_t)(now - _ota_last_check_ms) > OTA_CHECK_INTERVAL_MS;
+  if (ip[0] && (mproxy::otaReleaseCount() == 0 || stale)) { mproxy::updateReleases(); _ota_last_check_ms = now; }
   refreshNodeInfo();
   if (!_nodeinfo_timer) _nodeinfo_timer = lv_timer_create(nodeinfo_timer_cb, 1000, this);
   else                  lv_timer_resume(_nodeinfo_timer);
@@ -11023,13 +11026,6 @@ void UITask::ota_custom_url_cb(lv_event_t* e) {
 
 void UITask::ota_release_dd_cb(lv_event_t* e) {
   (void)e;   // the picked release is read at Upgrade time; "Latest" stays the newest, so nothing to do
-}
-
-void UITask::ota_refresh_cb(lv_event_t* e) {
-  (void)e;
-  if (!_instance) return;
-  mproxy::updateReleases();
-  _instance->showToast("Checking for updates...");
 }
 
 // Show/hide the progressive-disclosure controls. Additional options reveals the release picker +
