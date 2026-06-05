@@ -393,9 +393,19 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_preset_status;   // radio-preset update status label
   char            _preset_status_last[40] = "";  // last-seen status (reload table on change)
   lv_obj_t*       _set_ota_url_ta;      // OTA firmware URL field (lives on the Node Info screen)
+  lv_obj_t*       _set_ota_url_field;   // makeField column wrapping the URL textarea (hidden unless custom mode)
   lv_obj_t*       _set_ota_status;      // OTA status label
   lv_obj_t*       _set_ota_btn;         // "Update firmware" button (greyed when no IP)
   lv_obj_t*       _set_ota_lbl;         // its label -> toggles to "Cancel upgrade" while downloading
+  lv_obj_t*       _set_ota_curlatest;   // "Current X / Latest Y" version label
+  lv_obj_t*       _set_ota_morechk;     // "Additional options" disclosure checkbox
+  lv_obj_t*       _set_ota_release_field;// makeField column wrapping the release dropdown (hide as a unit)
+  lv_obj_t*       _set_ota_release_dd;  // release picker dropdown (shown when Additional options is on)
+  lv_obj_t*       _set_ota_prerel_chk;  // "Include pre-releases" checkbox
+  lv_obj_t*       _set_ota_customchk;   // "Custom URL" checkbox (shown only under pre-release)
+  lv_obj_t*       _set_ota_refresh_btn; // re-fetch the GitHub release list
+  int             _ota_dd_map[16];      // dropdown visible index -> backend release index
+  int             _ota_dd_count;        // entries currently in the dropdown / _ota_dd_map
   lv_obj_t*       _nodeinfo_body;       // Node Info scroll container (for kb raise)
   lv_obj_t*       _nodeinfo_kb;         // keyboard for the OTA URL field on the Node Info screen
   lv_obj_t*       _otafail_popup;       // "firmware update failed" modal (backdrop)
@@ -452,6 +462,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_rxdelay_ta;      // RX delay base (seconds)
   lv_obj_t*       _set_airtime_ta;      // airtime budget factor
   lv_obj_t*       _set_gps_chk;         // enable optional UART GPS (reboot to apply)
+  lv_obj_t*       _set_gps_uart_dd = nullptr;  // which UART socket the GPS is on (reboot to apply)
   lv_obj_t*       _set_gps_interval_ta; // GPS auto-update interval (seconds)
   lv_obj_t*       _set_gps_status;      // live GPS debug line (detected/fix/sats/coords)
   lv_obj_t*       _set_radio_sw;        // LoRa radio on/off (off = safe to detach antenna)
@@ -998,7 +1009,14 @@ private:
   static void ntp_sync_cb(lv_event_t* e);       // "Sync clock now"
   static void presets_update_cb(lv_event_t* e); // "Update radio presets"
   static void set_ota_url_event_cb(lv_event_t* e); // OTA URL field: kb on focus, commit on defocus
-  static void ota_update_cb(lv_event_t* e);     // "Update firmware" -> post OtaUpdate
+  static void ota_update_cb(lv_event_t* e);     // "Update firmware" -> resolve source -> post OtaUpdate
+  static void ota_more_options_cb(lv_event_t* e);  // "Additional options" disclosure toggle
+  static void ota_prerelease_cb(lv_event_t* e);    // include pre-releases (saved) -> re-fetch + rebuild list
+  static void ota_custom_url_cb(lv_event_t* e);    // custom-URL mode (saved) -> reveal URL field
+  static void ota_release_dd_cb(lv_event_t* e);    // release picked -> refresh current/latest hint
+  static void ota_refresh_cb(lv_event_t* e);       // re-fetch the GitHub release list
+  void        updateOtaFieldStates();           // show/hide the disclosure controls; grey when no IP
+  void        rebuildOtaReleaseList();          // (re)populate the dropdown from the backend cache
   void        wifiApplyFromForm();              // gather WiFi fields -> prefs -> ApplyWifi
   void        updateWifiFieldStates();          // grey/enable IP fields per DHCP/override
   void        refreshNetStatus();               // update status labels + live IP fields
@@ -1037,6 +1055,7 @@ private:
   static void set_advnum_ta_event_cb(lv_event_t* e); // multiack / rxdelay / airtime / gps-interval fields
   void      commitAdvNumbers();
   static void set_gps_cb(lv_event_t* e);             // enable optional UART GPS
+  static void set_gps_uart_cb(lv_event_t* e);        // pick the GPS UART socket (UART0/UART1)
   static void set_radio_sw_cb(lv_event_t* e);        // LoRa radio on/off kill-switch
   static void pw_eye_cb(lv_event_t* e);              // generic inline show/hide (user_data = textarea)
   static lv_obj_t* attachInlineEye(lv_obj_t* ta);    // hidden-by-default + inline eye toggle
@@ -1230,7 +1249,10 @@ public:
       _set_wifi_dhcp(NULL), _set_wifi_dns_ovr(NULL), _set_wifi_ip(NULL), _set_wifi_mask(NULL),
       _set_wifi_gw(NULL), _set_wifi_dns(NULL), _set_wifi_status(NULL),
       _set_ntp_en(NULL), _set_ntp_server(NULL), _set_ntp_status(NULL), _set_preset_status(NULL),
-      _set_ota_url_ta(NULL), _set_ota_status(NULL), _set_ota_btn(NULL), _set_ota_lbl(NULL), _nodeinfo_body(NULL), _nodeinfo_kb(NULL),
+      _set_ota_url_ta(NULL), _set_ota_url_field(NULL), _set_ota_status(NULL), _set_ota_btn(NULL), _set_ota_lbl(NULL),
+      _set_ota_curlatest(NULL), _set_ota_morechk(NULL), _set_ota_release_field(NULL), _set_ota_release_dd(NULL),
+      _set_ota_prerel_chk(NULL), _set_ota_customchk(NULL), _set_ota_refresh_btn(NULL), _ota_dd_count(0),
+      _nodeinfo_body(NULL), _nodeinfo_kb(NULL),
       _otafail_popup(NULL), _otafail_lbl(NULL),
       _set_mqtt_en(NULL), _set_mqtt_host(NULL), _set_mqtt_port(NULL), _set_mqtt_user(NULL), _set_mqtt_pw(NULL),
       _set_mqtt_topic(NULL), _set_mqtt_tls(NULL), _set_mqtt_rx(NULL), _set_mqtt_tx(NULL), _set_mqtt_status(NULL),

@@ -125,8 +125,17 @@ public:
   void getNtpStatus(char* out, size_t cap);
   void updateRadioPresets();               // fetch official presets over HTTPS -> flash
   void getPresetStatus(char* out, size_t cap);
-  void startOtaTask();                     // spawn otaFromUrl on its own task so it never blocks the mesh
-  void otaFromUrl();                       // download a firmware .bin from prefs.ota_url -> OTA slot -> reboot
+  // GitHub-release OTA: fetch the releases list (tag/prerelease/asset URL) for the UI to choose from.
+#ifndef OTA_RELEASES_PER_PAGE
+  #define OTA_RELEASES_PER_PAGE 10
+#endif
+  struct OtaRelease { char tag[24]; bool prerelease; char url[160]; };  // url[160]: GitHub asset URLs exceed 96
+  void updateReleaseList();                // GET api.github.com/.../releases -> _ota_releases (backend core)
+  int  numReleases() const { return _ota_release_count; }
+  bool getRelease(int idx, OtaRelease& out) const;
+  void getReleaseStatus(char* out, size_t cap);
+  void startOtaTask(const char* url);      // spawn otaFromUrl on its own task; url stashed in _ota_target_url
+  void otaFromUrl();                       // download the firmware .bin from _ota_target_url -> OTA slot -> reboot
   void cancelOta();                        // request the in-flight download abort (safe: only the inactive slot)
   void getOtaStatus(char* out, size_t cap);
   bool otaBusy() const { return _ota_busy; }
@@ -162,6 +171,10 @@ protected:
   bool     _gps_owned_clock = false;  // GPS-preferred time: GPS held the clock last pass (NTP deferred)
   uint32_t _gps_lost_ms = 0;          // millis the GPS fix dropped (0 = healthy; grace before NTP takes over)
   char _preset_status[40] = "";       // last preset-update result, for the UI
+  OtaRelease _ota_releases[OTA_RELEASES_PER_PAGE];  // cached GitHub release list (backend-owned)
+  int  _ota_release_count = 0;        // valid entries in _ota_releases
+  char _ota_release_status[40] = "";  // last release-list fetch result, for the UI
+  char _ota_target_url[160] = "";     // resolved URL the core-1 OTA task downloads (release or custom)
   char _ota_status[48] = "idle";      // last OTA result/progress, for the UI
   volatile bool _ota_busy = false;    // an OTA task is running (one at a time)
   volatile bool _ota_cancel = false;  // UI requested abort -> the download loop bails (inactive slot only)

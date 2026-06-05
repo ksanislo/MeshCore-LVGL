@@ -16,6 +16,17 @@ volatile int g_batt_ma = 0;
   #include <Update.h>            // OTA: write a firmware image to the inactive app partition
   #include "cJSON.h"             // shipped with esp-idf -> zero extra flash
   #include "RadioPresetStore.h"
+  // GitHub-release OTA targets are set per-variant (see the CrowPanel platformio.ini). Default them
+  // so any other WiFi-enabled companion still compiles; the feature is only surfaced by the LVGL UI.
+  #ifndef OTA_GH_OWNER
+    #define OTA_GH_OWNER "ksanislo"
+  #endif
+  #ifndef OTA_GH_REPO
+    #define OTA_GH_REPO "MeshCore-LVGL"
+  #endif
+  #ifndef OTA_ASSET_NAME
+    #define OTA_ASSET_NAME "firmware.bin"
+  #endif
 #endif
 
 #define CMD_APP_START                 1
@@ -461,12 +472,26 @@ void MyMesh::getNtpStatus(char* out, size_t cap) {
   else             { strncpy(out, "waiting for time...", cap - 1); out[cap - 1] = 0; }
 }
 
+// Route cJSON's allocations to PSRAM. Both JSON fetches (presets and the GitHub releases list)
+// build a DOM whose peak can be tens of KB; internal SRAM is the scarce resource on this board,
+// PSRAM is 8MB. Call once before any cJSON_Parse. (Global hooks -> applies to both call sites.)
+static void* ota_json_malloc(size_t sz) { return ps_malloc(sz); }
+static void  ota_json_free(void* p)     { free(p); }
+static void ensurePsramJson() {
+  static bool inited = false;
+  if (inited) return;
+  cJSON_Hooks hooks; hooks.malloc_fn = ota_json_malloc; hooks.free_fn = ota_json_free;
+  cJSON_InitHooks(&hooks);
+  inited = true;
+}
+
 // Fetch the official region presets over HTTPS and persist them to internal flash so
 // they override the compiled-in seed table. Runs on the backend core (has WiFi). The
 // numeric fields arrive as strings in suggested_radio_settings.entries[].
 void MyMesh::updateRadioPresets() {
   auto fail = [this](const char* m) { strncpy(_preset_status, m, sizeof(_preset_status) - 1); _preset_status[sizeof(_preset_status) - 1] = 0; };
   if (WiFi.status() != WL_CONNECTED) { fail("no WiFi"); return; }
+  ensurePsramJson();
 
   WiFiClientSecure client;
   client.setInsecure();                 // v1: no cert verification (matches MqttBridge)
@@ -519,6 +544,96 @@ void MyMesh::getPresetStatus(char* out, size_t cap) {
   out[cap - 1] = 0;
 }
 
+// Query the GitHub Releases API and cache, for the UI, the last OTA_RELEASES_PER_PAGE releases that
+// carry an asset named OTA_ASSET_NAME (our board's firmware). Runs on the backend core (has WiFi).
+// The big JSON body + cJSON DOM both live in PSRAM (ensurePsramJson + a PSRAM read buffer).
+void MyMesh::updateReleaseList() {
+  auto fail = [this](const char* m) { strncpy(_ota_release_status, m, sizeof(_ota_release_status) - 1); _ota_release_status[sizeof(_ota_release_status) - 1] = 0; };
+  if (WiFi.status() != WL_CONNECTED) { fail("no WiFi"); return; }
+  ensurePsramJson();
+
+  WiFiClientSecure client;
+  client.setInsecure();                 // v1: no cert verification (matches the preset/OTA path)
+  HTTPClient http;
+  http.setTimeout(8000);
+  http.setConnectTimeout(8000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  char api[160];
+  snprintf(api, sizeof(api), "https://api.github.com/repos/%s/%s/releases?per_page=%d",
+           OTA_GH_OWNER, OTA_GH_REPO, OTA_RELEASES_PER_PAGE);
+  if (!http.begin(client, api)) { fail("connect failed"); return; }
+  http.addHeader("User-Agent", "MeshCore-LVGL-OTA");        // GitHub returns 403 without a User-Agent
+  http.addHeader("Accept", "application/vnd.github+json");
+  int code = http.GET();
+  if (code != 200) { http.end(); char b[40]; snprintf(b, sizeof(b), "HTTP %d", code); fail(b); return; }
+
+  // Stream the (chunked) body into a PSRAM buffer instead of an internal-SRAM String. per_page bounds it.
+  const size_t CAP = 48 * 1024;
+  char* body = (char*)ps_malloc(CAP);
+  if (!body) { http.end(); fail("no PSRAM"); return; }
+  WiFiClient* stream = http.getStreamPtr();
+  size_t len = 0; uint32_t last = millis();
+  while (len < CAP - 1) {
+    size_t avail = stream->available();
+    if (avail) {
+      int r = stream->readBytes(body + len, avail > (CAP - 1 - len) ? (CAP - 1 - len) : avail);
+      if (r > 0) { len += r; last = millis(); }
+    } else if (!http.connected()) {
+      break;                                                 // drained + closed -> done
+    } else if (millis() - last > 8000) {
+      break;                                                 // stall guard
+    } else { delay(2); }
+  }
+  body[len] = 0;
+  http.end();
+
+  cJSON* root = cJSON_Parse(body);
+  free(body);                                                // cJSON copied what it needs
+  if (!cJSON_IsArray(root)) { if (root) cJSON_Delete(root); fail("bad JSON"); return; }
+
+  int n = 0;
+  cJSON* rel = nullptr;
+  cJSON_ArrayForEach(rel, root) {
+    if (n >= OTA_RELEASES_PER_PAGE) break;
+    cJSON* tag    = cJSON_GetObjectItem(rel, "tag_name");
+    cJSON* pre    = cJSON_GetObjectItem(rel, "prerelease");
+    cJSON* assets = cJSON_GetObjectItem(rel, "assets");
+    if (!cJSON_IsString(tag) || !cJSON_IsArray(assets)) continue;
+    const char* dl = nullptr;                                // find OUR asset's download URL
+    cJSON* a = nullptr;
+    cJSON_ArrayForEach(a, assets) {
+      cJSON* aname = cJSON_GetObjectItem(a, "name");
+      if (cJSON_IsString(aname) && strcmp(aname->valuestring, OTA_ASSET_NAME) == 0) {
+        cJSON* aurl = cJSON_GetObjectItem(a, "browser_download_url");
+        if (cJSON_IsString(aurl)) dl = aurl->valuestring;
+        break;
+      }
+    }
+    if (!dl) continue;                                       // no firmware for this board in this release
+    OtaRelease& r = _ota_releases[n];
+    memset(&r, 0, sizeof(r));
+    strncpy(r.tag, tag->valuestring, sizeof(r.tag) - 1);
+    r.prerelease = cJSON_IsTrue(pre);
+    strncpy(r.url, dl, sizeof(r.url) - 1);
+    n++;
+  }
+  cJSON_Delete(root);
+  _ota_release_count = n;
+  if (n == 0) snprintf(_ota_release_status, sizeof(_ota_release_status), "no matching assets");
+  else        snprintf(_ota_release_status, sizeof(_ota_release_status), "%d releases", n);
+}
+
+bool MyMesh::getRelease(int idx, OtaRelease& out) const {
+  if (idx < 0 || idx >= _ota_release_count) return false;
+  out = _ota_releases[idx];
+  return true;
+}
+
+void MyMesh::getReleaseStatus(char* out, size_t cap) {
+  strncpy(out, _ota_release_status[0] ? _ota_release_status : "tap refresh", cap - 1);
+  out[cap - 1] = 0;
+}
+
 void MyMesh::getOtaStatus(char* out, size_t cap) {
   strncpy(out, _ota_status, cap - 1);
   out[cap - 1] = 0;
@@ -547,11 +662,13 @@ void MyMesh::otaTaskTramp(void* arg) {
 
 // Spawn the OTA download on its own task pinned to core 1, off the mesh's core 0 -- a slow
 // (or 30-minute) download must NOT block packet RX, since a missed LoRa packet is gone forever.
-void MyMesh::startOtaTask() {
+void MyMesh::startOtaTask(const char* url) {
   if (_ota_busy) {           // one update at a time
     strncpy(_ota_status, "already updating", sizeof(_ota_status) - 1); _ota_status[sizeof(_ota_status) - 1] = 0;
     return;
   }
+  strncpy(_ota_target_url, url ? url : "", sizeof(_ota_target_url) - 1);   // the resolved release/custom URL
+  _ota_target_url[sizeof(_ota_target_url) - 1] = 0;
   _ota_busy = true;
   _ota_cancel = false;       // clear any stale request from a prior run
   // Reflect "busy" in the status the instant the button flips to Cancel. The task's
@@ -577,7 +694,7 @@ void MyMesh::otaFromUrl() {
   // Any failure path: set the status AND fire the UI hook so an on-device modal can warn the
   // user (we don't reboot on failure, so a walked-away user would otherwise see nothing).
   auto fail = [this, &set](const char* m) { _ota_client = nullptr; set(m); if (_ui) _ui->otaFailed(m); };
-  const char* url = getNodePrefs()->ota_url;
+  const char* url = _ota_target_url;   // resolved by the caller: a GitHub asset URL or the custom ota_url
   if (!url[0])                         { fail("no URL set"); return; }
   if (WiFi.status() != WL_CONNECTED)   { fail("no WiFi"); return; }
   if (_ota_cancel)                     { set("cancelled"); return; }  // cancelled before we even connect
@@ -1451,6 +1568,8 @@ void MyMesh::begin(bool has_display) {
   _prefs.sigmeter_hold_s = 30;   _prefs.sigmeter_decay_s = 100;
   _prefs.show_chat_meta = 0;     // off by default; opt in via Display settings
   _prefs.ota_url[0] = 0;         // OTA firmware URL (set via Settings)
+  _prefs.ota_prerelease = 0;     // OTA: stable releases only by default
+  _prefs.ota_custom_url = 0;     // OTA: GitHub-release mode by default (not the manual URL)
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
 
   // sanitise bad pref values

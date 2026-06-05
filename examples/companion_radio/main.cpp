@@ -311,7 +311,13 @@ void setup() {
   // (Explicit pins: the shared initBasicGPS() calls Serial1.setPins() before begin(), a no-op on ESP32
   // since the UART driver isn't up yet to attach pins -- so we install the driver on 17/18 first.)
   if (the_mesh.getNodePrefs()->gps_enabled) {
-    Serial1.begin(GPS_BAUD_RATE, SERIAL_8N1, PIN_GPS_TX, PIN_GPS_RX);
+    // Socket select (gps_uart): 0 = UART0 (IO43/44, rear plug), 1 = UART1 (IO17/18, default). Both ride
+    // Serial1 -- we just route it to the chosen pins. Serial1.begin(baud, cfg, rxPin, txPin): rxPin = ESP
+    // RX (<- GPS TX), txPin = ESP TX (-> GPS RX).
+    bool uart0 = (the_mesh.getNodePrefs()->gps_uart == 0);
+    int espRx = uart0 ? PIN_GPS_TX_ALT : PIN_GPS_TX;   // ESP RX <- GPS TX
+    int espTx = uart0 ? PIN_GPS_RX_ALT : PIN_GPS_RX;   // ESP TX -> GPS RX
+    Serial1.begin(GPS_BAUD_RATE, SERIAL_8N1, espRx, espTx);
     sensors.begin();
     the_mesh.applyGpsPrefs();
   }

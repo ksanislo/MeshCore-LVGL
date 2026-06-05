@@ -67,16 +67,22 @@ extern "C" void board_set_backlight(uint8_t duty) {
 extern bool board_i2c_lock(uint32_t timeout_ms);
 extern void board_i2c_unlock();
 
+// Set false to force ONE full Wire.end()+begin() on the next read. We do NOT end()+begin() per read:
+// that uninstalls/reallocates the IDF i2c driver every time, fragmenting the internal heap over hours
+// (which starved lwIP/TLS and dragged OTA). But a single full re-init IS required to bootstrap the bus:
+// the RTC's boot Wire.begin() isn't enough once the LGFX touch driver has configured port 0, so a cold
+// read just returns 0 (icon never appears) until something does a real end()+begin() -- which is why
+// opening Node Info, whose board_i2c_scan() does exactly that, used to "fix" it. So: full re-init once
+// at first read (and again after any failure, to self-heal a wedged bus), cheap no-op begin() after.
+static bool s_ina_bus_inited = false;
+
 static bool ina219_read16(uint8_t reg, uint16_t& out) {
   if (!board_i2c_lock(100)) return false;
-  // Don't end()+begin() the I2C driver per read. Wire.end() uninstalls the IDF i2c driver and frees its
-  // buffers; the following begin() reinstalls + reallocates them -- doing that every 5 s fragments the
-  // internal heap over hours, which starved the lwIP/TLS large allocations and made OTA drag worse the
-  // longer the device had been up. Instead just (re)assert the bus like CrowPanelRTCClock does:
-  // Wire.begin() early-returns once the driver is installed (no churn), and the IDF driver re-programs
-  // the peripheral per transaction, so it recovers from the touch driver's register-level use without a
-  // full re-init. The bus is shared safely via board_i2c_lock either way.
-  Wire.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL);     // I2C port 0 (shared with touch); cheap no-op once init
+  if (!s_ina_bus_inited) {
+    Wire.end();                                 // one-shot: claim port 0 cleanly from the touch driver
+    s_ina_bus_inited = true;
+  }
+  Wire.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL);     // installs on the post-end() call; cheap no-op after
   Wire.setClock(100000);                        // 100 kHz: robust on the multi-drop touch bus
   bool ok = false;
   for (int attempt = 0; attempt < 4 && !ok; attempt++) {   // contended bus -> retry a few times
@@ -87,6 +93,7 @@ static bool ina219_read16(uint8_t reg, uint16_t& out) {
     out = ((uint16_t)Wire.read() << 8) | (uint8_t)Wire.read();
     ok = true;
   }
+  if (!ok) s_ina_bus_inited = false;            // bus may be wedged -> force a full re-init next read
   board_i2c_unlock();
   return ok;
 }

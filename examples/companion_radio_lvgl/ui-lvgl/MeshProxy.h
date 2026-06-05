@@ -70,7 +70,8 @@ enum class CmdKind : uint8_t {
   ApplyMqtt,    // copy prefs (mqtt_*) + save + (re)start the MQTT bridge
   SyncNtp,      // kick an immediate NTP clock sync
   UpdatePresets,// fetch the official radio presets over HTTPS -> internal flash
-  OtaUpdate,    // download prefs.ota_url firmware -> OTA partition -> reboot
+  UpdateReleases,// fetch the GitHub releases list (tags + our asset URLs) -> backend cache
+  OtaUpdate,    // download firmware -> OTA partition -> reboot. ota_mode/ota_release_idx pick the source
   OtaCancel,    // abort an in-flight OTA download (safe: only the inactive slot is touched)
 };
 
@@ -98,6 +99,11 @@ struct MeshCmd {
   ContactInfo contact;
   // UpdatePrefs / ApplyRadio
   NodePrefs prefs;
+  // OtaUpdate: pick the firmware source. The backend resolves the URL itself (keeps the long GitHub
+  // asset URL out of the queued command). 0 = GitHub release at _ota_releases[ota_release_idx];
+  // 1 = custom URL (prefs.ota_url).
+  uint8_t  ota_mode;
+  int8_t   ota_release_idx;
 };
 
 // ---- Events (backend → UI) -------------------------------------------------
@@ -185,6 +191,11 @@ void ntpStatus(char* out, size_t cap);   // NTP clock-sync status for the UI
 void presetStatus(char* out, size_t cap);   // radio-preset update status for the UI
 void otaStatus(char* out, size_t cap);       // OTA firmware-update status for the UI
 bool otaBusy();                              // true while an OTA download task is running
+// GitHub-release OTA: trigger a fetch, then read the cached list (newest-first, our-asset releases only).
+void updateReleases();                       // post UpdateReleases (backend re-fetches the list)
+int  otaReleaseCount();                      // cached releases available to choose from
+bool otaRelease(int idx, char* tag, size_t tag_cap, bool* prerelease, char* url, size_t url_cap);
+void otaReleaseStatus(char* out, size_t cap);// last release-list fetch result for the UI
 int  copyMutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);    // seed the UI's explicit-muted set at begin()
 int  copyUnmutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);  // seed the UI's explicit-unmuted set at begin()
 uint32_t rtcSeconds();             // live device clock (ESP32 internal RTC; safe cross-core)

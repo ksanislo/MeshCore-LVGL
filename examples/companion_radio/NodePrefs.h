@@ -99,4 +99,10 @@ struct NodePrefs {  // persisted to file
   uint16_t batt_soc_pmille;     // last fuel-gauge SoC, permille of full (0..1000); 0xFFFF = unset.
                                 // Periodically snapshotted so SoC survives a reboot (no power switch
                                 // on this board) instead of reseeding from a load-sagged voltage.
+  uint8_t  gps_uart;            // which UART socket the GPS is on: 0 = UART0 (IO43/44, rear plug),
+                                // 1 = UART1 (IO17/18, default). Both ride Serial1 (re-pinned at boot).
+  // GitHub-release OTA options (tail-appended; default 0 -> stable GitHub-release mode). The
+  // custom URL itself reuses ota_url above. Defaulted before read, so old/short prefs files keep 0.
+  uint8_t  ota_prerelease;      // 1 = include pre-releases in the update list / "latest"
+  uint8_t  ota_custom_url;      // 1 = manual-URL mode (flash ota_url), 0 = GitHub release mode
 };

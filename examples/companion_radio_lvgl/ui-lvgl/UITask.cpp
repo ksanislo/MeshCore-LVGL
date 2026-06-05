@@ -6751,6 +6751,29 @@ void UITask::login_kb_event_cb(lv_event_t* e) {
 
 // ===== Node-info / status screen =========================================
 
+// Parse "MAJOR.MINOR.PATCH" (optionally a leading 'v') into v[3]; missing components default to 0,
+// and a trailing suffix like "-rc1" stops parsing. Returns false on non-numeric garbage. Used to
+// compare the on-device version against GitHub release tags and to sort the release dropdown.
+static bool parseSemver(const char* s, int v[3]) {
+  v[0] = v[1] = v[2] = 0;
+  if (!s) return false;
+  while (*s == 'v' || *s == 'V' || *s == ' ') s++;
+  if (*s < '0' || *s > '9') return false;
+  for (int part = 0; *s && part < 3; ) {
+    int n = 0; bool any = false;
+    while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); s++; any = true; }
+    if (!any) break;
+    v[part++] = n;
+    if (*s == '.') s++; else break;        // stop at '-rc1' / end
+  }
+  return true;
+}
+// -1 if a<b, +1 if a>b, 0 if equal.
+static int cmpSemver(const int a[3], const int b[3]) {
+  for (int i = 0; i < 3; i++) if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+  return 0;
+}
+
 void UITask::buildNodeInfoScreen() {
   if (_nodeinfo_screen) return;
   _nodeinfo_screen = lv_obj_create(NULL);
@@ -6782,12 +6805,50 @@ void UITask::buildNodeInfoScreen() {
     lv_label_set_text(sec, "Firmware update");
     lv_obj_set_style_text_color(sec, lv_color_hex(UI_ACCENT), 0);
     lv_obj_set_style_text_font(sec, fontHeading(), 0); }
-  { lv_obj_t* f = makeField(body, "Firmware URL (.bin)");
-    _set_ota_url_ta = makeSelTextarea(f);
-    lv_textarea_set_one_line(_set_ota_url_ta, true);
-    lv_obj_add_event_cb(_set_ota_url_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
-    lv_obj_set_width(_set_ota_url_ta, LV_PCT(100));
-    lv_obj_add_event_cb(_set_ota_url_ta, set_ota_url_event_cb, LV_EVENT_ALL, NULL); }
+  // Current vs latest version line (filled in refreshNodeInfo from the cached release list).
+  _set_ota_curlatest = lv_label_create(body);
+  lv_obj_set_width(_set_ota_curlatest, LV_PCT(100));
+  lv_label_set_long_mode(_set_ota_curlatest, LV_LABEL_LONG_WRAP);
+  lv_obj_set_style_text_color(_set_ota_curlatest, lv_color_hex(FG_HEX), 0);
+  lv_label_set_text(_set_ota_curlatest, "");
+  // Re-fetch the GitHub release list.
+  _set_ota_refresh_btn = lv_btn_create(body);
+  lv_obj_set_width(_set_ota_refresh_btn, LV_PCT(100));
+  lv_obj_set_style_bg_opa(_set_ota_refresh_btn, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(_set_ota_refresh_btn, 1, 0);
+  lv_obj_set_style_border_color(_set_ota_refresh_btn, lv_color_hex(UI_BORDER), 0);
+  lv_obj_add_event_cb(_set_ota_refresh_btn, ota_refresh_cb, LV_EVENT_CLICKED, NULL);
+  { lv_obj_t* rl = lv_label_create(_set_ota_refresh_btn);
+    lv_label_set_text(rl, LV_SYMBOL_REFRESH " Check for updates"); lv_obj_center(rl); }
+  // "Additional options" disclosure -> reveals the release picker + pre-release toggle.
+  _set_ota_morechk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_ota_morechk, "Additional options");
+  lv_obj_set_style_text_color(_set_ota_morechk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_ota_morechk, ota_more_options_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  // Release picker (choose an older release than latest). Hidden until Additional options is on.
+  _set_ota_release_field = makeField(body, "Release");
+  _set_ota_release_dd = lv_dropdown_create(_set_ota_release_field);
+  lv_dropdown_set_options(_set_ota_release_dd, " ");
+  lv_obj_set_width(_set_ota_release_dd, LV_PCT(100));
+  lv_obj_add_event_cb(_set_ota_release_dd, ota_release_dd_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  // Include pre-releases (persisted). Hidden until Additional options is on.
+  _set_ota_prerel_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_ota_prerel_chk, "Include pre-releases");
+  lv_obj_set_style_text_color(_set_ota_prerel_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_ota_prerel_chk, ota_prerelease_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  // Custom-URL mode (persisted). Hidden until pre-releases are enabled.
+  _set_ota_customchk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_ota_customchk, "Custom URL");
+  lv_obj_set_style_text_color(_set_ota_customchk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_ota_customchk, ota_custom_url_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  // Manual firmware URL (dev server). Hidden unless custom-URL mode is on.
+  _set_ota_url_field = makeField(body, "Firmware URL (.bin)");
+  _set_ota_url_ta = makeSelTextarea(_set_ota_url_field);
+  lv_textarea_set_one_line(_set_ota_url_ta, true);
+  lv_obj_add_event_cb(_set_ota_url_ta, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+  lv_obj_set_width(_set_ota_url_ta, LV_PCT(100));
+  lv_obj_add_event_cb(_set_ota_url_ta, set_ota_url_event_cb, LV_EVENT_ALL, NULL);
+  // Upgrade / Cancel button (morph + cancel logic unchanged).
   _set_ota_btn = lv_btn_create(body);
   lv_obj_set_width(_set_ota_btn, LV_PCT(100));
   lv_obj_set_style_bg_color(_set_ota_btn, lv_color_hex(UI_ACCENT), 0);  // baseline; flips red while downloading
@@ -6872,8 +6933,35 @@ void UITask::refreshNodeInfo() {
   char ip[24], mask[24], gw[24], dns[24];
   mproxy::wifiIpInfo(ip, mask, gw, dns, 24);
   bool hasIp = ip[0] != 0;
-  if (_set_ota_url_ta && _set_ota_url_ta != _set_active_ta && p)
+  if (_set_ota_url_ta && _set_ota_url_ta != _set_active_ta && p && p->ota_custom_url)
     lv_textarea_set_text(_set_ota_url_ta, p->ota_url);
+
+  // Pick up a freshly-arrived release list (the backend fetch finishes asynchronously) and (re)build
+  // the dropdown once when it changes, preserving the user's selection.
+  static int s_last_rel_count = -1;
+  int relc = mproxy::otaReleaseCount();
+  if (relc != s_last_rel_count) { s_last_rel_count = relc; rebuildOtaReleaseList(); }
+
+  // Current vs latest line. "Latest" = the newest visible release (dropdown is sorted newest-first).
+  if (_set_ota_curlatest) {
+    int cv[3]; parseSemver(LVGL_GUI_VERSION, cv);
+    char latestTag[24] = ""; bool pr; char rurl[160];
+    if (_ota_dd_count > 0) mproxy::otaRelease(_ota_dd_map[0], latestTag, sizeof(latestTag), &pr, rurl, sizeof(rurl));
+    char cl[120];
+    if (latestTag[0]) {
+      int lvr[3]; parseSemver(latestTag, lvr);
+      int c = cmpSemver(lvr, cv);
+      const char* note = c > 0 ? "  (update available)" : (c == 0 ? "  (up to date)" : "");
+      snprintf(cl, sizeof(cl), "Current %s / Latest %s%s", LVGL_GUI_VERSION, latestTag, note);
+    } else {
+      char rs[40]; mproxy::otaReleaseStatus(rs, sizeof(rs));
+      snprintf(cl, sizeof(cl), "Current %s / Latest: %s", LVGL_GUI_VERSION, hasIp ? rs : "switch to WiFi");
+    }
+    lv_label_set_text(_set_ota_curlatest, cl);
+  }
+
+  updateOtaFieldStates();   // disclosure visibility + grey controls when no IP
+
   auto en = [&](lv_obj_t* o) {
     if (!o) return;
     if (hasIp) lv_obj_clear_state(o, LV_STATE_DISABLED);
@@ -6905,6 +6993,19 @@ void UITask::refreshNodeInfo() {
 
 void UITask::openNodeInfo() {
   buildNodeInfoScreen();
+  // Restore the persisted OTA option toggles from prefs (model: the gps_uart dropdown restore).
+  if (_node_prefs) {
+    auto setChk = [](lv_obj_t* o, bool on) { if (!o) return; if (on) lv_obj_add_state(o, LV_STATE_CHECKED); else lv_obj_clear_state(o, LV_STATE_CHECKED); };
+    setChk(_set_ota_prerel_chk, _node_prefs->ota_prerelease);
+    setChk(_set_ota_customchk,  _node_prefs->ota_custom_url);
+    // Auto-expand "Additional options" when a persisted sub-option is set.
+    setChk(_set_ota_morechk, _node_prefs->ota_prerelease || _node_prefs->ota_custom_url);
+    if (_set_ota_url_ta) lv_textarea_set_text(_set_ota_url_ta, _node_prefs->ota_url);
+  }
+  // Kick a release-list fetch if WiFi is up and nothing is cached yet (1 Hz timer surfaces the result).
+  char ip[24], mask[24], gw[24], dns[24];
+  mproxy::wifiIpInfo(ip, mask, gw, dns, 24);
+  if (ip[0] && mproxy::otaReleaseCount() == 0) mproxy::updateReleases();
   refreshNodeInfo();
   if (!_nodeinfo_timer) _nodeinfo_timer = lv_timer_create(nodeinfo_timer_cb, 1000, this);
   else                  lv_timer_resume(_nodeinfo_timer);
@@ -8297,6 +8398,9 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_checkbox_set_text(_set_gps_chk, "Enable GPS (reboot)");
   lv_obj_set_style_text_color(_set_gps_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_gps_chk, set_gps_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  // Which UART socket the module is plugged into. Option index == gps_uart value == the UART number.
+  _set_gps_uart_dd = makeDropdownField(body, "GPS UART (reboot)", "UART0 (IO43/44)\nUART1 (IO17/18)");
+  lv_obj_add_event_cb(_set_gps_uart_dd, set_gps_uart_cb, LV_EVENT_VALUE_CHANGED, NULL);
   _set_gps_interval_ta = makeNumberField(body, "GPS interval (s)", set_advnum_ta_event_cb);
   // Live GPS debug line (module detected / fix / satellites / coords), refreshed at 1 Hz
   // while this pane is open. sensors.loop() runs on this (UI/core-1) loop, so reading
@@ -8809,6 +8913,7 @@ void UITask::populateSettings() {
     if (_node_prefs->gps_enabled) lv_obj_add_state(_set_gps_chk, LV_STATE_CHECKED);
     else                          lv_obj_clear_state(_set_gps_chk, LV_STATE_CHECKED);
   }
+  if (_set_gps_uart_dd) lv_dropdown_set_selected(_set_gps_uart_dd, _node_prefs->gps_uart <= 1 ? _node_prefs->gps_uart : 1);
   if (_set_gps_interval_ta) { snprintf(nb, sizeof(nb), "%u", _node_prefs->gps_interval); lv_textarea_set_text(_set_gps_interval_ta, nb); }
 
   if (_set_radio_sw) {
@@ -10453,6 +10558,15 @@ void UITask::set_gps_cb(lv_event_t* e) {
   _instance->showToast("Saved (reboot to apply GPS)");
 }
 
+void UITask::set_gps_uart_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  // Dropdown index maps 1:1 to gps_uart (0 = UART0/IO43-44, 1 = UART1/IO17-18). main.cpp routes Serial1
+  // to the matching pins at boot, so this only takes effect on reboot.
+  _instance->_node_prefs->gps_uart = (uint8_t)lv_dropdown_get_selected(lv_event_get_target(e));
+  pushPrefs();
+  _instance->showToast("Saved (reboot to apply GPS)");
+}
+
 void UITask::set_radio_sw_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
@@ -10846,7 +10960,20 @@ void UITask::ota_update_cb(lv_event_t* e) {
     _instance->showToast("Cancelling upgrade...");   // safe: only the inactive slot is discarded
     return;
   }
-  if (!_instance->_node_prefs->ota_url[0]) { _instance->showToast("Set a firmware URL first"); return; }
+  // Resolve the firmware source. Custom mode -> the manual URL; otherwise the selected release (the
+  // dropdown defaults to the newest, so a plain tap flashes "latest"). The backend resolves the actual
+  // URL from ota_mode + ota_release_idx, so the long GitHub asset URL never rides the command queue.
+  mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::OtaUpdate;
+  if (_instance->_node_prefs->ota_custom_url) {
+    if (!_instance->_node_prefs->ota_url[0]) { _instance->showToast("Set a firmware URL first"); return; }
+    c.ota_mode = 1;
+  } else {
+    if (_instance->_ota_dd_count <= 0) { _instance->showToast("No release found - tap Check for updates"); return; }
+    int sel = _instance->_set_ota_release_dd ? (int)lv_dropdown_get_selected(_instance->_set_ota_release_dd) : 0;
+    if (sel < 0 || sel >= _instance->_ota_dd_count) sel = 0;
+    c.ota_mode = 0;
+    c.ota_release_idx = (int8_t)_instance->_ota_dd_map[sel];
+  }
   // Pre-flight PSRAM reclaim. LVGL's object pool + the emoji glyph cache live in PSRAM, and the
   // WiFi/lwIP RX buffers are PSRAM-backed too -- so after heavy channel/scroll use the download can
   // stall on starved packet buffers. Free the emoji cache (up to ~768KB) first; it re-decodes from
@@ -10855,8 +10982,110 @@ void UITask::ota_update_cb(lv_event_t* e) {
   SdSvc::emojiBitmapCacheEvict();
   Serial.printf("[OTA] pre-flight: psram %u -> %u, largest-heap=%u\n",
                 (unsigned)psram_before, (unsigned)ESP.getFreePsram(), (unsigned)ESP.getMaxAllocHeap());
-  mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::OtaUpdate; mproxy::postCommand(c);
+  mproxy::postCommand(c);
   _instance->showToast("Downloading firmware...");   // runs on its own task; status line updates at 1 Hz
+}
+
+void UITask::ota_more_options_cb(lv_event_t* e) {
+  (void)e;
+  if (_instance) _instance->updateOtaFieldStates();
+}
+
+void UITask::ota_prerelease_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  _instance->_node_prefs->ota_prerelease = on ? 1 : 0;
+  if (!on && _instance->_set_ota_customchk) {   // Custom URL lives under pre-release -> collapse it too
+    lv_obj_clear_state(_instance->_set_ota_customchk, LV_STATE_CHECKED);
+    _instance->_node_prefs->ota_custom_url = 0;
+  }
+  pushPrefs();
+  _instance->updateOtaFieldStates();
+  _instance->rebuildOtaReleaseList();           // pre-releases enter/leave the visible set
+  mproxy::updateReleases();                      // keep the cache fresh
+}
+
+void UITask::ota_custom_url_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  _instance->_node_prefs->ota_custom_url = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0;
+  pushPrefs();
+  _instance->updateOtaFieldStates();
+}
+
+void UITask::ota_release_dd_cb(lv_event_t* e) {
+  (void)e;   // the picked release is read at Upgrade time; "Latest" stays the newest, so nothing to do
+}
+
+void UITask::ota_refresh_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  mproxy::updateReleases();
+  _instance->showToast("Checking for updates...");
+}
+
+// Show/hide the progressive-disclosure controls. Additional options reveals the release picker +
+// pre-release toggle; pre-release reveals the Custom URL checkbox; Custom URL reveals the URL field.
+void UITask::updateOtaFieldStates() {
+  if (!_node_prefs) return;
+  bool more   = (_set_ota_morechk && lv_obj_has_state(_set_ota_morechk, LV_STATE_CHECKED))
+                || _node_prefs->ota_prerelease || _node_prefs->ota_custom_url;
+  bool prerel = _set_ota_prerel_chk && lv_obj_has_state(_set_ota_prerel_chk, LV_STATE_CHECKED);
+  bool custom = _set_ota_customchk && lv_obj_has_state(_set_ota_customchk, LV_STATE_CHECKED);
+  auto vis = [](lv_obj_t* o, bool show) {
+    if (!o) return;
+    if (show) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+    else      lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+  };
+  vis(_set_ota_release_field, more && !custom);   // picking a release is moot in custom-URL mode
+  vis(_set_ota_prerel_chk,    more);
+  vis(_set_ota_customchk,     more && prerel);
+  vis(_set_ota_url_field,     more && prerel && custom);
+}
+
+// (Re)populate the release dropdown from the backend cache: filter pre-releases per the pref, sort
+// newest-first by semver, and keep the user's current selection (matched by tag). _ota_dd_map maps a
+// visible dropdown index back to the backend release index for the Upgrade command.
+void UITask::rebuildOtaReleaseList() {
+  if (!_set_ota_release_dd) return;
+  bool prerel = _node_prefs && _node_prefs->ota_prerelease;
+  int idx[16], cnt = 0;
+  int total = mproxy::otaReleaseCount();
+  for (int i = 0; i < total && cnt < 16; i++) {
+    char tag[24]; bool pr; char u[160];
+    if (!mproxy::otaRelease(i, tag, sizeof(tag), &pr, u, sizeof(u))) continue;
+    if (pr && !prerel) continue;                  // hide pre-releases unless opted in
+    idx[cnt++] = i;
+  }
+  // Insertion sort newest-first by semver (cnt is tiny).
+  for (int a = 1; a < cnt; a++) {
+    int key = idx[a], kv[3]; char kt[24]; bool pr; char u[160];
+    mproxy::otaRelease(key, kt, sizeof(kt), &pr, u, sizeof(u)); parseSemver(kt, kv);
+    int b = a - 1;
+    while (b >= 0) {
+      char bt[24]; int bv[3];
+      mproxy::otaRelease(idx[b], bt, sizeof(bt), &pr, u, sizeof(u)); parseSemver(bt, bv);
+      if (cmpSemver(bv, kv) >= 0) break;           // bv newer-or-equal -> stays ahead
+      idx[b + 1] = idx[b]; b--;
+    }
+    idx[b + 1] = key;
+  }
+  // Remember the current selection's tag so it survives the rebuild.
+  char prevTag[24] = "";
+  if (_ota_dd_count > 0) {
+    int sel = (int)lv_dropdown_get_selected(_set_ota_release_dd);
+    if (sel >= 0 && sel < _ota_dd_count) { bool pr; char u[160]; mproxy::otaRelease(_ota_dd_map[sel], prevTag, sizeof(prevTag), &pr, u, sizeof(u)); }
+  }
+  char opts[16 * 32]; int on = 0; opts[0] = 0; int newSel = 0;
+  for (int i = 0; i < cnt; i++) {
+    char tag[24]; bool pr; char u[160];
+    mproxy::otaRelease(idx[i], tag, sizeof(tag), &pr, u, sizeof(u));
+    _ota_dd_map[i] = idx[i];
+    if (prevTag[0] && strcmp(prevTag, tag) == 0) newSel = i;
+    on += snprintf(opts + on, sizeof(opts) - on, "%s%s%s", i ? "\n" : "", tag, pr ? " (pre)" : "");
+  }
+  _ota_dd_count = cnt;
+  if (cnt == 0) lv_dropdown_set_options(_set_ota_release_dd, " ");
+  else { lv_dropdown_set_options(_set_ota_release_dd, opts); lv_dropdown_set_selected(_set_ota_release_dd, newSel); }
 }
 
 void UITask::mqtt_save_cb(lv_event_t* e) {

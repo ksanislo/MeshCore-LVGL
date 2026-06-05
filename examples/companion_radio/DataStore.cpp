@@ -323,6 +323,9 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     _prefs.batt_type = 0;                                                                  // 192 (1S Li-ion)
     _prefs.batt_capacity_mah = 0;                                                          // 193 (0 -> default)
     _prefs.batt_soc_pmille = 0xFFFF;                                                       // 194 (unset)
+    _prefs.gps_uart = 1;                                                                   // 195 (UART1 17/18)
+    _prefs.ota_prerelease = 0;                                                             // 196 (stable only)
+    _prefs.ota_custom_url = 0;                                                             // 197 (GitHub release mode)
     file.read((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
     file.read((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
     file.read((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
@@ -372,6 +375,9 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.batt_type, sizeof(_prefs.batt_type));                         // 192
     file.read((uint8_t *)&_prefs.batt_capacity_mah, sizeof(_prefs.batt_capacity_mah));         // 193
     file.read((uint8_t *)&_prefs.batt_soc_pmille, sizeof(_prefs.batt_soc_pmille));             // 194
+    file.read((uint8_t *)&_prefs.gps_uart, sizeof(_prefs.gps_uart));                           // 195
+    file.read((uint8_t *)&_prefs.ota_prerelease, sizeof(_prefs.ota_prerelease));               // 196
+    file.read((uint8_t *)&_prefs.ota_custom_url, sizeof(_prefs.ota_custom_url));               // 197
 
     file.close();
   }
@@ -462,6 +468,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.batt_type, sizeof(_prefs.batt_type));                        // 192
     file.write((uint8_t *)&_prefs.batt_capacity_mah, sizeof(_prefs.batt_capacity_mah));        // 193
     file.write((uint8_t *)&_prefs.batt_soc_pmille, sizeof(_prefs.batt_soc_pmille));            // 194
+    file.write((uint8_t *)&_prefs.gps_uart, sizeof(_prefs.gps_uart));                          // 195
+    file.write((uint8_t *)&_prefs.ota_prerelease, sizeof(_prefs.ota_prerelease));              // 196
+    file.write((uint8_t *)&_prefs.ota_custom_url, sizeof(_prefs.ota_custom_url));              // 197
 
     file.close();
     commitTmp(_fs, "/new_prefs.tmp", "/new_prefs");

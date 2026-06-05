@@ -347,9 +347,20 @@ static void execCommand(MyMesh& mesh, const MeshCmd& cmd) {
       mesh.updateRadioPresets();   // HTTPS fetch + write /radio_presets (backend core)
 #endif
       break;
+    case CmdKind::UpdateReleases:
+#if defined(WITH_WIFI) && defined(ESP32)
+      mesh.updateReleaseList();    // HTTPS fetch of the GitHub releases list -> backend cache
+#endif
+      break;
     case CmdKind::OtaUpdate:
 #if defined(WITH_WIFI) && defined(ESP32)
-      mesh.startOtaTask();         // spawn on its own task -- returns immediately, mesh keeps running
+      {
+        // Resolve the firmware URL here (keeps the long GitHub asset URL out of the queued command).
+        const char* url = mesh.getNodePrefs()->ota_url;   // ota_mode 1 = custom URL
+        MyMesh::OtaRelease rel;
+        if (cmd.ota_mode == 0 && mesh.getRelease(cmd.ota_release_idx, rel)) url = rel.url;  // release mode
+        mesh.startOtaTask(url);    // spawn on its own task -- returns immediately, mesh keeps running
+      }
 #endif
       break;
     case CmdKind::OtaCancel:
@@ -497,6 +508,36 @@ bool otaBusy() {
   if (s_backend) return s_backend->otaBusy();
 #endif
   return false;
+}
+void updateReleases() {
+  MeshCmd c{}; c.kind = CmdKind::UpdateReleases; postCommand(c);
+}
+int otaReleaseCount() {
+#if defined(WITH_WIFI) && defined(ESP32)
+  if (s_backend) return s_backend->numReleases();
+#endif
+  return 0;
+}
+bool otaRelease(int idx, char* tag, size_t tag_cap, bool* prerelease, char* url, size_t url_cap) {
+#if defined(WITH_WIFI) && defined(ESP32)
+  if (s_backend) {
+    MyMesh::OtaRelease r;
+    if (!s_backend->getRelease(idx, r)) return false;
+    if (tag && tag_cap) { strncpy(tag, r.tag, tag_cap - 1); tag[tag_cap - 1] = 0; }
+    if (url && url_cap) { strncpy(url, r.url, url_cap - 1); url[url_cap - 1] = 0; }
+    if (prerelease) *prerelease = r.prerelease;
+    return true;
+  }
+#endif
+  (void)idx; (void)tag; (void)tag_cap; (void)prerelease; (void)url; (void)url_cap;
+  return false;
+}
+void otaReleaseStatus(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+#if defined(WITH_WIFI) && defined(ESP32)
+  if (s_backend) { s_backend->getReleaseStatus(out, cap); return; }
+#endif
+  strncpy(out, "n/a", cap - 1); out[cap - 1] = 0;
 }
 void wifiIpInfo(char* ip, char* mask, char* gw, char* dns, size_t cap) {
   if (cap == 0) return;
