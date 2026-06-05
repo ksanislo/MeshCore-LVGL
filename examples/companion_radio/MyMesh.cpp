@@ -24,8 +24,8 @@ volatile int g_batt_ma = 0;
   #ifndef OTA_GH_REPO
     #define OTA_GH_REPO "MeshCore-LVGL"
   #endif
-  #ifndef OTA_ASSET_NAME
-    #define OTA_ASSET_NAME "firmware.bin"
+  #ifndef OTA_ASSET_PREFIX
+    #define OTA_ASSET_PREFIX "firmware"
   #endif
 #endif
 
@@ -545,8 +545,8 @@ void MyMesh::getPresetStatus(char* out, size_t cap) {
 }
 
 // Query the GitHub Releases API and cache, for the UI, the last OTA_RELEASES_PER_PAGE releases that
-// carry an asset named OTA_ASSET_NAME (our board's firmware). Runs on the backend core (has WiFi).
-// The big JSON body + cJSON DOM both live in PSRAM (ensurePsramJson + a PSRAM read buffer).
+// carry our board's app image (asset name starts with OTA_ASSET_PREFIX, ends ".bin", not "-merged").
+// Runs on the backend core (has WiFi). Body + cJSON DOM both live in PSRAM (ensurePsramJson + buffer).
 void MyMesh::updateReleaseList() {
   // Raise the fetch flag first: the UI loop watches it and shrinks the LVGL draw buffers to free the
   // ~40-80KB internal DMA RAM the TLS handshake needs (mbedTLS content length is compile-fixed at 16KB
@@ -616,15 +616,22 @@ void MyMesh::updateReleaseList() {
     cJSON* pre    = cJSON_GetObjectItem(rel, "prerelease");
     cJSON* assets = cJSON_GetObjectItem(rel, "assets");
     if (!cJSON_IsString(tag) || !cJSON_IsArray(assets)) continue;
-    const char* dl = nullptr;                                // find OUR asset's download URL
+    const char* dl = nullptr;                                // find OUR app image's download URL
     cJSON* a = nullptr;
+    size_t pl = strlen(OTA_ASSET_PREFIX);
     cJSON_ArrayForEach(a, assets) {
       cJSON* aname = cJSON_GetObjectItem(a, "name");
-      if (cJSON_IsString(aname) && strcmp(aname->valuestring, OTA_ASSET_NAME) == 0) {
-        cJSON* aurl = cJSON_GetObjectItem(a, "browser_download_url");
-        if (cJSON_IsString(aurl)) dl = aurl->valuestring;
-        break;
-      }
+      if (!cJSON_IsString(aname)) continue;
+      const char* nm = aname->valuestring;
+      size_t nl = strlen(nm);
+      // Our board's app image: "<prefix>...bin", but NOT the "-merged" factory image. (The .md5
+      // sibling fails the ".bin" suffix.) Matches the versionless rc1-rc4 name AND a versioned
+      // "<prefix>-<ver>-<sha>.bin" -- so version+sha in the filename doesn't break the match.
+      if (nl < pl + 4 || strncmp(nm, OTA_ASSET_PREFIX, pl) != 0) continue;
+      if (strcmp(nm + nl - 4, ".bin") != 0 || strstr(nm, "-merged")) continue;
+      cJSON* aurl = cJSON_GetObjectItem(a, "browser_download_url");
+      if (cJSON_IsString(aurl)) dl = aurl->valuestring;
+      break;
     }
     if (!dl) continue;                                       // no firmware for this board in this release
     OtaRelease& r = _ota_releases[n];

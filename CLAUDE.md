@@ -17,8 +17,8 @@ Work lives in:
 ## Build & flash
 PlatformIO lives in a repo-local venv:
 ```
-.devtmp/venv/bin/pio run -e ElecrowCrowPanelAdvance35_companion_radio_lvgl_ble            # build
-.devtmp/venv/bin/pio run -e ElecrowCrowPanelAdvance35_companion_radio_lvgl_ble -t upload  # flash
+.devtmp/venv/bin/pio run -e ElecrowCrowPanelAdvance35_companion_radio_lvgl            # build
+.devtmp/venv/bin/pio run -e ElecrowCrowPanelAdvance35_companion_radio_lvgl -t upload  # flash
 ```
 After touching shared `examples/companion_radio/*` or `NodePrefs`/`DataStore`,
 also build a non-LVGL env (e.g. `LilyGo_TDeck_companion_radio_usb`) to confirm
