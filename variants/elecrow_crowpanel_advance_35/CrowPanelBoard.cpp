@@ -69,8 +69,14 @@ extern void board_i2c_unlock();
 
 static bool ina219_read16(uint8_t reg, uint16_t& out) {
   if (!board_i2c_lock(100)) return false;
-  Wire.end();                                   // drop whatever state the LGFX touch driver left on
-  Wire.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL);     // I2C port 0 (it shares these pins); clean re-init
+  // Don't end()+begin() the I2C driver per read. Wire.end() uninstalls the IDF i2c driver and frees its
+  // buffers; the following begin() reinstalls + reallocates them -- doing that every 5 s fragments the
+  // internal heap over hours, which starved the lwIP/TLS large allocations and made OTA drag worse the
+  // longer the device had been up. Instead just (re)assert the bus like CrowPanelRTCClock does:
+  // Wire.begin() early-returns once the driver is installed (no churn), and the IDF driver re-programs
+  // the peripheral per transaction, so it recovers from the touch driver's register-level use without a
+  // full re-init. The bus is shared safely via board_i2c_lock either way.
+  Wire.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL);     // I2C port 0 (shared with touch); cheap no-op once init
   Wire.setClock(100000);                        // 100 kHz: robust on the multi-drop touch bus
   bool ok = false;
   for (int attempt = 0; attempt < 4 && !ok; attempt++) {   // contended bus -> retry a few times
