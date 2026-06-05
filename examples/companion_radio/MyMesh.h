@@ -134,6 +134,7 @@ public:
   int  numReleases() const { return _ota_release_count; }
   bool getRelease(int idx, OtaRelease& out) const;
   void getReleaseStatus(char* out, size_t cap);
+  bool releasesFetching() const { return _releases_fetching; }  // UI shrinks the draw buf for the TLS fetch
   void startOtaTask(const char* url);      // spawn otaFromUrl on its own task; url stashed in _ota_target_url
   void otaFromUrl();                       // download the firmware .bin from _ota_target_url -> OTA slot -> reboot
   void cancelOta();                        // request the in-flight download abort (safe: only the inactive slot)
@@ -173,6 +174,7 @@ protected:
   char _preset_status[40] = "";       // last preset-update result, for the UI
   OtaRelease _ota_releases[OTA_RELEASES_PER_PAGE];  // cached GitHub release list (backend-owned)
   int  _ota_release_count = 0;        // valid entries in _ota_releases
+  volatile bool _releases_fetching = false;  // true during updateReleaseList() so the UI frees TLS RAM
   char _ota_release_status[40] = "";  // last release-list fetch result, for the UI
   char _ota_target_url[160] = "";     // resolved URL the core-1 OTA task downloads (release or custom)
   char _ota_status[48] = "idle";      // last OTA result/progress, for the UI

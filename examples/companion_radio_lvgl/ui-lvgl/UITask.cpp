@@ -6751,11 +6751,13 @@ void UITask::login_kb_event_cb(lv_event_t* e) {
 
 // ===== Node-info / status screen =========================================
 
-// Parse "MAJOR.MINOR.PATCH" (optionally a leading 'v') into v[3]; missing components default to 0,
-// and a trailing suffix like "-rc1" stops parsing. Returns false on non-numeric garbage. Used to
-// compare the on-device version against GitHub release tags and to sort the release dropdown.
-static bool parseSemver(const char* s, int v[3]) {
-  v[0] = v[1] = v[2] = 0;
+// Parse "MAJOR.MINOR.PATCH[-suffix]" (optionally a leading 'v') into v[4]: v[0..2] = the numeric core,
+// v[3] = pre-release rank. A version with NO suffix ranks highest (a real release beats its rc's);
+// a "-rcN"/"-rN" suffix ranks by its trailing integer (rc1 < rc2 < ... < final). Returns false on
+// non-numeric garbage. Used to compare on-device vs GitHub tags and to sort the release dropdown.
+#define SEMVER_FINAL 0x7fffffff   // sentinel rank for "no pre-release suffix" (highest)
+static bool parseSemver(const char* s, int v[4]) {
+  v[0] = v[1] = v[2] = 0; v[3] = SEMVER_FINAL;
   if (!s) return false;
   while (*s == 'v' || *s == 'V' || *s == ' ') s++;
   if (*s < '0' || *s > '9') return false;
@@ -6764,13 +6766,20 @@ static bool parseSemver(const char* s, int v[3]) {
     while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); s++; any = true; }
     if (!any) break;
     v[part++] = n;
-    if (*s == '.') s++; else break;        // stop at '-rc1' / end
+    if (*s == '.') s++; else break;        // stop at the '-' suffix / end
+  }
+  if (*s == '-') {                         // pre-release: rank by the LAST integer in the suffix
+    int last = -1;
+    for (const char* p = s; *p; p++) {
+      if (*p >= '0' && *p <= '9') { int n = 0; while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); p++; } last = n; p--; }
+    }
+    v[3] = (last >= 0) ? last : 0;         // suffix with no number (e.g. "-beta") ranks below any -rcN
   }
   return true;
 }
 // -1 if a<b, +1 if a>b, 0 if equal.
-static int cmpSemver(const int a[3], const int b[3]) {
-  for (int i = 0; i < 3; i++) if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+static int cmpSemver(const int a[4], const int b[4]) {
+  for (int i = 0; i < 4; i++) if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
   return 0;
 }
 
@@ -6944,12 +6953,12 @@ void UITask::refreshNodeInfo() {
 
   // Current vs latest line. "Latest" = the newest visible release (dropdown is sorted newest-first).
   if (_set_ota_curlatest) {
-    int cv[3]; parseSemver(LVGL_GUI_VERSION, cv);
+    int cv[4]; parseSemver(LVGL_GUI_VERSION, cv);
     char latestTag[24] = ""; bool pr; char rurl[160];
     if (_ota_dd_count > 0) mproxy::otaRelease(_ota_dd_map[0], latestTag, sizeof(latestTag), &pr, rurl, sizeof(rurl));
     char cl[120];
     if (latestTag[0]) {
-      int lvr[3]; parseSemver(latestTag, lvr);
+      int lvr[4]; parseSemver(latestTag, lvr);
       int c = cmpSemver(lvr, cv);
       const char* note = c > 0 ? "  (update available)" : (c == 0 ? "  (up to date)" : "");
       snprintf(cl, sizeof(cl), "Current %s / Latest %s%s", LVGL_GUI_VERSION, latestTag, note);
@@ -11058,11 +11067,11 @@ void UITask::rebuildOtaReleaseList() {
   }
   // Insertion sort newest-first by semver (cnt is tiny).
   for (int a = 1; a < cnt; a++) {
-    int key = idx[a], kv[3]; char kt[24]; bool pr; char u[160];
+    int key = idx[a], kv[4]; char kt[24]; bool pr; char u[160];
     mproxy::otaRelease(key, kt, sizeof(kt), &pr, u, sizeof(u)); parseSemver(kt, kv);
     int b = a - 1;
     while (b >= 0) {
-      char bt[24]; int bv[3];
+      char bt[24]; int bv[4];
       mproxy::otaRelease(idx[b], bt, sizeof(bt), &pr, u, sizeof(u)); parseSemver(bt, bv);
       if (cmpSemver(bv, kv) >= 0) break;           // bv newer-or-equal -> stays ahead
       idx[b + 1] = idx[b]; b--;
@@ -12133,9 +12142,11 @@ void UITask::loop() {
   lv_timer_handler();   // always: renders dirty areas (none while off) + polls touch (wakes us)
 
   // After the render/flush pass (DMA may still be draining): shrink the draw buffers while an OTA is
-  // downloading so the TLS/lwIP stacks get the internal RAM they need (they can't go to PSRAM here),
-  // and restore the full buffers once it ends. Edge-driven + cheap; no-op when state is unchanged.
-  setLowMemDrawBuf(mproxy::otaBusy());
+  // downloading OR the GitHub release list is being fetched, so the TLS/lwIP stacks get the internal
+  // RAM they need (they can't go to PSRAM here), and restore the full buffers once it ends. Both are
+  // HTTPS; the release fetch waits ~150ms after raising its flag so this shrink lands before its TLS
+  // handshake. Edge-driven + cheap; no-op when state is unchanged.
+  setLowMemDrawBuf(mproxy::otaBusy() || mproxy::releasesFetching());
 
   // Fire any pending notification chime AFTER the wake + banner draw above, so the
   // slow first flush precedes the first note instead of stretching it. Subsequent

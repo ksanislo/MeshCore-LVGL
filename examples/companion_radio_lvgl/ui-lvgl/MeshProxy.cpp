@@ -539,6 +539,12 @@ void otaReleaseStatus(char* out, size_t cap) {
 #endif
   strncpy(out, "n/a", cap - 1); out[cap - 1] = 0;
 }
+bool releasesFetching() {
+#if defined(WITH_WIFI) && defined(ESP32)
+  if (s_backend) return s_backend->releasesFetching();
+#endif
+  return false;
+}
 void wifiIpInfo(char* ip, char* mask, char* gw, char* dns, size_t cap) {
   if (cap == 0) return;
   if (ip) ip[0] = 0; if (mask) mask[0] = 0; if (gw) gw[0] = 0; if (dns) dns[0] = 0;

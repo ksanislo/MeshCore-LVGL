@@ -548,9 +548,25 @@ void MyMesh::getPresetStatus(char* out, size_t cap) {
 // carry an asset named OTA_ASSET_NAME (our board's firmware). Runs on the backend core (has WiFi).
 // The big JSON body + cJSON DOM both live in PSRAM (ensurePsramJson + a PSRAM read buffer).
 void MyMesh::updateReleaseList() {
-  auto fail = [this](const char* m) { strncpy(_ota_release_status, m, sizeof(_ota_release_status) - 1); _ota_release_status[sizeof(_ota_release_status) - 1] = 0; };
+  // Raise the fetch flag first: the UI loop watches it and shrinks the LVGL draw buffers to free the
+  // ~40-80KB internal DMA RAM the TLS handshake needs (mbedTLS content length is compile-fixed at 16KB
+  // and can't go to PSRAM here -- same constraint the OTA download solves this way). Cleared on every
+  // exit so the UI restores the full buffers.
+  _releases_fetching = true;
+  auto done = [this]() { _releases_fetching = false; };
+  auto fail = [this, &done](const char* m) { strncpy(_ota_release_status, m, sizeof(_ota_release_status) - 1); _ota_release_status[sizeof(_ota_release_status) - 1] = 0; done(); };
   if (WiFi.status() != WL_CONNECTED) { fail("no WiFi"); return; }
   ensurePsramJson();
+
+  // Bounded DNS pre-resolve (HTTPClient's own lookup isn't bounded and can wedge); also lets the UI
+  // core get a couple of loop passes in to shrink the draw buffer before we open the TLS socket.
+  const char* host = "api.github.com";
+  IPAddress rip;
+  Serial.printf("[REL] free-int=%u before resolve\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  if (!WiFi.hostByName(host, rip)) { fail("can't resolve host"); return; }
+  vTaskDelay(pdMS_TO_TICKS(150));       // let the UI loop free the draw buffer before the TLS handshake
+  Serial.printf("[REL] resolved %s=%s, free-int=%u (largest=%u) before TLS\n", host, rip.toString().c_str(),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
   WiFiClientSecure client;
   client.setInsecure();                 // v1: no cert verification (matches the preset/OTA path)
@@ -565,6 +581,7 @@ void MyMesh::updateReleaseList() {
   http.addHeader("User-Agent", "MeshCore-LVGL-OTA");        // GitHub returns 403 without a User-Agent
   http.addHeader("Accept", "application/vnd.github+json");
   int code = http.GET();
+  Serial.printf("[REL] GET -> %d, free-int=%u\n", code, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   if (code != 200) { http.end(); char b[40]; snprintf(b, sizeof(b), "HTTP %d", code); fail(b); return; }
 
   // Stream the (chunked) body into a PSRAM buffer instead of an internal-SRAM String. per_page bounds it.
@@ -621,6 +638,8 @@ void MyMesh::updateReleaseList() {
   _ota_release_count = n;
   if (n == 0) snprintf(_ota_release_status, sizeof(_ota_release_status), "no matching assets");
   else        snprintf(_ota_release_status, sizeof(_ota_release_status), "%d releases", n);
+  Serial.printf("[REL] parsed %d releases (%u bytes)\n", n, (unsigned)len);
+  done();
 }
 
 bool MyMesh::getRelease(int idx, OtaRelease& out) const {
