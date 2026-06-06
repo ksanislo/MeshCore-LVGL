@@ -375,7 +375,9 @@ lv_obj_t* UITask::makeSelTextarea(lv_obj_t* parent) {
   return ta;
 }
 
-static lv_obj_t* attachScrollHandle(lv_obj_t* content) {
+// Create + style the floating thumb (no event wiring). Shared by the generic scroll handle and
+// the chat history's tail-anchored handle, which attach their own drag/scroll callbacks.
+static lv_obj_t* makeScrollThumb(lv_obj_t* content) {
   lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_OFF);   // hide the draw-only native bar
   lv_obj_t* thumb = lv_obj_create(lv_obj_get_parent(content));
   lv_obj_add_flag(thumb, LV_OBJ_FLAG_FLOATING);               // ignored by parent layout
@@ -388,6 +390,11 @@ static lv_obj_t* attachScrollHandle(lv_obj_t* content) {
   lv_obj_set_style_pad_all(thumb, 0, 0);
   lv_obj_add_flag(thumb, LV_OBJ_FLAG_HIDDEN);                 // shown once there's range to scroll
   lv_obj_set_user_data(thumb, content);
+  return thumb;
+}
+
+static lv_obj_t* attachScrollHandle(lv_obj_t* content) {
+  lv_obj_t* thumb = makeScrollThumb(content);
   lv_obj_add_event_cb(thumb, sb_drag_cb, LV_EVENT_PRESSING, NULL);
   lv_obj_add_event_cb(content, sb_scroll_cb, LV_EVENT_SCROLL, thumb);
   lv_obj_add_event_cb(content, sb_scroll_cb, LV_EVENT_SIZE_CHANGED, thumb);
@@ -1546,19 +1553,64 @@ void UITask::chat_input_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) _instance->layoutChatBody(true);
+  if (code == LV_EVENT_VALUE_CHANGED && !_instance->_compose_editing) {
+    _instance->_compose_editing = true;             // our own set_text() re-fires VALUE_CHANGED -> ignore it
+    _instance->encodeComposeMentionsLive();         // commit "@name " -> "@[name] " in the box (WYSIWYG)
+    _instance->enforceComposeLimit();               // then hard-cap the (encoded) box at the wire byte limit
+    _instance->_compose_editing = false;
+    const char* ct = lv_textarea_get_text(_instance->_chat_input);  // settled length -> detect next paste
+    _instance->_compose_prev_len = ct ? (int)strlen(ct) : 0;
+  }
   if (code == LV_EVENT_VALUE_CHANGED || code == LV_EVENT_FOCUSED || code == LV_EVENT_DEFOCUSED)
     _instance->updateCharCount();
 }
 
-// Refresh + show/hide the compose char-count ("n/limit"), shown only while the field
-// is focused and non-empty.
+// defined further down; declared here so the compose cap/count can measure the wire-encoded length.
+static void encodeMentions(const char* in, char* out, size_t cap, bool eos_boundary = true,
+                           bool* deferred = nullptr);
+
+// Hard-cap the compose field so the message can never silently truncate on send. The cap is on the
+// WIRE-ENCODED length -- what encodeMentions() produces at send -- not raw box bytes, so it reserves
+// room for the +2 brackets a tail "@name" will gain when it commits. That makes the field cap out
+// early enough that an in-progress mention at the edge still has room to bracket instead of being
+// dropped to plain text. Counted in BYTES (not lv_textarea_set_max_length's codepoints, which wouldn't
+// stop multi-byte emoji from blowing the byte cap). Trims whole codepoints off the tail until the
+// encoded form fits; the trimmed tail is bare text or an unbracketed mention (committed "@[name]"
+// brackets are kept ≤160 by encodeComposeMentionsLive, so we never slice one). Caches the encoded
+// length for updateCharCount so a keystroke only encodes once. Runs on every VALUE_CHANGED.
+void UITask::enforceComposeLimit() {
+  if (!_chat_input) return;
+  const char* t = lv_textarea_get_text(_chat_input);
+  if (!t) { _compose_wire_len = 0; return; }
+  char buf[CHAT_MSG_TEXT_MAX + 32];
+  size_t n = strlen(t); if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+  memcpy(buf, t, n); buf[n] = 0;
+  char enc[CHAT_MSG_TEXT_MAX + 32];
+  bool trimmed = false;
+  for (;;) {
+    encodeMentions(buf, enc, sizeof(enc), true);                 // post-formatting (wire) length
+    if (strlen(enc) <= (size_t)(CHAT_MSG_TEXT_MAX - 1)) break;
+    size_t b = strlen(buf); if (b == 0) break;
+    b--;
+    while (b > 0 && ((uint8_t)buf[b] & 0xC0) == 0x80) b--;       // back up off any UTF-8 continuation byte
+    buf[b] = 0; trimmed = true;
+  }
+  _compose_wire_len = (int)strlen(enc);                          // cache for updateCharCount (post-formatting)
+  if (trimmed) lv_textarea_set_text(_chat_input, buf);          // drops the overflow; re-enters but now fits
+}
+
+// Refresh + show/hide the compose char-count ("n/limit"), shown only while the field is focused and
+// non-empty. n is the POST-FORMATTING (wire) length cached by enforceComposeLimit, so a tail "@name"
+// already shows the +2 it will gain when bracketed -- the count reflects exactly what ships.
 void UITask::updateCharCount() {
   if (!_chat_count_lbl || !_chat_input) return;
   const char* t = lv_textarea_get_text(_chat_input);
-  size_t n = t ? strlen(t) : 0;
+  int n = _compose_wire_len;                     // kept current by enforceComposeLimit on every edit
   bool focused = lv_obj_has_state(_chat_input, LV_STATE_FOCUSED);
   if (n > 0 && focused) {
-    char b[16]; snprintf(b, sizeof(b), "%u/%u", (unsigned)n, (unsigned)CHAT_MSG_TEXT_MAX);
+    // CHAT_MSG_TEXT_MAX (161) is the buffer size = the 160-char wire cap + 1 for the NUL; the
+    // character limit shown to the user is the wire cap itself.
+    char b[16]; snprintf(b, sizeof(b), "%u/%u", (unsigned)n, (unsigned)(CHAT_MSG_TEXT_MAX - 1));
     lv_label_set_text(_chat_count_lbl, b);
     lv_obj_clear_flag(_chat_count_lbl, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(_chat_count_lbl);
@@ -1678,9 +1730,12 @@ void UITask::layoutChatBody(bool keyboard_shown) {
 
   if (_chat_count_lbl) lv_obj_align_to(_chat_count_lbl, _chat_compose, LV_ALIGN_OUT_TOP_RIGHT, -6, -2);
 
+  // Fast-return chevron sits just above the compose band, right side (clear of the thumb's edge).
+  if (_chat_jump_btn) lv_obj_align(_chat_jump_btn, LV_ALIGN_TOP_RIGHT, -14, compose_y - 44);
+
   lv_obj_update_layout(_chat_history);
   if (was_at_bottom) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
-  sb_update(_chat_history, _chat_sb);
+  updateChatScrollbar();
 }
 
 // ---- Insert (+) menu: share contact refs into the compose field ----------
@@ -2066,9 +2121,18 @@ void UITask::chanpick_cb(lv_event_t* e) {
 // Rewrite "@Name" -> "@[Name]" when Name matches a known contact (longest
 // match, ending at a word boundary), so other clients render it as a mention.
 // Non-matching "@text" and already-bracketed "@[Name]" pass through unchanged.
-static void encodeMentions(const char* in, char* out, size_t cap) {
-  auto isBoundary = [](char a) {
-    return a == 0 || a == ' ' || a == '\n' || a == '\t' || a == ',' || a == '.' ||
+// eos_boundary: treat end-of-string as a word boundary. True on send (encode a trailing mention);
+// false for LIVE compose encoding, so the word still being typed at the tail isn't bracketed until
+// the user commits it with a separator -- avoids "@bob" snapping shut while "@bobby" is intended.
+// LIVE also DEFERS a match while what's typed is still a strict prefix of a LONGER contact name (e.g.
+// "@bob " when both "bob" and "bob smith" exist): we keep it bare until the text either completes the
+// longer name or DIVERGES from it ("@bob so" -> can't be "bob smith" anymore -> commit "@[bob]"). When
+// it defers a real match, *deferred is set so the caller knows to keep re-checking on each keystroke.
+static void encodeMentions(const char* in, char* out, size_t cap, bool eos_boundary, bool* deferred) {
+  if (deferred) *deferred = false;
+  auto isBoundary = [eos_boundary](char a) {
+    if (a == 0) return eos_boundary;
+    return a == ' ' || a == '\n' || a == '\t' || a == ',' || a == '.' ||
            a == '!' || a == '?' || a == ';' || a == ':' || a == ')' || a == '\'';
   };
   size_t o = 0;
@@ -2078,15 +2142,21 @@ static void encodeMentions(const char* in, char* out, size_t cap) {
   while (*p && o + 1 < cap) {
     if (*p == '@' && p[1] != '[') {
       const char* nm = p + 1;
+      size_t restLen = strlen(nm);    // everything typed after this '@' (a multi-word name may span spaces)
       size_t bestlen = 0;
+      bool couldExtend = false;       // what's typed is still a strict prefix of some LONGER contact name
       int total = mproxy::getNumContacts();
       ContactInfo c;
       for (int i = 0; i < total; i++) {
         if (!mproxy::getContactByIdx(i, c)) continue;
         size_t nl = strlen(c.name);
+        if (nl == 0) continue;
         if (nl > bestlen && strncmp(nm, c.name, nl) == 0 && isBoundary(nm[nl])) bestlen = nl;
+        if (!eos_boundary && nl > restLen && strncmp(nm, c.name, restLen) == 0) couldExtend = true;
       }
-      if (bestlen > 0) {
+      if (bestlen > 0 && couldExtend) {           // matched, but a longer name is still possible -> wait
+        if (deferred) *deferred = true;
+      } else if (bestlen > 0) {
         emit("@[", 2);
         emit(nm, bestlen);
         if (o + 1 < cap) out[o++] = ']';
@@ -2097,6 +2167,55 @@ static void encodeMentions(const char* in, char* out, size_t cap) {
     out[o++] = *p++;
   }
   out[o] = 0;
+}
+
+// byte offset of codepoint index `cp` in a UTF-8 string (LVGL cursor positions are codepoint indices)
+static size_t cpToByte(const char* s, uint32_t cp) {
+  size_t b = 0; uint32_t c = 0;
+  while (s[b] && c < cp) { b++; while (((uint8_t)s[b] & 0xC0) == 0x80) b++; c++; }
+  return b;
+}
+static int cpCount(const char* s) {
+  int c = 0; for (; *s; ++s) if (((uint8_t)*s & 0xC0) != 0x80) c++;
+  return c;
+}
+
+// Live, WYSIWYG mention encoding for the compose box: as soon as an "@name" that matches a contact is
+// followed by a separator, rewrite it to "@[name]" IN the box -- so what you see is exactly what ships
+// and the byte counter/cap are honest (nothing expands silently at send). The word still being typed
+// at the very tail stays bare (eos isn't a boundary) until committed.
+//
+// For performance the contact-scanning pass runs ONLY when there's something to commit: a separator
+// was just typed, OR this edit was a multi-char insert (paste / the + picker) which may carry already-
+// committed mentions anywhere in it. Plain per-character name typing does no work until its separator.
+// A paste runs the same full-string longest-match pass, so every internal "@name<sep>" in the pasted
+// blob brackets at once (its own trailing word, if any, stays bare like a typed tail).
+//
+// If expanding would blow the 160-byte wire cap, the conversion is skipped (the mention stays bare and
+// just renders as plain text) -- never a truncated name.
+void UITask::encodeComposeMentionsLive() {
+  if (!_chat_input) return;
+  const char* cur = lv_textarea_get_text(_chat_input);
+  if (!cur) { _compose_pending = false; return; }
+  size_t curLen = strlen(cur);
+  bool pasted = curLen > (size_t)_compose_prev_len + 1;   // grew by >1 byte this edit -> paste / insert
+  if (!strchr(cur, '@')) { _compose_pending = false; return; }
+  uint32_t curCp = lv_textarea_get_cursor_pos(_chat_input);
+  size_t bcur = cpToByte(cur, curCp);
+  bool sepJustTyped = (bcur > 0) && (cur[bcur-1]==' ' || cur[bcur-1]=='\n' || cur[bcur-1]=='\t');
+  // Cheap path: scan contacts only when there's something to commit -- a separator was just typed, a
+  // multi-char insert landed, OR a mention is still pending disambiguation (then every keystroke is
+  // re-checked until it commits or diverges).
+  if (!pasted && !sepJustTyped && !_compose_pending) return;
+  char buf[CHAT_MSG_TEXT_MAX + 32];
+  bool deferred = false;
+  encodeMentions(cur, buf, sizeof(buf), false, &deferred);   // longest-match; defers an ambiguous prefix
+  _compose_pending = deferred;                                // keep re-checking while still ambiguous
+  if (strcmp(buf, cur) == 0) return;                          // nothing committed this edit
+  if (strlen(buf) > (size_t)(CHAT_MSG_TEXT_MAX - 1)) return;  // no room for the [] -> leave it bare
+  int added = cpCount(buf) - cpCount(cur);                    // brackets added (all at/ before the cursor)
+  lv_textarea_set_text(_chat_input, buf);
+  lv_textarea_set_cursor_pos(_chat_input, (int32_t)curCp + added);
 }
 
 void UITask::raiseFieldForKb(lv_obj_t* scroll, lv_obj_t* kb, lv_obj_t* ta) {
@@ -2198,8 +2317,13 @@ void UITask::sendCurrentMessage() {
   const char* raw = lv_textarea_get_text(_chat_input);
   if (!raw || !raw[0]) return;
 
+  // Live encoding already bracketed every mention the user committed with a separator; this catches a
+  // trailing "@name" with no separator after it (the message ends on a mention). Same edge rule as the
+  // live path: if expanding it would blow the wire cap, send it bare rather than truncate the name.
   char encoded[CHAT_MSG_TEXT_MAX + 32];
-  encodeMentions(raw, encoded, sizeof(encoded));
+  encodeMentions(raw, encoded, sizeof(encoded), true);
+  if (strlen(encoded) > (size_t)(CHAT_MSG_TEXT_MAX - 1))
+    encodeMentions(raw, encoded, sizeof(encoded), false);   // leave the trailing mention bare so it fits
 
   const char* me = (_node_prefs && _node_prefs->node_name[0]) ? _node_prefs->node_name : "Me";
   if (!_chat_is_channel && _chat_contact_type == ADV_TYPE_REPEATER) {
@@ -3447,6 +3571,15 @@ int UITask::gatherRange(int first, int last, ChatMessage* out) {
 void UITask::rebuildChatHistory() {
   _chat_pending = false;   // any rebuild path satisfies a pending incoming-message refresh
   if (!_chat_history) return;
+  // Snap to the live tail ONLY when explicitly re-windowing (open / new-msg follow / chevron snap) or
+  // when we're already pinned to it. Otherwise this rebuild was triggered by a background refresh
+  // (snapshot republish, route/rename, ack, mention/hashtag recolor, sending-expiry, ...) while the
+  // user is scrolled back reading history -- preserve their scroll position instead of yanking them
+  // down. (Previously every rebuild jumped to bottom: _chat_keep_scroll was never set.)
+  bool searching = _search_active && _search_filter[0];
+  bool following = _chat_win_reset || (searching ? (lv_obj_get_scroll_bottom(_chat_history) <= 24)
+                                                  : chatAtBottom());
+  lv_coord_t keepY = lv_obj_get_scroll_y(_chat_history);   // restored when not following the tail
   bool prevProg = _chat_prog_scroll; _chat_prog_scroll = true;  // clean/build/scroll fire scroll cbs -> ignore them
   lv_obj_clean(_chat_history);
   _sending_lbl = NULL;  // old labels just got deleted; re-set if a sending msg renders
@@ -3470,8 +3603,8 @@ void UITask::rebuildChatHistory() {
       lv_obj_center(empty);
     }
     lv_obj_update_layout(_chat_history);
-    if (!_chat_keep_scroll) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);
-    sb_update(_chat_history, _chat_sb);
+    lv_obj_scroll_to_y(_chat_history, following ? LV_COORD_MAX : keepY, LV_ANIM_OFF);
+    updateChatScrollbar();
     _chat_prog_scroll = prevProg;
     return;
   }
@@ -3497,7 +3630,7 @@ void UITask::rebuildChatHistory() {
     lv_obj_set_style_text_color(empty, lv_color_hex(DIM_HEX), 0);
     lv_obj_center(empty);
     lv_obj_update_layout(_chat_history);
-    sb_update(_chat_history, _chat_sb);
+    updateChatScrollbar();
     _chat_prog_scroll = prevProg;
     return;
   }
@@ -3510,19 +3643,26 @@ void UITask::rebuildChatHistory() {
   }
 
   lv_obj_update_layout(_chat_history);
-  if (!_chat_keep_scroll) lv_obj_scroll_to_y(_chat_history, LV_COORD_MAX, LV_ANIM_OFF);  // bottom; paging re-anchors itself
-  sb_update(_chat_history, _chat_sb);
+  lv_obj_scroll_to_y(_chat_history, following ? LV_COORD_MAX : keepY, LV_ANIM_OFF);  // follow tail, else hold position
+  updateChatScrollbar();
   _chat_prog_scroll = prevProg;
 }
 
 // Max bubbles that can fit the chat band, using the DENSEST unit (a one-line bubble + the flex
 // row gap -- in a burst the sender header + time footer collapse away), + overscan. Derived from
 // geometry so it adapts to screen size / orientation rather than a hard-coded count.
+// Densest per-message row height: one text line + bubble v-pad (8+8) + the flex row gap. The unit
+// the resident window and the tail-anchored scrollbar both measure history in.
+int UITask::chatUnitPx() {
+  lv_coord_t unit = lv_font_get_line_height(msgFont()) + 16 + 6;
+  if (unit < 16) unit = 16;
+  return (int)unit;
+}
+
 int UITask::computeChatWinK() {
   lv_coord_t h = lv_obj_get_content_height(_chat_history);
   if (h < 40) h = _screen_h;                                  // not laid out yet -> screen height
-  lv_coord_t unit = lv_font_get_line_height(msgFont()) + 16 + 6;  // text line + bubble v-pad(8+8) + pad_row
-  if (unit < 16) unit = 16;
+  lv_coord_t unit = chatUnitPx();
   int k = (int)(h / unit) + 4;                                // densest fit + a few overscan rows
   if (k < 8) k = 8;
   if (k > CHAT_HISTORY_CAP) k = CHAT_HISTORY_CAP;
@@ -3593,7 +3733,7 @@ void UITask::expandChatOlder() {
     }
     _rrowCount -= t; _rlast -= t; _sending_lbl = NULL;
   }
-  sb_update(_chat_history, _chat_sb);
+  updateChatScrollbar();
   _chat_prog_scroll = false;
 }
 
@@ -3639,7 +3779,7 @@ void UITask::pageChatNewer() {
   } else {
     lv_obj_update_layout(_chat_history);
   }
-  sb_update(_chat_history, _chat_sb);
+  updateChatScrollbar();
   _chat_prog_scroll = false;
 }
 
@@ -3669,6 +3809,96 @@ bool UITask::chatAtBottom() {
   if (!_chat_history) return true;
   if (_rlast < _chat_total) return false;                 // resident window isn't even at the live tail
   return lv_obj_get_scroll_bottom(_chat_history) <= 24;   // ...and within ~a line of it
+}
+
+// Tail-anchored, virtualized scrollbar for the chat history (the generic sb_update only knows the
+// bounded resident window, so it can't represent "distance to the live tail"). We measure a span of
+// [loaded-above] + [forward-to-tail], where forward-to-tail = scroll_bottom + the records that were
+// trimmed off the bottom when paging back ((_chat_total - _rlast) rows). The OLDER depth above the
+// resident window is deliberately NOT counted -> the unbounded backward history stays hidden while
+// the (known) distance down to the current/live message is shown to scale. A floor on the thumb
+// height keeps it grabbable however deep you've scrolled. Also drives the fast-return chevron.
+static constexpr lv_coord_t CHAT_SB_MIN_TH = 28;  // min thumb height so a deep scrollback stays touchable
+void UITask::updateChatScrollbar() {
+  if (!_chat_history || !_chat_sb) return;
+  lv_obj_t* content = _chat_history, *thumb = _chat_sb;
+  lv_coord_t view_h = lv_obj_get_height(content);
+  lv_coord_t above  = lv_obj_get_scroll_top(content);     // loaded history above the viewport (bounded)
+  lv_coord_t below  = lv_obj_get_scroll_bottom(content);  // loaded history below the viewport
+  // Search renders all matches un-virtualized, so the window indices don't apply -- treat it as a
+  // plain (non-paged) list with no trimmed-newer tail.
+  bool searching = _search_active && _search_filter[0];
+  int newerTrimmed = searching ? 0 : (_chat_total - _rlast); if (newerTrimmed < 0) newerTrimmed = 0;
+  below += (lv_coord_t)newerTrimmed * chatUnitPx();        // + records trimmed off the bottom => to the tail
+  lv_coord_t range = above + below;
+  if (view_h <= 0 || range <= 0) {
+    lv_obj_add_flag(thumb, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_clear_flag(thumb, LV_OBJ_FLAG_HIDDEN);
+    lv_coord_t th = (lv_coord_t)((int32_t)view_h * view_h / (view_h + range));
+    if (th < CHAT_SB_MIN_TH) th = CHAT_SB_MIN_TH;
+    lv_coord_t max_y = view_h - th; if (max_y < 0) max_y = 0;
+    lv_coord_t ty = (lv_coord_t)((int32_t)max_y * above / range);  // above large => at the tail => thumb low
+    lv_obj_set_height(thumb, th);
+    lv_obj_set_pos(thumb, lv_obj_get_x(content) + lv_obj_get_width(content) - lv_obj_get_width(thumb) - 2,
+                   lv_obj_get_y(content) + ty);
+  }
+  // Fast-return chevron: appears once we're rolled back more than ~2 rows from the live tail
+  // (suppressed during search, which isn't a live-tail view).
+  if (_chat_jump_btn) {
+    bool back = !searching && (newerTrimmed > 0 || below > 2 * chatUnitPx());
+    if (back) lv_obj_clear_flag(_chat_jump_btn, LV_OBJ_FLAG_HIDDEN);
+    else      lv_obj_add_flag(_chat_jump_btn, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+// Re-window to the newest screenful and scroll to the live tail. Deferred from the chevron tap /
+// drag-to-bottom to loop() so the heavy rebuild never runs inside an input event.
+void UITask::snapChatToBottom() {
+  if (!_chat_history) return;
+  _chat_win_reset = true;    // rebuild re-windows to the newest screenful + follows the tail to the bottom
+  _chat_want_older = _chat_want_newer = false;
+  rebuildChatHistory();      // ends with updateChatScrollbar()
+}
+
+void UITask::chat_sb_scroll_cb(lv_event_t* e) {
+  if (lv_event_get_code(e) == LV_EVENT_SCROLL) s_scroll_until_ms = millis() + 200;  // defer heavy rebuilds
+  if (_instance) _instance->updateChatScrollbar();
+}
+
+// Drag the chat thumb: the exact inverse of updateChatScrollbar's mapping so the thumb tracks the
+// finger without jumping. Dragging to the bottom past the loaded range snaps to the live tail;
+// dragging to the top lands at scroll_top 0, which arms an older-chunk page via the scroll cb.
+void UITask::chat_sb_drag_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* thumb = lv_event_get_target(e);
+  lv_obj_t* content = (lv_obj_t*)lv_obj_get_user_data(thumb);
+  lv_indev_t* indev = lv_indev_get_act();
+  if (!content || !indev) return;
+  lv_point_t p; lv_indev_get_point(indev, &p);
+  lv_area_t pa; lv_obj_get_coords(lv_obj_get_parent(thumb), &pa);
+  lv_coord_t view_h = lv_obj_get_height(content);
+  lv_coord_t th = lv_obj_get_height(thumb);
+  lv_coord_t max_y = view_h - th;
+  if (max_y <= 0) return;
+  lv_coord_t rel = (p.y - pa.y1) - lv_obj_get_y(content) - th / 2;  // center the thumb on the finger
+  if (rel < 0) rel = 0;
+  if (rel > max_y) rel = max_y;
+  // f = rel/max_y is the fraction from the bottom (1 = tail). target scroll_top = f * (loaded + trimmed).
+  lv_coord_t loadedRange = lv_obj_get_scroll_top(content) + lv_obj_get_scroll_bottom(content);
+  int newerTrimmed = _instance->_chat_total - _instance->_rlast; if (newerTrimmed < 0) newerTrimmed = 0;
+  lv_coord_t span = loadedRange + (lv_coord_t)newerTrimmed * _instance->chatUnitPx();
+  lv_coord_t target_top = (lv_coord_t)((int32_t)span * rel / max_y);
+  if (target_top >= loadedRange && newerTrimmed > 0) {
+    _instance->_chat_want_bottom = true;             // dragged past the loaded bottom -> snap to live (loop)
+  } else {
+    if (target_top > loadedRange) target_top = loadedRange;
+    lv_obj_scroll_to_y(content, target_top, LV_ANIM_OFF);  // chat_sb_scroll_cb repositions the thumb
+  }
+}
+
+void UITask::chat_jump_cb(lv_event_t* e) {
+  if (_instance) _instance->_chat_want_bottom = true;       // snap to the live tail (handled in loop)
 }
 
 void UITask::appendPendingChat() {
@@ -3832,7 +4062,32 @@ void UITask::openChat(const char* peer_name) {
     lv_obj_set_style_pad_all(_chat_history, 8, 0);
     lv_obj_set_style_pad_row(_chat_history, 6, 0);
     lv_obj_set_flex_flow(_chat_history, LV_FLEX_FLOW_COLUMN);
-    _chat_sb = attachScrollHandle(_chat_history);
+    // Chat uses a tail-anchored scrollbar (not the generic one): its own drag + scroll callbacks
+    // measure distance to the live tail across the virtualized window. Thumb styling is shared.
+    _chat_sb = makeScrollThumb(_chat_history);
+    lv_obj_add_event_cb(_chat_sb, chat_sb_drag_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(_chat_history, chat_sb_scroll_cb, LV_EVENT_SCROLL, _chat_sb);
+    lv_obj_add_event_cb(_chat_history, chat_sb_scroll_cb, LV_EVENT_SIZE_CHANGED, _chat_sb);
+
+    // Floating fast-return chevron: one tap snaps back to the live tail from anywhere in the
+    // scrollback. Shown by updateChatScrollbar() once rolled back more than ~2 rows; positioned
+    // above the compose band by layoutChatBody().
+    _chat_jump_btn = lv_btn_create(_chat_screen);
+    lv_obj_add_flag(_chat_jump_btn, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_size(_chat_jump_btn, 36, 36);
+    lv_obj_set_style_radius(_chat_jump_btn, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(_chat_jump_btn, lv_color_hex(UI_SURFACE), 0);
+    lv_obj_set_style_bg_opa(_chat_jump_btn, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(_chat_jump_btn, 1, 0);
+    lv_obj_set_style_border_color(_chat_jump_btn, lv_color_hex(UI_ACCENT), 0);
+    lv_obj_set_style_shadow_width(_chat_jump_btn, 8, 0);
+    lv_obj_set_style_shadow_opa(_chat_jump_btn, LV_OPA_40, 0);
+    lv_obj_add_flag(_chat_jump_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(_chat_jump_btn, chat_jump_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* jl = lv_label_create(_chat_jump_btn);
+    lv_label_set_text(jl, LV_SYMBOL_DOWN);
+    lv_obj_set_style_text_color(jl, lv_color_hex(UI_ACCENT), 0);
+    lv_obj_center(jl);
 
     // Fixed compose band: textarea (grows) + send button.
     _chat_compose = lv_obj_create(_chat_screen);
@@ -12220,6 +12475,10 @@ void UITask::loop() {
   if (_chat_want_newer && _chat_screen && lv_scr_act() == _chat_screen) {
     _chat_want_newer = false;
     pageChatNewer();          // scrolled near the bottom: page a newer chunk + re-anchor
+  }
+  if (_chat_want_bottom && _chat_screen && lv_scr_act() == _chat_screen) {
+    _chat_want_bottom = false;
+    snapChatToBottom();       // chevron tap / drag-to-bottom: re-window to the newest screenful + scroll to tail
   }
 
   if (!interacting) {

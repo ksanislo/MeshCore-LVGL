@@ -183,6 +183,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _chat_status;         // route line under the name: Direct / Flood / N hops
   lv_obj_t*       _chat_history;        // scrollable message container (the VSA band)
   lv_obj_t*       _chat_sb;             // draggable scrollbar thumb for chat history
+  lv_obj_t*       _chat_jump_btn;       // floating "jump to live tail" chevron (shown when scrolled up)
   lv_obj_t*       _chat_compose;        // fixed compose band (textarea + send)
   lv_obj_t*       _chat_input;          // lv_textarea
   lv_obj_t*       _chat_send_btn;       // in-line send button (hidden while the keyboard is up)
@@ -237,8 +238,12 @@ class UITask : public AbstractUITask {
   bool            _chat_win_reset = true;   // next full rebuild snaps the window to the newest screenful
   bool            _chat_want_older = false; // scrolled near top w/ older available -> page older (loop)
   bool            _chat_want_newer = false; // scrolled near bottom w/ newer trimmed -> page newer (loop)
-  bool            _chat_keep_scroll = false;// rebuildChatHistory: skip scroll-to-bottom (paging re-anchors)
+  bool            _chat_want_bottom = false;// chevron tap / drag-to-bottom -> snap to the live tail (loop)
   bool            _chat_prog_scroll = false;// a programmatic scroll/rebuild is in progress -> ignore scroll cb
+  bool            _compose_editing = false; // re-entrancy guard for compose mention-encode / byte-cap edits
+  int             _compose_prev_len = 0;    // compose byte-length at the last edit (detects paste vs keystroke)
+  bool            _compose_pending = false; // a mention match is deferred pending disambiguation (re-check each keystroke)
+  int             _compose_wire_len = 0;    // cached post-formatting (mention-encoded) byte length for the count
   ChatMessage*    _gather = nullptr;        // PSRAM scratch (residentCap msgs) for gathering a range/chunk
   int             _rrowChildN[CHAT_RES_MAX * 2];// child-object count per resident message (for edge trim);
                                                 // 2x so a page can transiently exceed cap before trimming
@@ -773,6 +778,12 @@ class UITask : public AbstractUITask {
   void      appendChatBubble(const ChatMessage* m);  // render one message, advancing the render cursor
   void      appendPendingChat();             // incremental: append just the new message(s), else rebuild
   bool      chatAtBottom();                  // chat history pinned to the tail (vs scrolled up reading)
+  void      snapChatToBottom();              // re-window to the newest screenful + scroll to the live tail
+  void      updateChatScrollbar();           // chat-specific thumb (tail-anchored, hides backward depth) + chevron
+  int       chatUnitPx();                    // densest per-message row height (line + bubble pad + row gap)
+  static void chat_sb_scroll_cb(lv_event_t* e);  // chat scroll -> reposition the tail-anchored thumb
+  static void chat_sb_drag_cb(lv_event_t* e);    // drag the chat thumb -> scrub / snap to the live tail
+  static void chat_jump_cb(lv_event_t* e);       // chevron tap -> snap to the live tail
   int       computeChatWinK();               // max bubbles that fit the chat band (densest unit) + overscan
   int       residentCap();                   // max resident bubbles before paging trims the far edge
   ChatMessage* ensureGather();               // lazily allocate the PSRAM gather scratch (residentCap)
@@ -782,6 +793,8 @@ class UITask : public AbstractUITask {
   static void chat_history_scroll_cb(lv_event_t* e);   // detect scroll-to-edge -> request older/newer
   void      layoutChatBody(bool keyboard_shown);
   void      updateCharCount();   // refresh the compose char-count label (shown while typing)
+  void      enforceComposeLimit();// hard-cap the compose field at the 160-byte wire limit (UTF-8 safe)
+  void      encodeComposeMentionsLive();// rewrite committed "@name" -> "@[name]" in the box as you type
   // When a bottom-docked keyboard `kb` is shown, scroll `scroll` so the focused
   // field `ta` sits just above it (no-op if already clear of the keyboard).
   // resetKbScroll() restores the container when the keyboard hides.
@@ -1226,7 +1239,7 @@ public:
       _pick_title(NULL), _pick_action(0), _pick_list{},
       _chpick_popup(NULL), _chpick_list(NULL), _chpick_search_ta(NULL), _chpick_kb(NULL), _chpick_filter{},
       _chat_screen(NULL), _chat_title(NULL), _chat_avatar(NULL), _chat_avatar_lbl(NULL),
-      _chat_status(NULL), _chat_history(NULL), _chat_sb(NULL),
+      _chat_status(NULL), _chat_history(NULL), _chat_sb(NULL), _chat_jump_btn(NULL),
       _chat_compose(NULL), _chat_input(NULL), _chat_send_btn(NULL), _chat_count_lbl(NULL), _chat_keyboard(NULL),
       _insert_popup(NULL), _insert_list(NULL),
       _chat_is_channel(false), _chat_channel_idx(-1), _chat_contact_type(0),
