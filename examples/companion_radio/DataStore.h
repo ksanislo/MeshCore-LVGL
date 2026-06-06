@@ -36,7 +36,7 @@ public:
   void loadPrefs(NodePrefs& prefs, double& node_lat, double& node_lon);
   void savePrefs(const NodePrefs& prefs, double node_lat, double node_lon);
   void loadContacts(DataStoreHost* host);
-  void saveContacts(DataStoreHost* host);
+  void saveContacts(DataStoreHost* host, bool (*filter)(const ContactInfo& c) = NULL);
   bool updateContact(int idx, const ContactInfo& c);  // in-place single-record write
   void loadChannels(DataStoreHost* host);
   void saveChannels(DataStoreHost* host);

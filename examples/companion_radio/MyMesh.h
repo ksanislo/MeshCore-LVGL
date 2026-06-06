@@ -5,14 +5,14 @@
 #include "AbstractUITask.h"
 
 /*------------ Frame Protocol --------------*/
-#define FIRMWARE_VER_CODE 11
+#define FIRMWARE_VER_CODE 13
 
 #ifndef FIRMWARE_BUILD_DATE
-#define FIRMWARE_BUILD_DATE "19 Apr 2026"
+#define FIRMWARE_BUILD_DATE "6 Jun 2026"
 #endif
 
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "v1.15.0"
+#define FIRMWARE_VERSION "v1.16.0"
 #endif
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
@@ -276,7 +276,7 @@ public:
   void        saveLogin(const uint8_t* pubkey, const char* password, bool autolog);
   void        loadLoginCreds();                          // from /logins at boot
 #endif
-  void saveContacts() { _store->saveContacts(this); }  // public: on-device UI edits contacts
+  void saveContacts();  // public: on-device UI edits contacts (out-of-line: applies save_filter, 1.16.0)
   void saveChannels() { _store->saveChannels(this); }  // public: on-device UI adds channels
   // Per-conversation mute: a set of UI-defined conversation keys (pubkey/secret hex,
   // <=15 chars). The backend treats them as opaque strings and persists to /mutes.
@@ -398,6 +398,9 @@ public:
   }
 #endif
 
+  // To check if there is pending work
+  bool hasPendingWork() const;
+
 private:
   struct NameOverride { uint8_t pubkey[6]; char name[32]; };
   static const int MAX_NAME_OVERRIDES = 32;
@@ -491,6 +494,7 @@ private:
   uint32_t _active_ble_pin;
   bool _iter_started;
   bool _cli_rescue;
+  bool send_unscoped;   // force un-scoped flood (instead of using send_scope)
   char cli_command[80];
   uint8_t app_target_ver;
   uint8_t *sign_data;
