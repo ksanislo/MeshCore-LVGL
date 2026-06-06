@@ -21,6 +21,13 @@
 //     ...
 //   }
 
+// Emoji pack identity: the format tag (matches the 'EMJ1' bundle magic) and the font sizes the UI
+// renders. The pack downloader builds its GitHub asset names from these; keep in sync with the packer
+// (tools/emoji_pack.py --sizes). A format bump (EMJ2) changes EMOJI_PACK_FMT -> a new emoji-emj2 release.
+#define EMOJI_PACK_FMT      "emj1"
+static const int EMOJI_SIZES[]   = {12, 14, 16, 20, 28};   // /emoji/<size>.bin
+static const int EMOJI_SIZE_COUNT = 5;
+
 extern SdFs sd;  // the shared filesystem handle (defined in the variant)
 extern volatile uint8_t sd_last_err_code;  // SdFat error from the last failed mount (diagnostic)
 extern volatile uint8_t sd_last_err_data;

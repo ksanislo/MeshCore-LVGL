@@ -11,6 +11,7 @@
 #include <esp_core_dump.h>              // boot-time crash report (coredump-to-flash is on)
 #include <sys/time.h>                   // settimeofday for the manual set-time field fallback
 #include "SdCard.h"                     // SdSvc + the shared `sd` handle, to save crash reports
+#include "EmojiPack.h"                  // on-device emoji-pack downloader (Update screen)
 #include <SPIFFS.h>                     // internal fallback for the crash report
 #include "../../companion_radio/RadioPresetStore.h"   // WiFi-updatable region presets (internal flash)
 #include <ctype.h>                      // tolower (case-insensitive search)
@@ -283,7 +284,7 @@ void UITask::dismiss_kb_cb(lv_event_t* e) {
   UITask* s = _instance;
   if (s->_chat_keyboard && lv_scr_act() == s->_chat_screen) s->layoutChatBody(false);  // also restores chat layout
   lv_obj_t* kbs[] = { s->_set_kb, s->_cinfo_kb, s->_path_kb, s->_newchan_kb, s->_login_kb,
-                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_profile_kb, s->_nodeinfo_kb };
+                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_profile_kb, s->_update_kb };
   for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -4423,7 +4424,7 @@ void UITask::ta_done_cb(lv_event_t* e) {
   lv_event_send(ta, LV_EVENT_DEFOCUSED, NULL);   // run the field's commit-on-defocus
   lv_obj_clear_state(ta, LV_STATE_FOCUSED);
   lv_obj_t* kbs[] = { s->_set_kb, s->_cinfo_kb, s->_path_kb, s->_newchan_kb, s->_login_kb,
-                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_profile_kb, s->_nodeinfo_kb };
+                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_profile_kb, s->_update_kb };
   for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -6783,6 +6784,13 @@ static int cmpSemver(const int a[4], const int b[4]) {
   return 0;
 }
 
+// OTA release-check cadence. Refresh a healthy cache occasionally; for a cold/empty fetch that fails
+// (a transient WiFi/TLS hiccup, e.g. right after a reboot) retry a few times while the screen is open,
+// bounded to stay well under GitHub's 60 req/hr unauthenticated limit.
+static const uint32_t OTA_CHECK_INTERVAL_MS = 15u * 60u * 1000u;  // refresh a good cache after 15 min
+static const uint32_t OTA_RETRY_MS          = 3000;               // retry a failed/empty fetch every 3 s
+static const uint8_t  OTA_MAX_TRIES         = 3;                  // ...up to this many per screen visit (~9 s)
+
 void UITask::buildNodeInfoScreen() {
   if (_nodeinfo_screen) return;
   _nodeinfo_screen = lv_obj_create(NULL);
@@ -6792,7 +6800,6 @@ void UITask::buildNodeInfoScreen() {
   makeHeaderBar(_nodeinfo_screen, "Node Info", nodeinfo_back_cb);
 
   lv_obj_t* body = lv_obj_create(_nodeinfo_screen);
-  _nodeinfo_body = body;
   lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
   lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
   lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
@@ -6809,12 +6816,35 @@ void UITask::buildNodeInfoScreen() {
   lv_obj_set_style_text_font(_nodeinfo_lbl, &lv_font_montserrat_14, 0);
   lv_label_set_text(_nodeinfo_lbl, "");
 
+}
+
+// Standalone "Update" config screen (Settings -> Update). Holds the firmware-update UI (moved off
+// Node Info) and, lower down, the emoji-pack downloader. Mirrors the Node Info screen scaffolding.
+void UITask::buildUpdateScreen() {
+  if (_update_screen) return;
+  _update_screen = lv_obj_create(NULL);
+  styleAsDarkScreen(_update_screen);
+  lv_obj_set_style_pad_all(_update_screen, 0, 0);
+
+  makeHeaderBar(_update_screen, "Update", update_back_cb);
+
+  lv_obj_t* body = lv_obj_create(_update_screen);
+  _update_body = body;
+  lv_obj_set_size(body, _screen_w, _screen_h - HEADER_H);
+  lv_obj_align(body, LV_ALIGN_TOP_MID, 0, HEADER_H);
+  lv_obj_set_style_bg_color(body, lv_color_hex(BG_HEX), 0);
+  lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(body, 0, 0);
+  lv_obj_set_style_pad_all(body, 12, 0);
+  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(body, 8, 0);
+
   // ----- Firmware update (OTA). Greys out when there's no IP (WiFi off/broken). -----
   { lv_obj_t* sec = lv_label_create(body);
     lv_label_set_text(sec, "Firmware update");
     lv_obj_set_style_text_color(sec, lv_color_hex(UI_ACCENT), 0);
     lv_obj_set_style_text_font(sec, fontHeading(), 0); }
-  // Current / Latest version -- two separate lines (filled in refreshNodeInfo). The list auto-refreshes
+  // Current / Latest version -- two separate lines (filled in refreshUpdate). The list auto-refreshes
   // on open (fresh boot / stale); fast dev iteration uses Custom URL, so there's no manual check button.
   _set_ota_curlatest = lv_label_create(body);
   lv_obj_set_width(_set_ota_curlatest, LV_PCT(100));
@@ -6857,14 +6887,16 @@ void UITask::buildNodeInfoScreen() {
   lv_obj_set_style_text_color(_set_ota_status, lv_color_hex(DIM_HEX), 0);
   lv_label_set_text(_set_ota_status, "");
 
-  // Keyboard for the URL field (this is a standalone screen, so it has its own).
-  _nodeinfo_kb = lv_keyboard_create(_nodeinfo_screen);
-  lv_obj_add_event_cb(_nodeinfo_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);
-  lv_obj_add_event_cb(_nodeinfo_kb, [](lv_event_t* ev) {
+  buildUpdateEmojiSection(body);   // lower "Emoji pack" section (Phase C)
+
+  // Keyboard for the URL field (standalone screen -> its own).
+  _update_kb = lv_keyboard_create(_update_screen);
+  lv_obj_add_event_cb(_update_kb, kbAccentDrawCb, LV_EVENT_DRAW_PART_BEGIN, NULL);
+  lv_obj_add_event_cb(_update_kb, [](lv_event_t* ev) {
     if (_instance && (lv_event_get_code(ev) == LV_EVENT_READY || lv_event_get_code(ev) == LV_EVENT_CANCEL))
-      lv_obj_add_flag(_instance->_nodeinfo_kb, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(_instance->_update_kb, LV_OBJ_FLAG_HIDDEN);
   }, LV_EVENT_ALL, NULL);
-  lv_obj_add_flag(_nodeinfo_kb, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(_update_kb, LV_OBJ_FLAG_HIDDEN);
 }
 
 void UITask::refreshNodeInfo() {
@@ -6923,7 +6955,12 @@ void UITask::refreshNodeInfo() {
   n += snprintf(buf + n, sizeof(buf) - n, "Airtime TX/RX: %us / %us\n", st.tx_air_secs, st.rx_air_secs);
   n += snprintf(buf + n, sizeof(buf) - n, "Queue: %u   ErrFlags: 0x%02X", st.queue_len, st.err_flags);
   lv_label_set_text(_nodeinfo_lbl, buf);
+}
 
+// The firmware-update controls (moved off Node Info). Run at 1 Hz while the Update screen is shown.
+void UITask::refreshUpdate() {
+  if (!_set_ota_curlatest) return;
+  const NodePrefs* p = _node_prefs;
   // OTA controls: keep the URL synced from prefs (unless being edited), show status, and
   // grey out the field + button when there's no IP -- a solid "WiFi is off or broken" cue.
   char ip[24], mask[24], gw[24], dns[24];
@@ -6944,20 +6981,27 @@ void UITask::refreshNodeInfo() {
   }
   _ota_was_fetching = fetching;
 
+  // Resilience: a cold/empty cache is fetched here, and a failed cold fetch auto-retries a few times
+  // (transient WiFi/TLS at boot) while the screen is open -- no need to leave + return. Bounded for the
+  // GitHub rate limit; once anything is cached (relc>0) this stops. tries==0 fetches as soon as WiFi is up.
+  if (hasIp && !fetching && relc == 0 && _ota_fetch_tries < OTA_MAX_TRIES
+      && (_ota_fetch_tries == 0 || (uint32_t)(millis() - _ota_last_check_ms) >= OTA_RETRY_MS)) {
+    mproxy::updateReleases(); _ota_last_check_ms = millis(); _ota_fetch_tries++;
+  }
+
   // Current vs latest line. "Latest" = the newest visible release (dropdown is sorted newest-first).
   if (_set_ota_curlatest) {
-    int cv[4]; parseSemver(LVGL_GUI_VERSION, cv);
     char latestTag[24] = ""; bool pr; char rurl[160];
     if (_ota_dd_count > 0) mproxy::otaRelease(_ota_dd_map[0], latestTag, sizeof(latestTag), &pr, rurl, sizeof(rurl));
     char cl[140];
     if (latestTag[0]) {
-      int lvr[4]; parseSemver(latestTag, lvr);
-      int c = cmpSemver(lvr, cv);
-      const char* note = c > 0 ? "  (update available)" : (c == 0 ? "  (up to date)" : "");
-      snprintf(cl, sizeof(cl), "Current: %s\nLatest: %s%s", LVGL_GUI_VERSION, latestTag, note);
+      // Just the numbers -- they tell the story (same = current; a higher Latest = an update is there).
+      snprintf(cl, sizeof(cl), "Current: %s\nLatest: %s", LVGL_GUI_VERSION, latestTag);
     } else {
-      // No visible release -> a clean placeholder, never the raw fetch status ("N releases").
-      const char* lt = !hasIp ? "switch to WiFi" : (mproxy::releasesFetching() ? "checking..." : "none");
+      // No visible release yet: "checking..." while a fetch/retry is still in flight or pending; settle
+      // on "none" only once retries are exhausted. Never the raw fetch status ("N releases").
+      bool trying = mproxy::releasesFetching() || (hasIp && _ota_fetch_tries < OTA_MAX_TRIES);
+      const char* lt = !hasIp ? "switch to WiFi" : (trying ? "checking..." : "none");
       snprintf(cl, sizeof(cl), "Current: %s\nLatest: %s", LVGL_GUI_VERSION, lt);
     }
     lv_label_set_text(_set_ota_curlatest, cl);
@@ -6992,10 +7036,20 @@ void UITask::refreshNodeInfo() {
     else        mproxy::otaStatus(ob, sizeof(ob));
     lv_label_set_text(_set_ota_status, ob);
   }
+
+  refreshUpdateEmoji();   // emoji-pack state line + button/progress (Phase C)
 }
 
 void UITask::openNodeInfo() {
   buildNodeInfoScreen();
+  refreshNodeInfo();
+  if (!_nodeinfo_timer) _nodeinfo_timer = lv_timer_create(nodeinfo_timer_cb, 1000, this);
+  else                  lv_timer_resume(_nodeinfo_timer);
+  lv_scr_load(_nodeinfo_screen);
+}
+
+void UITask::openUpdate() {
+  buildUpdateScreen();
   // Restore the persisted OTA option toggles from prefs (model: the gps_uart dropdown restore).
   if (_node_prefs) {
     auto setChk = [](lv_obj_t* o, bool on) { if (!o) return; if (on) lv_obj_add_state(o, LV_STATE_CHECKED); else lv_obj_clear_state(o, LV_STATE_CHECKED); };
@@ -7003,18 +7057,91 @@ void UITask::openNodeInfo() {
     setChk(_set_ota_customchk,  _node_prefs->ota_custom_url);
     if (_set_ota_url_ta) lv_textarea_set_text(_set_ota_url_ta, _node_prefs->ota_url);
   }
-  // Auto-check for new releases on open: fresh boot (never checked), empty cache, or a stale check
-  // (>15 min). No manual button -- the 1 Hz timer surfaces the result. Fast dev iteration uses Custom URL.
+  // Auto-check for new releases on open. Reset the per-visit retry budget; refresh a healthy-but-stale
+  // cache (>15 min) here. A cold/empty cache (fresh boot) is fetched -- and retried on transient failure
+  // -- by refreshUpdate (1 Hz), so it self-heals without the user leaving + returning. No manual button.
   char ip[24], mask[24], gw[24], dns[24];
   mproxy::wifiIpInfo(ip, mask, gw, dns, 24);
-  const uint32_t OTA_CHECK_INTERVAL_MS = 15u * 60u * 1000u;
+  _ota_fetch_tries = 0;
   uint32_t now = millis();
-  bool stale = (_ota_last_check_ms == 0) || (uint32_t)(now - _ota_last_check_ms) > OTA_CHECK_INTERVAL_MS;
-  if (ip[0] && (mproxy::otaReleaseCount() == 0 || stale)) { mproxy::updateReleases(); _ota_last_check_ms = now; }
-  refreshNodeInfo();
-  if (!_nodeinfo_timer) _nodeinfo_timer = lv_timer_create(nodeinfo_timer_cb, 1000, this);
-  else                  lv_timer_resume(_nodeinfo_timer);
-  lv_scr_load(_nodeinfo_screen);
+  bool stale = (_ota_last_check_ms != 0) && (uint32_t)(now - _ota_last_check_ms) > OTA_CHECK_INTERVAL_MS;
+  if (ip[0] && stale && mproxy::otaReleaseCount() > 0) { mproxy::updateReleases(); _ota_last_check_ms = now; }
+  refreshUpdate();
+  if (!_update_timer) _update_timer = lv_timer_create(update_timer_cb, 1000, this);
+  else                lv_timer_resume(_update_timer);
+  lv_scr_load(_update_screen);
+}
+
+void UITask::update_timer_cb(lv_timer_t* t) {
+  UITask* self = static_cast<UITask*>(t->user_data);
+  if (self) self->refreshUpdate();
+}
+
+void UITask::update_back_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  if (_instance->_update_timer) lv_timer_pause(_instance->_update_timer);  // stop refresh when hidden
+  lv_scr_load(_instance->_home_screen);
+}
+
+// Lower "Emoji pack" section on the Update screen: download the color-emoji bundles for this
+// firmware's format straight to the SD card (EmojiPack), so a fresh card needs no PC copy.
+void UITask::buildUpdateEmojiSection(lv_obj_t* body) {
+  { lv_obj_t* sec = lv_label_create(body);
+    lv_label_set_text(sec, "Emoji pack");
+    lv_obj_set_style_text_color(sec, lv_color_hex(UI_ACCENT), 0);
+    lv_obj_set_style_text_font(sec, fontHeading(), 0); }
+  { lv_obj_t* hint = lv_label_create(body);
+    lv_label_set_text(hint, "Color emoji for this firmware, downloaded to the SD card.");
+    lv_obj_set_width(hint, LV_PCT(100));
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(hint, lv_color_hex(DIM_HEX), 0); }
+  _set_emoji_btn = lv_btn_create(body);
+  lv_obj_set_width(_set_emoji_btn, LV_PCT(100));
+  lv_obj_set_style_bg_color(_set_emoji_btn, lv_color_hex(UI_ACCENT), 0);
+  lv_obj_add_event_cb(_set_emoji_btn, emoji_dl_cb, LV_EVENT_CLICKED, NULL);
+  _set_emoji_lbl = lv_label_create(_set_emoji_btn);
+  lv_label_set_text(_set_emoji_lbl, LV_SYMBOL_DOWNLOAD " Download emoji"); lv_obj_center(_set_emoji_lbl);
+  _set_emoji_status = lv_label_create(body);
+  lv_obj_set_width(_set_emoji_status, LV_PCT(100));
+  lv_label_set_long_mode(_set_emoji_status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_style_text_color(_set_emoji_status, lv_color_hex(DIM_HEX), 0);
+  lv_label_set_text(_set_emoji_status, "");
+}
+
+void UITask::refreshUpdateEmoji() {
+  if (!_set_emoji_btn) return;
+  bool busy = EmojiPack::busy();
+  char ip[24], mask[24], gw[24], dns[24];
+  mproxy::wifiIpInfo(ip, mask, gw, dns, 24);
+  bool hasIp = ip[0] != 0;
+  bool sdReady = SdSvc::ready();
+  if (busy) {   // morph to a red Cancel while downloading
+    lv_obj_clear_state(_set_emoji_btn, LV_STATE_DISABLED);
+    lv_obj_set_style_bg_color(_set_emoji_btn, lv_color_hex(UI_ALERT), 0);
+    if (_set_emoji_lbl) lv_label_set_text(_set_emoji_lbl, LV_SYMBOL_CLOSE " Cancel");
+  } else {
+    if (hasIp && sdReady) lv_obj_clear_state(_set_emoji_btn, LV_STATE_DISABLED);
+    else                  lv_obj_add_state(_set_emoji_btn, LV_STATE_DISABLED);
+    lv_obj_set_style_bg_color(_set_emoji_btn, lv_color_hex(UI_ACCENT), 0);
+    if (_set_emoji_lbl) lv_label_set_text(_set_emoji_lbl, LV_SYMBOL_DOWNLOAD " Download emoji");
+  }
+  if (_set_emoji_status) {
+    char eb[48];
+    if (!sdReady)              strcpy(eb, "insert + mount SD (top-bar icon)");
+    else if (!hasIp && !busy)  strcpy(eb, "switch to WiFi");
+    else                       EmojiPack::status(eb, sizeof(eb));
+    lv_label_set_text(_set_emoji_status, eb);
+  }
+}
+
+void UITask::emoji_dl_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  if (EmojiPack::busy()) { EmojiPack::cancel(); _instance->showToast("Cancelling..."); return; }
+  if (!SdSvc::ready())   { _instance->showToast("Mount the SD card first"); return; }
+  EmojiPack::start();
+  _instance->showToast("Downloading emoji...");
 }
 
 void UITask::nodeinfo_timer_cb(lv_timer_t* t) {
@@ -8071,7 +8198,8 @@ void UITask::settingsBackToLauncher() {
 void UITask::category_row_cb(lv_event_t* e) {
   if (!_instance) return;
   int cat = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_current_target(e));
-  if (cat == CAT_ABOUT) { _instance->openNodeInfo(); return; }
+  if (cat == CAT_ABOUT)  { _instance->openNodeInfo(); return; }
+  if (cat == CAT_UPDATE) { _instance->openUpdate();   return; }
   _instance->showSettingsCategory(cat);
 }
 
@@ -8278,7 +8406,8 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
 
   // Category launcher rows -> each drills into the matching pane.
   // (The owner hero above is the Profile entry -> pane 0, so no separate row.)
-  makeCategoryRow(_set_launcher, LV_SYMBOL_LIST,  "About",           "Status, version, firmware update",     CAT_ABOUT);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_LIST,  "About",           "Status, version, diagnostics",         CAT_ABOUT);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_DOWNLOAD, "Update",        "Firmware & emoji packs",               CAT_UPDATE);
   makeCategoryRow(_set_launcher, LV_SYMBOL_WIFI,  "Radio & Routing", "Frequency, power, presets, mesh",      CAT_RADIO);
   makeCategoryRow(_set_launcher, LV_SYMBOL_GPS,   "Telemetry & GPS", "Telemetry sharing, GPS module",        CAT_TELEMETRY);
   makeCategoryRow(_set_launcher, LV_SYMBOL_BELL,  "Notifications",   "New-message alerts & sound",           CAT_NOTIFY);
@@ -10944,12 +11073,12 @@ void UITask::set_ota_url_event_cb(lv_event_t* e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     _instance->_set_active_ta = ta;
-    lv_keyboard_set_textarea(_instance->_nodeinfo_kb, ta);
-    lv_keyboard_set_mode(_instance->_nodeinfo_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_nodeinfo_kb, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_align(_instance->_nodeinfo_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_move_foreground(_instance->_nodeinfo_kb);
-    _instance->raiseFieldForKb(_instance->_nodeinfo_body, _instance->_nodeinfo_kb, ta);
+    lv_keyboard_set_textarea(_instance->_update_kb, ta);
+    lv_keyboard_set_mode(_instance->_update_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_clear_flag(_instance->_update_kb, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_instance->_update_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_update_kb);
+    _instance->raiseFieldForKb(_instance->_update_body, _instance->_update_kb, ta);
   } else if (code == LV_EVENT_DEFOCUSED && _instance->_node_prefs) {
     strncpy(_instance->_node_prefs->ota_url, lv_textarea_get_text(ta), sizeof(_instance->_node_prefs->ota_url) - 1);
     _instance->_node_prefs->ota_url[sizeof(_instance->_node_prefs->ota_url) - 1] = 0;
@@ -12110,7 +12239,7 @@ void UITask::loop() {
   // RAM they need (they can't go to PSRAM here), and restore the full buffers once it ends. Both are
   // HTTPS; the release fetch waits ~150ms after raising its flag so this shrink lands before its TLS
   // handshake. Edge-driven + cheap; no-op when state is unchanged.
-  setLowMemDrawBuf(mproxy::otaBusy() || mproxy::releasesFetching());
+  setLowMemDrawBuf(mproxy::otaBusy() || mproxy::releasesFetching() || EmojiPack::fetching());
 
   // Fire any pending notification chime AFTER the wake + banner draw above, so the
   // slow first flush precedes the first note instead of stretching it. Subsequent

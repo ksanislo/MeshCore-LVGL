@@ -406,8 +406,14 @@ class UITask : public AbstractUITask {
   int             _ota_dd_count;        // entries currently in the dropdown / _ota_dd_map
   bool            _ota_was_fetching = false;  // edge-detect fetch completion -> force a dropdown rebuild
   uint32_t        _ota_last_check_ms = 0;     // millis of the last release check (0 = never; drives auto-recheck)
-  lv_obj_t*       _nodeinfo_body;       // Node Info scroll container (for kb raise)
-  lv_obj_t*       _nodeinfo_kb;         // keyboard for the OTA URL field on the Node Info screen
+  uint8_t         _ota_fetch_tries = 0;       // bounded cold-fetch retries this screen visit (transient-failure self-heal)
+  lv_obj_t*       _set_emoji_btn = nullptr;   // "Download emoji" -> morphs to "Cancel" while downloading
+  lv_obj_t*       _set_emoji_lbl = nullptr;   // its label
+  lv_obj_t*       _set_emoji_status = nullptr;// emoji-pack status/progress line
+  lv_obj_t*       _update_body;         // Update screen scroll container (for kb raise)
+  lv_obj_t*       _update_kb;           // keyboard for the OTA URL field on the Update screen
+  lv_obj_t*       _update_screen = nullptr;  // standalone "Update" screen (firmware + emoji packs)
+  lv_timer_t*     _update_timer  = nullptr;  // 1 Hz refresh while the Update screen is shown
   lv_obj_t*       _otafail_popup;       // "firmware update failed" modal (backdrop)
   lv_obj_t*       _otafail_lbl;         // its reason text
   lv_obj_t*       _set_mqtt_en;         // MQTT enable switch
@@ -438,6 +444,7 @@ class UITask : public AbstractUITask {
     CAT_PROFILE = 0, CAT_RADIO, CAT_TELEMETRY, CAT_NOTIFY,
     CAT_DISPLAY, CAT_POWER, CAT_WIFI, CAT_MQTT, CAT_COUNT,
     CAT_ABOUT = 100,
+    CAT_UPDATE = 101,   // standalone "Update" screen (firmware + emoji packs); not a pane
   };
   lv_obj_t*       _set_launcher;             // Settings category launcher (profile hero + rows)
   lv_obj_t*       _set_pane[CAT_COUNT];      // one pane per category, shown one at a time
@@ -1013,6 +1020,7 @@ private:
   static void ota_prerelease_cb(lv_event_t* e);    // include pre-releases (saved) -> re-fetch + rebuild list
   static void ota_custom_url_cb(lv_event_t* e);    // custom-URL mode (saved) -> reveal URL field
   static void ota_release_dd_cb(lv_event_t* e);    // release picked -> refresh current/latest hint
+  static void emoji_dl_cb(lv_event_t* e);          // "Download emoji" / Cancel
   void        updateOtaFieldStates();           // show/hide the disclosure controls; grey when no IP
   void        rebuildOtaReleaseList();          // (re)populate the dropdown from the backend cache
   void        wifiApplyFromForm();              // gather WiFi fields -> prefs -> ApplyWifi
@@ -1132,6 +1140,13 @@ private:
   void      buildNodeInfoScreen();
   void      openNodeInfo();
   void      refreshNodeInfo();
+  void      buildUpdateScreen();   // standalone "Update" screen: firmware-update UI + emoji-pack section
+  void      openUpdate();
+  void      refreshUpdate();       // 1 Hz: current/latest, dropdown rebuild, status, emoji-pack state
+  void      buildUpdateEmojiSection(lv_obj_t* body);  // lower "Emoji pack" section (Phase C)
+  void      refreshUpdateEmoji();  // emoji-pack state line + button/progress (Phase C)
+  static void update_timer_cb(lv_timer_t* t);
+  static void update_back_cb(lv_event_t* e);
   static void open_nodeinfo_cb(lv_event_t* e);
   static void profile_hero_cb(lv_event_t* e);   // owner hero -> Profile settings pane
   static void nodeinfo_back_cb(lv_event_t* e);
@@ -1250,7 +1265,7 @@ public:
       _set_ota_url_ta(NULL), _set_ota_url_field(NULL), _set_ota_status(NULL), _set_ota_btn(NULL), _set_ota_lbl(NULL),
       _set_ota_curlatest(NULL), _set_ota_release_field(NULL), _set_ota_release_dd(NULL),
       _set_ota_prerel_chk(NULL), _set_ota_customchk(NULL), _ota_dd_count(0),
-      _nodeinfo_body(NULL), _nodeinfo_kb(NULL),
+      _update_body(NULL), _update_kb(NULL),
       _otafail_popup(NULL), _otafail_lbl(NULL),
       _set_mqtt_en(NULL), _set_mqtt_host(NULL), _set_mqtt_port(NULL), _set_mqtt_user(NULL), _set_mqtt_pw(NULL),
       _set_mqtt_topic(NULL), _set_mqtt_tls(NULL), _set_mqtt_rx(NULL), _set_mqtt_tx(NULL), _set_mqtt_status(NULL),
