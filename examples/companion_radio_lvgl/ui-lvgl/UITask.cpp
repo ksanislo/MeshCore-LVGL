@@ -190,6 +190,10 @@ void UITask::setLowMemDrawBuf(bool low) {
   }
   lv_disp_drv_update(lv_disp_get_default(), &_disp_drv);
   if (lv_scr_act()) lv_obj_invalidate(lv_scr_act());     // full repaint into the new buffer(s)
+  // Tell the backend the TLS RAM is now freed (low) / restored (full): the release fetch on core 0
+  // blocks until this ack instead of guessing with a fixed delay. Only on a real transition -- a no-op
+  // call early-returns above, and the flag already matches _lvbuf_lowmem from the last transition.
+  mproxy::uiLowMemReady(low);
 }
 
 // Battery sampler, pinned to core 0 (the mesh core) at the mesh task's priority so it yields to packet

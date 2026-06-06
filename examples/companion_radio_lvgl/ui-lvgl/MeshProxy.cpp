@@ -545,6 +545,13 @@ bool releasesFetching() {
 #endif
   return false;
 }
+void uiLowMemReady(bool ready) {
+#if defined(WITH_WIFI) && defined(ESP32)
+  if (s_backend) s_backend->setUiLowMemReady(ready);
+#else
+  (void)ready;
+#endif
+}
 void wifiIpInfo(char* ip, char* mask, char* gw, char* dns, size_t cap) {
   if (cap == 0) return;
   if (ip) ip[0] = 0; if (mask) mask[0] = 0; if (gw) gw[0] = 0; if (dns) dns[0] = 0;

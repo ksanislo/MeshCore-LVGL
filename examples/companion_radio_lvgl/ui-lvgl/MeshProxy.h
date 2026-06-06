@@ -197,6 +197,7 @@ int  otaReleaseCount();                      // cached releases available to cho
 bool otaRelease(int idx, char* tag, size_t tag_cap, bool* prerelease, char* url, size_t url_cap);
 void otaReleaseStatus(char* out, size_t cap);// last release-list fetch result for the UI
 bool releasesFetching();                     // true while the backend HTTPS release fetch runs
+void uiLowMemReady(bool ready);              // UI -> backend ack: draw buf shrunk (TLS RAM free) / restored
 int  copyMutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);    // seed the UI's explicit-muted set at begin()
 int  copyUnmutedKeys(char out[][CHAT_PEER_NAME_MAX], int max);  // seed the UI's explicit-unmuted set at begin()
 uint32_t rtcSeconds();             // live device clock (ESP32 internal RTC; safe cross-core)

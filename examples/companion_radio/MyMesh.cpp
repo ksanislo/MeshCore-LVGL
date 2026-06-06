@@ -564,7 +564,17 @@ void MyMesh::updateReleaseList() {
   IPAddress rip;
   Serial.printf("[REL] free-int=%u before resolve\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   if (!WiFi.hostByName(host, rip)) { fail("can't resolve host"); return; }
-  vTaskDelay(pdMS_TO_TICKS(150));       // let the UI loop free the draw buffer before the TLS handshake
+#ifdef MESH_PROXY
+  // Wait until the UI actually CONFIRMS the draw buffer is shrunk (TLS RAM freed) rather than guessing
+  // with a fixed delay. The guess raced the heavy Update-screen build on core 1: if the UI was still
+  // building when the delay elapsed, we opened TLS before the RAM was free and the first fetch failed
+  // -> "none". Bounded so a busy or closed UI can never wedge the backend here.
+  { uint32_t t0 = millis();
+    while (!_ui_lowmem_ready && (uint32_t)(millis() - t0) < 2500) vTaskDelay(pdMS_TO_TICKS(10)); }
+  vTaskDelay(pdMS_TO_TICKS(20));        // brief settle after the realloc + repaint
+#else
+  vTaskDelay(pdMS_TO_TICKS(150));       // non-LVGL: no draw buffer to shrink, just a small settle
+#endif
   Serial.printf("[REL] resolved %s=%s, free-int=%u (largest=%u) before TLS\n", host, rip.toString().c_str(),
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
@@ -584,8 +594,12 @@ void MyMesh::updateReleaseList() {
   Serial.printf("[REL] GET -> %d, free-int=%u\n", code, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   if (code != 200) { http.end(); char b[40]; snprintf(b, sizeof(b), "HTTP %d", code); fail(b); return; }
 
-  // Stream the (chunked) body into a PSRAM buffer instead of an internal-SRAM String. per_page bounds it.
-  const size_t CAP = 48 * 1024;
+  // Stream the (chunked) body into a PSRAM buffer instead of an internal-SRAM String. CAP must hold the
+  // WHOLE response: GitHub's release JSON is ~7 KB/release (mostly per-asset uploader/author objects we
+  // don't use), so per_page=10 runs ~55-70 KB. The old 48 KB silently truncated the body once we passed
+  // ~7 releases -> cJSON_Parse failed on the cut-off JSON -> the entire list dropped to "none". 128 KB
+  // (freed right after the parse) covers per_page=10 with margin; per_page bounds it from growing further.
+  const size_t CAP = 128 * 1024;
   char* body = (char*)ps_malloc(CAP);
   if (!body) { http.end(); fail("no PSRAM"); return; }
   WiFiClient* stream = http.getStreamPtr();
@@ -601,8 +615,10 @@ void MyMesh::updateReleaseList() {
       break;                                                 // stall guard
     } else { delay(2); }
   }
+  bool truncated = (len >= CAP - 1);                          // filled the buffer -> body was cut off
   body[len] = 0;
   http.end();
+  if (truncated) { free(body); Serial.printf("[REL] body truncated at %u bytes -- raise CAP\n", (unsigned)len); fail("list too large"); return; }
 
   cJSON* root = cJSON_Parse(body);
   free(body);                                                // cJSON copied what it needs
