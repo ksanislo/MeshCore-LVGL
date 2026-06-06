@@ -1,6 +1,7 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #include "MyMesh.h"
+#include "DebugLog.h"   // g_dbg_serial: drop [REL]/[OTA] diagnostics when WiFi mode owns USB Serial
 #ifdef MESH_PROXY
   // Dual-core split (CrowPanel LVGL companion): the UI talks to the mesh backend
   // only through MeshProxy (snapshot + command/event queues). See MeshProxy.h.
@@ -244,6 +245,7 @@ void setup() {
   // mesh loop calls checkRecvFrame()/writeFrame() unconditionally). Toggling WiFi
   // needs a reboot to switch stacks.
   if (the_mesh.getNodePrefs()->wifi_enabled) {
+    g_dbg_serial = false;          // companion now owns USB Serial -> drop [REL]/[OTA] diagnostics (DebugLog.h)
     usb_serial.begin(Serial);
     the_mesh.startInterface(usb_serial);
   } else {

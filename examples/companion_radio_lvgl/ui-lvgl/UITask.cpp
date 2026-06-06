@@ -12,6 +12,7 @@
 #include <sys/time.h>                   // settimeofday for the manual set-time field fallback
 #include "SdCard.h"                     // SdSvc + the shared `sd` handle, to save crash reports
 #include "EmojiPack.h"                  // on-device emoji-pack downloader (Update screen)
+#include "DebugLog.h"                   // g_dbg_serial: drop [OTA] diagnostics when WiFi owns USB Serial
 #include <SPIFFS.h>                     // internal fallback for the crash report
 #include "../../companion_radio/RadioPresetStore.h"   // WiFi-updatable region presets (internal flash)
 #include <ctype.h>                      // tolower (case-insensitive search)
@@ -11118,8 +11119,8 @@ void UITask::ota_update_cb(lv_event_t* e) {
   // SD on demand afterward. Runs on the UI core (required for the cache's LVGL-ref drop).
   uint32_t psram_before = ESP.getFreePsram();
   SdSvc::emojiBitmapCacheEvict();
-  Serial.printf("[OTA] pre-flight: psram %u -> %u, largest-heap=%u\n",
-                (unsigned)psram_before, (unsigned)ESP.getFreePsram(), (unsigned)ESP.getMaxAllocHeap());
+  DBG_LOGF("[OTA] pre-flight: psram %u -> %u, largest-heap=%u\n",
+           (unsigned)psram_before, (unsigned)ESP.getFreePsram(), (unsigned)ESP.getMaxAllocHeap());
   mproxy::postCommand(c);
   _instance->showToast("Downloading firmware...");   // runs on its own task; status line updates at 1 Hz
 }

@@ -1,10 +1,15 @@
 #include "MyMesh.h"
 #include "BatteryState.h"
+#include "DebugLog.h"
 
 // Fuel-gauge state (written by the UI estimator, read here for telemetry). -1 pct = no monitor.
 volatile int g_batt_pct = -1;
 volatile int g_batt_mv = 0;
 volatile int g_batt_ma = 0;
+
+// Diagnostic gate (see DebugLog.h). On by default (BLE mode, USB Serial free); main.cpp clears it in
+// WiFi mode so the [REL]/[OTA] prints can't corrupt the companion frame protocol that rides USB Serial.
+bool g_dbg_serial = true;
 
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
@@ -562,7 +567,7 @@ void MyMesh::updateReleaseList() {
   // core get a couple of loop passes in to shrink the draw buffer before we open the TLS socket.
   const char* host = "api.github.com";
   IPAddress rip;
-  Serial.printf("[REL] free-int=%u before resolve\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  DBG_LOGF("[REL] free-int=%u before resolve\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   if (!WiFi.hostByName(host, rip)) { fail("can't resolve host"); return; }
 #ifdef MESH_PROXY
   // Wait until the UI actually CONFIRMS the draw buffer is shrunk (TLS RAM freed) rather than guessing
@@ -575,8 +580,8 @@ void MyMesh::updateReleaseList() {
 #else
   vTaskDelay(pdMS_TO_TICKS(150));       // non-LVGL: no draw buffer to shrink, just a small settle
 #endif
-  Serial.printf("[REL] resolved %s=%s, free-int=%u (largest=%u) before TLS\n", host, rip.toString().c_str(),
-                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  DBG_LOGF("[REL] resolved %s=%s, free-int=%u (largest=%u) before TLS\n", host, rip.toString().c_str(),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
   WiFiClientSecure client;
   client.setInsecure();                 // v1: no cert verification (matches the preset/OTA path)
@@ -591,7 +596,7 @@ void MyMesh::updateReleaseList() {
   http.addHeader("User-Agent", "MeshCore-LVGL-OTA");        // GitHub returns 403 without a User-Agent
   http.addHeader("Accept", "application/vnd.github+json");
   int code = http.GET();
-  Serial.printf("[REL] GET -> %d, free-int=%u\n", code, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  DBG_LOGF("[REL] GET -> %d, free-int=%u\n", code, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   if (code != 200) { http.end(); char b[40]; snprintf(b, sizeof(b), "HTTP %d", code); fail(b); return; }
 
   // Stream the (chunked) body into a PSRAM buffer instead of an internal-SRAM String. CAP must hold the
@@ -618,7 +623,7 @@ void MyMesh::updateReleaseList() {
   bool truncated = (len >= CAP - 1);                          // filled the buffer -> body was cut off
   body[len] = 0;
   http.end();
-  if (truncated) { free(body); Serial.printf("[REL] body truncated at %u bytes -- raise CAP\n", (unsigned)len); fail("list too large"); return; }
+  if (truncated) { free(body); DBG_LOGF("[REL] body truncated at %u bytes -- raise CAP\n", (unsigned)len); fail("list too large"); return; }
 
   cJSON* root = cJSON_Parse(body);
   free(body);                                                // cJSON copied what it needs
@@ -661,7 +666,7 @@ void MyMesh::updateReleaseList() {
   _ota_release_count = n;
   if (n == 0) snprintf(_ota_release_status, sizeof(_ota_release_status), "no matching assets");
   else        snprintf(_ota_release_status, sizeof(_ota_release_status), "%d releases", n);
-  Serial.printf("[REL] parsed %d releases (%u bytes)\n", n, (unsigned)len);
+  DBG_LOGF("[REL] parsed %d releases (%u bytes)\n", n, (unsigned)len);
   done();
 }
 
@@ -827,11 +832,11 @@ void MyMesh::otaFromUrl() {
     fail(b); return;
   }
   int len = http.getSize();            // may be -1 (chunked); Update handles unknown size
-  Serial.printf("[OTA] %s, content-length=%d, md5=%s\n", url, len, expected_md5[0] ? expected_md5 : "(none)");
+  DBG_LOGF("[OTA] %s, content-length=%d, md5=%s\n", url, len, expected_md5[0] ? expected_md5 : "(none)");
 
   set("preparing flash...");           // Update.begin erases the OTA partition (seconds) -> own phase
   if (!Update.begin(len > 0 ? (size_t)len : UPDATE_SIZE_UNKNOWN)) {
-    http.end(); fail("no OTA space"); Serial.printf("[OTA] begin failed: %s\n", Update.errorString()); return;
+    http.end(); fail("no OTA space"); DBG_LOGF("[OTA] begin failed: %s\n", Update.errorString()); return;
   }
   if (expected_md5[0]) Update.setMD5(expected_md5);   // checked inline as it streams; only a
   set("downloading...");                              // mismatch surfaces a message (at end())
@@ -854,7 +859,7 @@ void MyMesh::otaFromUrl() {
       if (r > 0) {
         if (Update.write(buf, r) != (size_t)r) {
           Update.abort(); http.end(); fail("write error");
-          Serial.printf("[OTA] write: %s\n", Update.errorString()); return;
+          DBG_LOGF("[OTA] write: %s\n", Update.errorString()); return;
         }
         written += r;
         last_data_ms = millis();
@@ -869,19 +874,19 @@ void MyMesh::otaFromUrl() {
   }
   http.end();
   _ota_client = nullptr;   // streaming done; the client is about to go out of scope -> nothing to stop
-  if (cancelled) { Update.abort(); set("cancelled"); Serial.println("[OTA] cancelled by user"); return; }
-  if (stalled)   { Update.abort(); fail("connection lost"); Serial.println("[OTA] stalled mid-download"); return; }
+  if (cancelled) { Update.abort(); set("cancelled"); DBG_LOGF("[OTA] cancelled by user\n"); return; }
+  if (stalled)   { Update.abort(); fail("connection lost"); DBG_LOGF("[OTA] stalled mid-download\n"); return; }
   if (len > 0 && written != (size_t)len) {
     Update.abort(); char b[32]; snprintf(b, sizeof(b), "short: %u/%d", (unsigned)written, len); fail(b);
-    Serial.printf("[OTA] %s\n", b); return;
+    DBG_LOGF("[OTA] %s\n", b); return;
   }
   if (!Update.end(true)) {             // true = finalize + set the new image as boot partition
     char b[48];
     if (Update.getError() == UPDATE_ERROR_MD5) snprintf(b, sizeof(b), "checksum mismatch - kept current");
     else                                       snprintf(b, sizeof(b), "verify failed: %s", Update.errorString());
-    fail(b); Serial.printf("[OTA] %s\n", b); return;  // boot partition NOT changed -> stay on good image
+    fail(b); DBG_LOGF("[OTA] %s\n", b); return;  // boot partition NOT changed -> stay on good image
   }
-  Serial.printf("[OTA] wrote %u bytes, rebooting into new image\n", (unsigned)written);
+  DBG_LOGF("[OTA] wrote %u bytes, rebooting into new image\n", (unsigned)written);
   set("rebooting...");
   if (_ui) _ui->otaRebooting();   // let the UI flash a toast (from any screen) before we go
   delay(1200);                    // give the UI core a moment to render it before the reset
