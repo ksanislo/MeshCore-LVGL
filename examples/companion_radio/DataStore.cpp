@@ -326,6 +326,9 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     _prefs.gps_uart = 1;                                                                   // 195 (UART1 17/18)
     _prefs.ota_prerelease = 0;                                                             // 196 (stable only)
     _prefs.ota_custom_url = 0;                                                             // 197 (GitHub release mode)
+    _prefs.trackball_speed = 0;                                                            // 198 (0 -> UI default)
+    _prefs.trackball_invert = 0;                                                           // 199 (normal direction)
+    _prefs.font_scale = 0;                                                                 // 200 (auto by screen size)
     file.read((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
     file.read((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
     file.read((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
@@ -378,6 +381,9 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.gps_uart, sizeof(_prefs.gps_uart));                           // 195
     file.read((uint8_t *)&_prefs.ota_prerelease, sizeof(_prefs.ota_prerelease));               // 196
     file.read((uint8_t *)&_prefs.ota_custom_url, sizeof(_prefs.ota_custom_url));               // 197
+    file.read((uint8_t *)&_prefs.trackball_speed, sizeof(_prefs.trackball_speed));             // 198
+    file.read((uint8_t *)&_prefs.trackball_invert, sizeof(_prefs.trackball_invert));           // 199
+    file.read((uint8_t *)&_prefs.font_scale, sizeof(_prefs.font_scale));                       // 200
 
     file.close();
   }
@@ -471,6 +477,9 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.gps_uart, sizeof(_prefs.gps_uart));                          // 195
     file.write((uint8_t *)&_prefs.ota_prerelease, sizeof(_prefs.ota_prerelease));              // 196
     file.write((uint8_t *)&_prefs.ota_custom_url, sizeof(_prefs.ota_custom_url));              // 197
+    file.write((uint8_t *)&_prefs.trackball_speed, sizeof(_prefs.trackball_speed));            // 198
+    file.write((uint8_t *)&_prefs.trackball_invert, sizeof(_prefs.trackball_invert));          // 199
+    file.write((uint8_t *)&_prefs.font_scale, sizeof(_prefs.font_scale));                      // 200
 
     file.close();
     commitTmp(_fs, "/new_prefs.tmp", "/new_prefs");

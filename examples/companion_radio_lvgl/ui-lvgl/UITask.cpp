@@ -72,6 +72,18 @@ __attribute__((weak)) void board_bus_unlock() {}
 __attribute__((weak)) bool board_has_physical_kbd() { return false; }
 __attribute__((weak)) int  board_kbd_read()         { return 0; }
 
+// Trackball / scroll-ball hooks. A variant with a nav ball (T-Deck) returns true from
+// board_has_trackball() and the net roll since the last call (+dy = down, +dx = right) plus the
+// center-click level from board_trackball_read(); UITask scrolls the active list/chat from it
+// (UITask::pollTrackball). Default: no ball -> no-op.
+__attribute__((weak)) bool board_has_trackball() { return false; }
+__attribute__((weak)) void board_trackball_read(int16_t* dx, int16_t* dy, bool* pressed) {
+  if (dx) *dx = 0; if (dy) *dy = 0; if (pressed) *pressed = false;
+}
+// Trackball scroll speed = pixels scrolled per net roll-pulse: the Settings slider range + the
+// value used when the setting is unset (0). 16 ~ 2x the original fixed feel (8 was too slow).
+static const int SCROLL_SPEED_MIN = 4, SCROLL_SPEED_MAX = 60, SCROLL_SPEED_DEFAULT = 16;
+
 // Show an on-screen keyboard -- unless this board has a physical one (then it's a no-op, so the soft
 // keyboard never appears and the layout keeps the full screen). Replaces the bare clear-HIDDEN at the
 // soft-kb show sites.
@@ -324,6 +336,10 @@ void UITask::kbd_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   (void)drv;
   static uint32_t last_key = 0;
   int c = board_kbd_read();
+  if (c && _instance && _instance->noteInputWake()) {   // a key while asleep -> wake; swallow this key
+    data->key = last_key; data->state = LV_INDEV_STATE_RELEASED;
+    return;
+  }
   uint32_t k = 0;
   if      (c == 8 || c == 127) k = LV_KEY_BACKSPACE;
   else if (c == 13 || c == 10) k = LV_KEY_ENTER;
@@ -484,10 +500,12 @@ lv_obj_t* UITask::buildSplashScreen() {
   return scr;
 }
 
-static constexpr int HEADER_H     = 48;
-static constexpr int TABBAR_H     = 56;
-static constexpr int COMPOSE_H    = 50;
-static constexpr int SEARCH_BAR_H = 44;
+// Tier-scaled (see g_ui_metrics below + ui_theme.h). Macros so the ~50 existing call sites are
+// unchanged; they now read the boot-seeded metrics instead of a compile-time literal.
+#define HEADER_H     (g_ui_metrics.header_h)
+#define TABBAR_H     (g_ui_metrics.tabbar_h)
+#define COMPOSE_H    (g_ui_metrics.compose_h)
+#define SEARCH_BAR_H (g_ui_metrics.search_bar_h)
 
 // Standard 36px square back-target (whole corner is tappable), arrow centered.
 lv_obj_t* UITask::makeBackButton(lv_obj_t* bar, lv_event_cb_t cb) {
@@ -2317,6 +2335,72 @@ void UITask::storeAppend(bool outgoing, const char* key, const char* sender,
 #endif
 }
 
+// Reset the idle-off timer and, if the screen is asleep, wake it. Mirrors the touch wake in
+// touchpad_read_cb so the physical keyboard and trackball keep the screen alive / wake it too.
+// Returns true if THIS call woke the display, so the caller can swallow the waking key/roll (the
+// input that wakes the screen shouldn't also act on whatever's under it -- same as the wake tap).
+bool UITask::noteInputWake() {
+  _last_input_ms = millis();
+  if (_display_off) { board_set_backlight(_backlight_duty); _display_off = false; return true; }
+  return false;
+}
+
+// ---- Trackball scroll (T-Deck nav ball) -------------------------------------
+// Decide which container the ball should scroll right now. We never scroll the base screen out from
+// under an open modal: every popup lives on lv_layer_top() with a (near) full-screen backdrop, so a
+// visible full-screen top-layer child means "a modal owns input" -> do nothing (touch still works).
+// Otherwise: chat history (its scroll cb drives the SD-paged scrollback), the active settings pane,
+// or the active tab's list. All are long-lived objects, so the pointers are stable.
+lv_obj_t* UITask::currentScrollable() {
+  lv_obj_t* top = lv_layer_top();
+  lv_coord_t sw = lv_obj_get_width(lv_scr_act()), sh = lv_obj_get_height(lv_scr_act());
+  for (uint32_t i = 0; i < lv_obj_get_child_cnt(top); i++) {
+    lv_obj_t* c = lv_obj_get_child(top, i);
+    if (lv_obj_has_flag(c, LV_OBJ_FLAG_HIDDEN)) continue;
+    if (lv_obj_get_width(c) >= (sw * 3) / 4 && lv_obj_get_height(c) >= (sh * 3) / 4)
+      return nullptr;   // a modal/picker backdrop is up -> leave it to touch
+  }
+  if (_chat_screen && lv_scr_act() == _chat_screen) return _chat_history;
+  if (_tabview) {
+    uint16_t t = lv_tabview_get_tab_act(_tabview);
+    if (t == 0) return _clist.scroll;        // Contacts (virtualized; scroll cb re-windows the pool)
+    if (t == 1) return _channels_list;        // Channels
+    if (t == 2) return _set_active_pane ? _set_active_pane : _set_launcher;  // Settings: open pane or launcher
+  }
+  return nullptr;
+}
+
+// Poll the nav ball each UI pass and turn rolls into scrolls. Cadence-independent: counts accumulate
+// in the ISR and we consume the net, so total scroll == total pulses regardless of how often we poll.
+// Center click = a context action (chat: jump to the live tail); edge-triggered. STEP tunes feel.
+void UITask::pollTrackball() {
+  if (!board_has_trackball()) return;
+  int16_t dx = 0, dy = 0; bool pressed = false;
+  board_trackball_read(&dx, &dy, &pressed);
+
+  bool activity = dx || dy || (pressed && !_tb_pressed_prev);   // any roll or a fresh click
+  if (activity && noteInputWake()) {            // was asleep -> this roll/click just wakes; swallow it
+    _tb_pressed_prev = pressed;
+    return;
+  }
+
+  if (pressed && !_tb_pressed_prev) {           // click: context action
+    if (_chat_screen && lv_scr_act() == _chat_screen) _chat_want_bottom = true;  // snap to latest
+  }
+  _tb_pressed_prev = pressed;
+
+  if (dy == 0) return;                          // vertical only for now (dx reserved)
+  lv_obj_t* target = currentScrollable();
+  if (!target) return;
+  // Pixels per net pulse, from the persisted "Scroll speed" setting (Settings > Display). 0 = unset
+  // -> default. The Settings slider clamps the user range; clamp here too against a stale prefs byte.
+  int step = (_node_prefs && _node_prefs->trackball_speed) ? _node_prefs->trackball_speed : SCROLL_SPEED_DEFAULT;
+  if (step < SCROLL_SPEED_MIN) step = SCROLL_SPEED_MIN;
+  if (step > SCROLL_SPEED_MAX) step = SCROLL_SPEED_MAX;
+  if (_node_prefs && _node_prefs->trackball_invert) step = -step;   // "Reverse scroll" setting
+  lv_obj_scroll_by(target, 0, (lv_coord_t)dy * step, LV_ANIM_OFF);  // +dy (rolled down) -> scroll down
+}
+
 void UITask::convKey(const uint8_t* key6, bool is_channel, char* out, size_t cap) {
   if (is_channel && cap > 16) {
     out[0] = 'c'; out[1] = 'h'; out[2] = '_';
@@ -2560,9 +2644,12 @@ static lv_font_t* emojiImgFont(int size) {
 
 // Nominal pixel size of a built-in Montserrat font (for matching the emoji size).
 static int nominalSize(const lv_font_t* f) {
+  if (f == &lv_font_montserrat_10) return 10;
   if (f == &lv_font_montserrat_12) return 12;
   if (f == &lv_font_montserrat_16) return 16;
+  if (f == &lv_font_montserrat_18) return 18;
   if (f == &lv_font_montserrat_20) return 20;
+  if (f == &lv_font_montserrat_24) return 24;
   if (f == &lv_font_montserrat_28) return 28;
   return 14;
 }
@@ -2586,12 +2673,42 @@ static const lv_font_t* withEmoji(const lv_font_t* base) {
 
 static const lv_font_t* msgFont() { return fontBody(); }
 
+// Selectable font scale ("Font size" setting). The ramp is a row of this table, chosen once at
+// begin() from NodePrefs.font_scale -- or, when unset (auto), from the screen width (a 320px T-Deck
+// gets Small; a 480px CrowPanel gets Large). Fixed per boot, so changing it needs a restart (like
+// rotation) and the withEmoji/emojiImgFont caches still only ever see one tier's 5 fonts.
+// Columns: 0=hero (page name), 1=title (header), 2=heading (section), 3=body (default), 4=caption.
+enum { FS_SMALL = 0, FS_MEDIUM = 1, FS_LARGE = 2 };
+static uint8_t s_font_tier = FS_LARGE;   // seeded in begin(); default matches the original CrowPanel ramp
+static const lv_font_t* const FONT_RAMP[3][5] = {
+  /* Small  */ { &lv_font_montserrat_20, &lv_font_montserrat_16, &lv_font_montserrat_14, &lv_font_montserrat_12, &lv_font_montserrat_10 },
+  /* Medium */ { &lv_font_montserrat_24, &lv_font_montserrat_18, &lv_font_montserrat_16, &lv_font_montserrat_14, &lv_font_montserrat_12 },
+  /* Large  */ { &lv_font_montserrat_28, &lv_font_montserrat_20, &lv_font_montserrat_16, &lv_font_montserrat_14, &lv_font_montserrat_12 },
+};
+// Map a NodePrefs.font_scale (0=auto,1=Small,2=Medium,3=Large) + the screen width to a tier index.
+static uint8_t fontTierFor(uint8_t pref, int screen_w) {
+  if (pref >= 1 && pref <= 3) return (uint8_t)(pref - 1);   // explicit override
+  if (screen_w >= 480) return FS_LARGE;                      // CrowPanel 3.5" and larger
+  if (screen_w >= 360) return FS_MEDIUM;
+  return FS_SMALL;                                            // T-Deck (320) and smaller
+}
+
+// Structural element sizes per tier (same index as FONT_RAMP). Large == the original constants, so
+// CrowPanel is byte-for-byte unchanged; Small/Medium tighten rows/avatars/bars to match the font.
+// Fields: contact_row_h, avatar_d, hero_avatar_d, chat_avatar_d, header_h, tabbar_h, compose_h, search_bar_h.
+static const UiMetrics METRICS_RAMP[3] = {
+  /* Small  */ { 44, 30, 40, 26, 38, 44, 42, 36 },
+  /* Medium */ { 50, 36, 48, 30, 44, 50, 46, 40 },
+  /* Large  */ { 56, 40, 56, 34, 48, 56, 50, 44 },
+};
+UiMetrics g_ui_metrics = METRICS_RAMP[FS_LARGE];   // default Large; begin() reseeds from s_font_tier
+
 // Type ramp definitions (see forward decls up top).
-static const lv_font_t* fontHero()    { return withEmoji(&lv_font_montserrat_28); }
-static const lv_font_t* fontTitle()   { return withEmoji(&lv_font_montserrat_20); }
-static const lv_font_t* fontHeading() { return withEmoji(&lv_font_montserrat_16); }
-static const lv_font_t* fontBody()    { return withEmoji(&lv_font_montserrat_14); }
-static const lv_font_t* fontCaption() { return withEmoji(&lv_font_montserrat_12); }
+static const lv_font_t* fontHero()    { return withEmoji(FONT_RAMP[s_font_tier][0]); }
+static const lv_font_t* fontTitle()   { return withEmoji(FONT_RAMP[s_font_tier][1]); }
+static const lv_font_t* fontHeading() { return withEmoji(FONT_RAMP[s_font_tier][2]); }
+static const lv_font_t* fontBody()    { return withEmoji(FONT_RAMP[s_font_tier][3]); }
+static const lv_font_t* fontCaption() { return withEmoji(FONT_RAMP[s_font_tier][4]); }
 
 // Message text is a recolor lv_label (NOT a spangroup) so it supports native text
 // selection (LV_LABEL_TEXT_SELECTION) + per-letter hit-testing for the universal
@@ -4042,7 +4159,7 @@ void UITask::openChat(const char* peer_name) {
     // Avatar circle -- same branding as the contacts list (set per-open in openChat).
     _chat_avatar = lv_obj_create(bar);
     lv_obj_remove_style_all(_chat_avatar);
-    lv_obj_set_size(_chat_avatar, 34, 34);
+    lv_obj_set_size(_chat_avatar, g_ui_metrics.chat_avatar_d, g_ui_metrics.chat_avatar_d);
     lv_obj_set_style_radius(_chat_avatar, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(_chat_avatar, LV_OPA_COVER, 0);
     lv_obj_clear_flag(_chat_avatar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
@@ -4399,6 +4516,11 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 
   _screen_w = _lgfx->width();
   _screen_h = _lgfx->height();
+
+  // Pick the type-ramp tier before any screen is built: the saved "Font size", or auto by resolution
+  // (Small for the 320px T-Deck, Large for the 480px CrowPanel) when unset. Fixed for this boot.
+  s_font_tier = fontTierFor(_node_prefs ? _node_prefs->font_scale : 0, _screen_w);
+  g_ui_metrics = METRICS_RAMP[s_font_tier];   // structural sizes follow the same tier as the fonts
 
   lv_init();
 #ifdef HAS_SD_CARD
@@ -4812,7 +4934,7 @@ void UITask::ensureBanner() {
     lv_obj_add_event_cb(_banner, banner_body_cb, LV_EVENT_CLICKED, NULL);
 
     _banner_avatar = lv_obj_create(_banner);
-    lv_obj_set_size(_banner_avatar, 36, 36);
+    lv_obj_set_size(_banner_avatar, g_ui_metrics.chat_avatar_d, g_ui_metrics.chat_avatar_d);
     lv_obj_set_style_radius(_banner_avatar, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(_banner_avatar, 0, 0);
     lv_obj_set_style_pad_all(_banner_avatar, 0, 0);
@@ -5080,7 +5202,7 @@ static void makeHeroCard(lv_obj_t* parent, lv_obj_t** avatarOut, lv_obj_t** avat
 
   lv_obj_t* av = lv_obj_create(hero);
   lv_obj_remove_style_all(av);
-  lv_obj_set_size(av, 56, 56);
+  lv_obj_set_size(av, g_ui_metrics.hero_avatar_d, g_ui_metrics.hero_avatar_d);
   lv_obj_set_style_radius(av, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
   lv_obj_clear_flag(av, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
@@ -9073,11 +9195,37 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_width(_set_bright_slider, LV_PCT(100));
   lv_obj_add_event_cb(_set_bright_slider, set_bright_cb, LV_EVENT_ALL, NULL);
 
+  // Scroll speed -- only on boards with a nav ball / scroll wheel (T-Deck). Drives the pixels-per-
+  // roll-pulse used by pollTrackball; persisted as trackball_speed. Mirrors the brightness slider.
+  if (board_has_trackball()) {
+    lv_obj_t* fss = makeField(body, "Scroll speed");
+    lv_obj_set_style_pad_top(fss, 6, 0);
+    lv_obj_set_style_pad_bottom(fss, 10, 0);
+    lv_obj_set_style_pad_right(fss, 8, 0);
+    _set_scroll_slider = lv_slider_create(fss);
+    lv_slider_set_range(_set_scroll_slider, SCROLL_SPEED_MIN, SCROLL_SPEED_MAX);
+    lv_obj_set_width(_set_scroll_slider, LV_PCT(100));
+    lv_obj_add_event_cb(_set_scroll_slider, set_scrollspeed_cb, LV_EVENT_ALL, NULL);
+
+    _set_scroll_inv_chk = lv_checkbox_create(body);
+    lv_checkbox_set_text(_set_scroll_inv_chk, "Reverse scroll direction");
+    lv_obj_set_style_text_color(_set_scroll_inv_chk, lv_color_hex(FG_HEX), 0);
+    lv_obj_add_event_cb(_set_scroll_inv_chk, set_scrollinvert_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  }
+
   lv_obj_t* fr = makeField(body, "Rotation (restart)");
   _set_rot_dd = lv_dropdown_create(fr);
   lv_dropdown_set_options(_set_rot_dd, "0\n90\n180\n270");
   lv_obj_set_width(_set_rot_dd, LV_PCT(100));
   lv_obj_add_event_cb(_set_rot_dd, set_rot_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  // UI type-ramp size. Auto picks by screen resolution (Small on the T-Deck, Large on CrowPanel);
+  // the explicit tiers override. Applied at boot, so it carries the "(restart)" note like rotation.
+  lv_obj_t* ffs = makeField(body, "Font size (restart)");
+  _set_font_dd = lv_dropdown_create(ffs);
+  lv_dropdown_set_options(_set_font_dd, "Auto\nSmall\nMedium\nLarge");
+  lv_obj_set_width(_set_font_dd, LV_PCT(100));
+  lv_obj_add_event_cb(_set_font_dd, set_font_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
   lv_obj_t* fto = makeField(body, "Screen timeout");
   _set_screen_dd = lv_dropdown_create(fto);
@@ -9267,7 +9415,21 @@ void UITask::populateSettings() {
   if (pct > 100) pct = 100;
   lv_slider_set_value(_set_bright_slider, pct, LV_ANIM_OFF);
 
+  if (_set_scroll_slider) {   // present only on trackball boards
+    int sp = _node_prefs->trackball_speed ? _node_prefs->trackball_speed : SCROLL_SPEED_DEFAULT;
+    if (sp < SCROLL_SPEED_MIN) sp = SCROLL_SPEED_MIN;
+    if (sp > SCROLL_SPEED_MAX) sp = SCROLL_SPEED_MAX;
+    lv_slider_set_value(_set_scroll_slider, sp, LV_ANIM_OFF);
+  }
+  if (_set_scroll_inv_chk) {
+    if (_node_prefs->trackball_invert) lv_obj_add_state(_set_scroll_inv_chk, LV_STATE_CHECKED);
+    else                               lv_obj_clear_state(_set_scroll_inv_chk, LV_STATE_CHECKED);
+  }
+
   lv_dropdown_set_selected(_set_rot_dd, _lgfx ? (_lgfx->getRotation() & 3) : 0);
+
+  if (_set_font_dd)
+    lv_dropdown_set_selected(_set_font_dd, _node_prefs->font_scale <= 3 ? _node_prefs->font_scale : 0);
 
   if (_set_screen_dd) {
     const uint16_t secs[] = {0, 15, 30, 60, 120, 300};   // matches the options + set_screen_cb
@@ -9592,12 +9754,41 @@ void UITask::set_bright_cb(lv_event_t* e) {
   }
 }
 
+// Trackball "Scroll speed" slider (T-Deck). Applies live (pollTrackball reads trackball_speed each
+// pass), persists on release. Mirrors set_bright_cb's live-preview / save-on-release split.
+void UITask::set_scrollspeed_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  lv_event_code_t code = lv_event_get_code(e);
+  int v = (int)lv_slider_get_value(lv_event_get_target(e));
+  if (v < SCROLL_SPEED_MIN) v = SCROLL_SPEED_MIN;
+  if (v > SCROLL_SPEED_MAX) v = SCROLL_SPEED_MAX;
+  _instance->_node_prefs->trackball_speed = (uint8_t)v;   // live: next roll uses it immediately
+  if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) pushPrefs();  // persist on release
+}
+
+// Trackball "Reverse scroll direction" checkbox (T-Deck). Applies live (pollTrackball reads
+// trackball_invert each pass) and persists immediately.
+void UITask::set_scrollinvert_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  _instance->_node_prefs->trackball_invert = on ? 1 : 0;
+  pushPrefs();
+}
+
 void UITask::set_rot_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   uint16_t sel = lv_dropdown_get_selected(lv_event_get_target(e));  // 0..3
   _instance->_node_prefs->display_rotation = (uint8_t)(sel + 1);    // 1-based; 0 = unset
   pushPrefs();
   _instance->showToast("Rotation saved (restart)");
+}
+
+void UITask::set_font_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  uint16_t sel = lv_dropdown_get_selected(lv_event_get_target(e));  // 0=Auto,1=Small,2=Medium,3=Large
+  _instance->_node_prefs->font_scale = (uint8_t)sel;                // matches NodePrefs encoding
+  pushPrefs();
+  _instance->showToast("Font size saved (restart)");
 }
 
 // Screen-timeout dropdown <-> seconds (index order must match the options string).
@@ -12365,6 +12556,8 @@ void UITask::loop() {
 #ifdef PIN_BUZZER
   _buzzer.loop();   // non-blocking RTTTL state-stepping; run every pass, even display-off
 #endif
+
+  pollTrackball();  // T-Deck nav ball -> scroll the active list/chat (no-op without a ball)
 
   // Periodically discipline the system clock from the battery-backed RTC chip: its
   // crystal is more stable than the MCU's, so this corrects ESP32 drift between the

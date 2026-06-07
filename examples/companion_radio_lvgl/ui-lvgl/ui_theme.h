@@ -134,9 +134,23 @@ static constexpr int UI_BUILTIN_THEME_N =
     sizeof(UI_BUILTIN_THEMES) / sizeof(UI_BUILTIN_THEMES[0]);
 
 // ----- Layout metrics ------------------------------------------------------
-// (HEADER_H / TABBAR_H / COMPOSE_H / SEARCH_BAR_H still live in UITask.cpp.)
-static constexpr int UI_CONTACT_ROW_H = 56;  // contacts list row height (recycler unit)
-static constexpr int UI_AVATAR_D      = 40;  // avatar circle diameter
+// Structural element sizes scale with the UI "Font size" tier so the chrome stays proportional to
+// the text (a 320px T-Deck gets tighter rows/avatars/bars than a 480px CrowPanel). Seeded once at
+// boot from the same tier as the type ramp (UITask::begin), so the constants below are runtime reads
+// of g_ui_metrics rather than compile-time literals -- callers are unchanged (no parens added).
+struct UiMetrics {
+  int contact_row_h;   // contacts/channels list row height (recycler unit)
+  int avatar_d;        // list avatar circle diameter
+  int hero_avatar_d;   // hero / owner-profile card avatar
+  int chat_avatar_d;   // chat top-bar (and banner) avatar
+  int header_h;        // top bar height
+  int tabbar_h;        // bottom tab bar height
+  int compose_h;       // chat compose band height
+  int search_bar_h;    // contacts/picker search band height
+};
+extern UiMetrics g_ui_metrics;   // defined + seeded in UITask.cpp
+#define UI_CONTACT_ROW_H (g_ui_metrics.contact_row_h)
+#define UI_AVATAR_D      (g_ui_metrics.avatar_d)
 static constexpr int UI_DOT_D         = 10;  // unread dot diameter
 static constexpr int UI_PAD           = 8;   // default inner padding
 

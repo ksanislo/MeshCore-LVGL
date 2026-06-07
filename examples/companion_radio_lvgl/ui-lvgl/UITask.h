@@ -371,7 +371,10 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_txp_ta;
   lv_obj_t*       _set_path_dd;
   lv_obj_t*       _set_bright_slider;
+  lv_obj_t*       _set_scroll_slider = nullptr;  // trackball "Scroll speed" (created only on trackball boards)
+  lv_obj_t*       _set_scroll_inv_chk = nullptr; // trackball "Reverse scroll direction" (trackball boards only)
   lv_obj_t*       _set_rot_dd;
+  lv_obj_t*       _set_font_dd = nullptr;   // UI "Font size" tier dropdown (Auto/Small/Medium/Large)
   lv_obj_t*       _set_screen_dd;       // screen idle-off timeout dropdown
   lv_obj_t*       _set_tz_ta;           // UTC offset (hours) for local-time display
   lv_obj_t*       _set_clock_chk;       // 12-hour clock toggle
@@ -672,6 +675,10 @@ class UITask : public AbstractUITask {
   lv_indev_drv_t     _indev_drv;
   lv_indev_drv_t     _kbd_drv;             // physical-keyboard keypad indev (T-Deck); unused otherwise
   lv_group_t*        _kbd_group = nullptr; // group the keypad indev drives (textareas join via makeSelTextarea)
+  bool               _tb_pressed_prev = false;  // trackball center-click edge state (T-Deck nav ball)
+  bool               noteInputWake();      // reset idle timer + wake screen on kbd/ball input (like touch)
+  void               pollTrackball();      // nav ball -> scroll the active list/chat (no-op without a ball)
+  lv_obj_t*          currentScrollable();  // the container the ball should scroll right now (nullptr = none)
 
   void allocBigDrawBuf();        // (re)allocate the full DMA double buffer (with the fallback ladder)
   void setLowMemDrawBuf(bool low);  // shrink/restore the draw buffer to free internal RAM during OTA
@@ -958,7 +965,10 @@ private:
   static void set_radio_apply_cb(lv_event_t* e);
   static void set_pathmode_cb(lv_event_t* e);
   static void set_bright_cb(lv_event_t* e);
+  static void set_scrollspeed_cb(lv_event_t* e);   // trackball scroll-speed slider (T-Deck)
+  static void set_scrollinvert_cb(lv_event_t* e);  // trackball reverse-direction checkbox (T-Deck)
   static void set_rot_cb(lv_event_t* e);
+  static void set_font_cb(lv_event_t* e);   // UI font-size tier dropdown (restart to apply)
   static void set_screen_cb(lv_event_t* e);
   void      copyToClipboard(const char* text);
   void      clipSet(uint8_t kind, const char* text, const uint8_t* pubkey,

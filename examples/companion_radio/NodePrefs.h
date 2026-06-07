@@ -105,4 +105,9 @@ struct NodePrefs {  // persisted to file
   // custom URL itself reuses ota_url above. Defaulted before read, so old/short prefs files keep 0.
   uint8_t  ota_prerelease;      // 1 = include pre-releases in the update list / "latest"
   uint8_t  ota_custom_url;      // 1 = manual-URL mode (flash ota_url), 0 = GitHub release mode
+  uint8_t  trackball_speed;     // nav-ball/scroll-wheel scroll speed = pixels per roll-pulse (4..60);
+                                // 0 = unset -> UI default. Only meaningful on boards with a trackball.
+  uint8_t  trackball_invert;    // 1 = reverse nav-ball scroll direction; 0 = normal (default). Trackball boards only.
+  uint8_t  font_scale;          // UI type-ramp size: 0 = auto (by screen size), 1 = Small, 2 = Medium, 3 = Large.
+                                // Applied at boot (restart to change). LVGL UI only.
 };

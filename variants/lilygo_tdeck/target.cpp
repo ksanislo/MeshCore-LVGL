@@ -36,21 +36,46 @@ static BusLockHal lora_hal(spi, RADIOLIB_DEFAULT_SPI_SETTINGS);
 RADIO_CLASS radio = new Module(&lora_hal, P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY);
 
 // ---- Shared SD (SdFat) -------------------------------------------------------
-// T-Deck's SD shares LoRa's exact pins (SCLK40/MISO38/MOSI41) -- only CS differs -- so unlike
-// CrowPanel there is NO bus re-pin: sd_bus_to_*() are no-ops, and the caller's hspi_lock() (held
-// across SdCard::Lock) serializes SD vs radio vs display on the one bus.
+// T-Deck's SD shares LoRa's EXACT pins (SCLK40/MISO38/MOSI41) -- only CS differs -- so unlike
+// CrowPanel there is NO bus re-pin: sd_bus_to_*() are no-ops. The caller (SdSvc::Lock /
+// ensureMounted, SdCard.cpp) holds hspi_lock() across the whole SD span; on T-Deck that mutex ALSO
+// gates the display flush (board_bus_lock) and the radio HAL (BusLockHal), so SD, radio, and the
+// LVGL flush all serialize on the one SPI3 bus -- only the active device's CS is asserted at a time,
+// so MISO is driven by SD alone during its reads. SdFat drives the bus through the SAME Arduino
+// `spi` SPIClass the radio uses (proven to coexist with LovyanGFX's spi_master on this host).
 SdFs sd;
 volatile uint8_t sd_last_err_code = 0;   // SdFat sdErrorCode() from the last failed mount (UITask diag)
 volatile uint8_t sd_last_err_data = 0;
-void sd_bus_to_sd()   {}
+void sd_bus_to_sd()   {}   // same pins as LoRa -> no re-pin needed
 void sd_bus_to_lora() {}
+static cid_t s_card_cid;          // CID of the mounted card: distinguishes a warm reinsert of the
+static bool  s_have_cid = false;  // SAME card (reuse) from a swapped/new card (cold re-init).
 bool sd_card_begin() {
-  // v1: SD mount is STUBBED OFF on T-Deck. The card shares the SPI bus with the display (LovyanGFX,
-  // IDF spi_master) + radio, and SdFat reads on that shared bus aren't reliable yet (chat content
-  // failed to load) -- and a real sd.begin() with no card wedged the boot. Return false so the
-  // message store falls back to RAM. Restoring SD = the deferred shared-bus SD bring-up.
-  (void)sd; (void)sd_last_err_code; (void)sd_last_err_data;
-  return false;
+  // SOFT remount first (mirror of CrowPanel): a still-present card answers CMD0 with "already
+  // initialized", so a destructive end()+begin() would fail (e01) even though the volume is live.
+  // If the SAME card (by CID) is still mounted, keep using it -- this is what lets a quick reinsert
+  // recover without a reboot. A genuinely cold/new card won't match -> falls through to re-init.
+  if (s_have_cid && sd.card()) {
+    cid_t cid;
+    if (sd.card()->readCID(&cid) && memcmp(&cid, &s_card_cid, sizeof(cid_t)) == 0
+        && sd.vol()->fatType() != 0) {
+      return true;
+    }
+  }
+  // COLD init: boot, or a genuinely new / power-cycled card. Bounded 2 fast-fail attempts so a
+  // missing card stays well under the task-WDT (ensureMounted then backs off + gives up). The init
+  // handshake (CMD0/ACMD41) runs at 400 kHz regardless; SD_SCK_MHZ only sets the data-transfer
+  // clock. 20 MHz matches CrowPanel; if reads prove flaky on this shared bus, lower it first.
+  delay(5);
+  bool ok = false;
+  for (int attempt = 0; attempt < 2 && !ok; attempt++) {
+    if (attempt) delay(20);
+    sd.end();
+    ok = sd.begin(SdSpiConfig(PIN_SD_CS, SHARED_SPI, SD_SCK_MHZ(20), &spi));
+  }
+  if (!ok) { sd_last_err_code = sd.sdErrorCode(); sd_last_err_data = sd.sdErrorData(); }
+  else     { s_have_cid = sd.card() && sd.card()->readCID(&s_card_cid); }
+  return ok;
 }
 
 // ---- LVGL board hooks (strong overrides of UITask's weak defaults) -----------
@@ -91,6 +116,45 @@ int  board_kbd_read() {
   return r;
 }
 
+// ---- Trackball (5-way nav) ---------------------------------------------------
+// The T-Deck trackball pulses one GPIO per roll-direction (active-low, internal pull-up) plus a
+// center click on PIN_USER_BTN. Each direction has a tiny IRAM ISR that just counts edges -- no bus
+// access, safe from an ISR. The UI polls net dx/dy via board_trackball_read() and drives
+// lv_obj_scroll_by (UITask::pollTrackball). Pins are the standard LilyGo T-Deck mapping; override in
+// platformio.ini if a unit differs. Click is polled (not an ISR) so we never touch the BOOT pin's
+// edge path. Strong overrides of UITask's weak board_has_trackball()/board_trackball_read().
+#ifndef PIN_TRACKBALL_UP
+  #define PIN_TRACKBALL_UP    3
+  #define PIN_TRACKBALL_DOWN  15
+  #define PIN_TRACKBALL_LEFT  1
+  #define PIN_TRACKBALL_RIGHT 2
+#endif
+static volatile int32_t s_tb_up = 0, s_tb_down = 0, s_tb_left = 0, s_tb_right = 0;
+static void IRAM_ATTR tb_up_isr()    { s_tb_up++; }
+static void IRAM_ATTR tb_down_isr()  { s_tb_down++; }
+static void IRAM_ATTR tb_left_isr()  { s_tb_left++; }
+static void IRAM_ATTR tb_right_isr() { s_tb_right++; }
+static void trackball_init() {
+  pinMode(PIN_TRACKBALL_UP,    INPUT_PULLUP);
+  pinMode(PIN_TRACKBALL_DOWN,  INPUT_PULLUP);
+  pinMode(PIN_TRACKBALL_LEFT,  INPUT_PULLUP);
+  pinMode(PIN_TRACKBALL_RIGHT, INPUT_PULLUP);
+  pinMode(PIN_USER_BTN,        INPUT_PULLUP);   // center click (= BOOT pin; polled, no ISR)
+  attachInterrupt(PIN_TRACKBALL_UP,    tb_up_isr,    FALLING);
+  attachInterrupt(PIN_TRACKBALL_DOWN,  tb_down_isr,  FALLING);
+  attachInterrupt(PIN_TRACKBALL_LEFT,  tb_left_isr,  FALLING);
+  attachInterrupt(PIN_TRACKBALL_RIGHT, tb_right_isr, FALLING);
+}
+bool board_has_trackball() { return true; }
+void board_trackball_read(int16_t* dx, int16_t* dy, bool* pressed) {
+  // Net pulses since the last read; reset counters. +dy = rolled DOWN, +dx = rolled RIGHT.
+  int32_t up = s_tb_up, down = s_tb_down, left = s_tb_left, right = s_tb_right;
+  s_tb_up = s_tb_down = s_tb_left = s_tb_right = 0;
+  if (dy) *dy = (int16_t)(down - up);
+  if (dx) *dx = (int16_t)(right - left);
+  if (pressed) *pressed = (digitalRead(PIN_USER_BTN) == LOW);   // active-low button
+}
+
 // ---- Runtime radio controls (mirror CrowPanel target.cpp) --------------------
 void radio_sleep()   { radio.sleep(); }
 void radio_standby() { radio.standby(); }
@@ -124,6 +188,7 @@ bool radio_init() {
 #ifdef MESH_PROXY
   hspi_mutex_ensure();   // must exist before the radio HAL's first locked transaction (std_init below)
   if (!s_i2c_mtx) s_i2c_mtx = xSemaphoreCreateMutex();   // before any touch/keyboard/RTC I2C access
+  trackball_init();      // counters + edge interrupts for the 5-way nav ball (UI polls deltas)
 #endif
   fallback_clock.begin();
   rtc_clock.begin(Wire);
