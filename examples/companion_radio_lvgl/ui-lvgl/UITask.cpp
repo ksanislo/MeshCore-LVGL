@@ -54,6 +54,16 @@ __attribute__((weak)) void board_i2c_unlock() {}
 __attribute__((weak)) int  board_batt_millivolts() { return -1; }  // <0 = board has no battery sensor
 __attribute__((weak)) int  board_batt_current_ma() { return 0; }   // signed mA (+charge / -discharge)
 __attribute__((weak)) int  board_i2c_scan(uint8_t* out, int maxn) { (void)out; (void)maxn; return 0; }
+
+// Shared-SPI-bus hooks. On boards where the display shares its SPI bus with the LoRa radio
+// (and SD) -- e.g. the T-Deck -- the LVGL flush (UI core) must serialize with the radio HAL
+// and SD (mesh core) on that one bus. A variant that shares the bus returns true from
+// board_display_bus_shared() and provides a real lock (its bus mutex). CrowPanel's display
+// is on a dedicated SPI host, so the defaults below (not shared, no-op lock) keep its flush
+// on the fast open-transaction DMA-pipeline path untouched.
+__attribute__((weak)) bool board_display_bus_shared() { return false; }
+__attribute__((weak)) void board_bus_lock()   {}
+__attribute__((weak)) void board_bus_unlock() {}
 __attribute__((weak)) void board_set_power_monitor(int type) { (void)type; }  // select battery sensor
 
 // Interrupt-driven touch state (CrowPanel). The ISR notifies a high-priority touch task;
@@ -223,12 +233,23 @@ void UITask::disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t
   uint32_t w = area->x2 - area->x1 + 1;
   uint32_t h = area->y2 - area->y1 + 1;
   LGFX_Device& lcd = *_instance->_lgfx;
-  // No endWrite(): leaving the transaction open returns immediately after
-  // queuing the DMA, so LVGL can render the next chunk (other buffer) while
-  // this one transfers. The next flush's setAddrWindow waits for this DMA via
-  // bus serialization, and double-buffering guarantees a buffer's DMA is done
-  // before LVGL cycles back to reuse it. SPI2 is display-only (bus_shared=0),
-  // so holding CS is fine.
+  if (board_display_bus_shared()) {
+    // Shared SPI bus (display + LoRa + SD, e.g. T-Deck): take the bus mutex and do a COMPLETE,
+    // closed transaction so the radio/SD (mesh core) can grab the bus between flushes. endWrite()
+    // waits for the DMA before releasing CS. Slower than the pipelined path below, but bus-safe.
+    board_bus_lock();
+    lcd.startWrite();
+    lcd.setAddrWindow(area->x1, area->y1, w, h);
+    lcd.writePixelsDMA((lgfx::rgb565_t*)color_p, w * h);
+    lcd.endWrite();
+    board_bus_unlock();
+    lv_disp_flush_ready(drv);
+    return;
+  }
+  // Dedicated display bus (CrowPanel SPI2): leave the transaction OPEN -- returns immediately after
+  // queuing the DMA, so LVGL renders the next chunk (other buffer) while this one transfers. The next
+  // flush's setAddrWindow waits for this DMA via bus serialization, and double-buffering guarantees a
+  // buffer's DMA is done before LVGL cycles back to reuse it. bus_shared=0, so holding CS is fine.
   lcd.startWrite();
   lcd.setAddrWindow(area->x1, area->y1, w, h);
   lcd.writePixelsDMA((lgfx::rgb565_t*)color_p, w * h);
