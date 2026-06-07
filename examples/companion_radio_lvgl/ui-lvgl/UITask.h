@@ -670,6 +670,8 @@ class UITask : public AbstractUITask {
   bool               _lvbuf_lowmem = false;// true while shrunk for an OTA (single tiny buffer)
   lv_disp_drv_t      _disp_drv;
   lv_indev_drv_t     _indev_drv;
+  lv_indev_drv_t     _kbd_drv;             // physical-keyboard keypad indev (T-Deck); unused otherwise
+  lv_group_t*        _kbd_group = nullptr; // group the keypad indev drives (textareas join via makeSelTextarea)
 
   void allocBigDrawBuf();        // (re)allocate the full DMA double buffer (with the fallback ladder)
   void setLowMemDrawBuf(bool low);  // shrink/restore the draw buffer to free internal RAM during OTA
@@ -678,6 +680,7 @@ class UITask : public AbstractUITask {
   static UITask* _instance;
   static void disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p);
   static void touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data);
+  static void kbd_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data);   // physical keyboard -> LVGL keypad
   static void touch_isr();              // GT911 INT edge -> wake the touch task (no I2C in ISR)
   static void touchTaskFn(void* arg);   // high-prio task: read GT911 on INT, latch for read_cb
   static void dismiss_kb_cb(lv_event_t* e);   // tap a background -> hide any open keyboard

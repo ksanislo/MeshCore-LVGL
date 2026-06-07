@@ -1,6 +1,10 @@
 #include <Arduino.h>
 #include "TDeckBoard.h"
 
+#ifdef MESH_PROXY
+extern "C" void board_set_backlight(uint8_t);   // defined in target.cpp (LVGL build); lights the panel
+#endif
+
 uint32_t deviceOnline = 0x00;
 
 void TDeckBoard::begin() {
@@ -10,6 +14,14 @@ void TDeckBoard::begin() {
   // Enable peripheral power
   pinMode(PIN_PERF_POWERON, OUTPUT);
   digitalWrite(PIN_PERF_POWERON, HIGH);
+
+#ifdef MESH_PROXY
+  // LVGL build: light the backlight at boot to a sane default (matches UITask's 153 fallback). The
+  // board owns the boot level here -- as on CrowPanel -- so display_brightness=0 ("board default")
+  // shows a lit screen; UITask overrides it once the user sets a brightness. board_set_backlight()
+  // (target.cpp) owns the LEDC channel.
+  board_set_backlight(153);
+#endif
 
   // Configure user button
   pinMode(PIN_USER_BTN, INPUT);

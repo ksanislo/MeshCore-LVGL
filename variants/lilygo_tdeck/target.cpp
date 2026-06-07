@@ -4,14 +4,11 @@
 TDeckBoard board;
 
 // ---- SPI bus ----------------------------------------------------------------
-// T-Deck shares ONE SPI bus across the display (ST7789), LoRa (SX1262) and SD.
-// For the LVGL build (MESH_PROXY) we pin it explicitly to SPI2_HOST/FSPI so the
-// LovyanGFX display (TDeckLGFX, cfg.spi_host = SPI2_HOST) drives the SAME peripheral
-// as the radio/SD Arduino SPIClass -- otherwise two controllers fight over the pins.
-// VERIFY: if the display or radio is dead, the host pairing (FSPI vs HSPI) is the first suspect.
-#if defined(MESH_PROXY) && defined(P_LORA_SCLK)
-  static SPIClass spi(FSPI);
-#elif defined(P_LORA_SCLK)
+// T-Deck shares ONE SPI bus across the display (ST7789), LoRa (SX1262) and SD. The radio/SD use
+// the default Arduino SPIClass = HSPI = bus 2 = SPI3_HOST on the S3 (the host the working non-LVGL
+// build uses). For the shared LVGL display, TDeckLGFX sets cfg.spi_host = SPI3_HOST to match, so
+// both drive the SAME controller (serialized by the bus mutex). Do NOT force a different host here.
+#if defined(P_LORA_SCLK)
   static SPIClass spi;
 #endif
 
@@ -48,14 +45,12 @@ volatile uint8_t sd_last_err_data = 0;
 void sd_bus_to_sd()   {}
 void sd_bus_to_lora() {}
 bool sd_card_begin() {
-  bool ok = false;
-  for (int attempt = 0; attempt < 2 && !ok; attempt++) {
-    if (attempt) delay(20);
-    sd.end();
-    ok = sd.begin(SdSpiConfig(PIN_SD_CS, SHARED_SPI, SD_SCK_MHZ(20), &spi));
-  }
-  if (!ok) { sd_last_err_code = sd.sdErrorCode(); sd_last_err_data = sd.sdErrorData(); }
-  return ok;
+  // v1: SD mount is STUBBED OFF on T-Deck. The card shares the SPI bus with the display (LovyanGFX,
+  // IDF spi_master) + radio, and SdFat reads on that shared bus aren't reliable yet (chat content
+  // failed to load) -- and a real sd.begin() with no card wedged the boot. Return false so the
+  // message store falls back to RAM. Restoring SD = the deferred shared-bus SD bring-up.
+  (void)sd; (void)sd_last_err_code; (void)sd_last_err_data;
+  return false;
 }
 
 // ---- LVGL board hooks (strong overrides of UITask's weak defaults) -----------
@@ -71,6 +66,30 @@ int  board_touch_int_pin()      { return 16; }   // GT911 INT (T-Deck Plus) -- V
 bool board_display_bus_shared() { return true; }
 void board_bus_lock()           { hspi_lock(); }
 void board_bus_unlock()         { hspi_unlock(); }
+
+// Shared I2C bus lock (GT911 touch + keyboard + RTC all on Wire, SDA18/SCL8). Strong override of
+// UITask's weak no-op so the INT-driven touch task (which calls board_i2c_lock around getTouch) and
+// the keyboard read below actually serialize -- otherwise the high-prio touch task preempts the
+// keyboard read mid-transaction and corrupts the bus (the crash-on-interaction).
+static SemaphoreHandle_t s_i2c_mtx = nullptr;
+bool board_i2c_lock(uint32_t timeout_ms) {
+  if (!s_i2c_mtx) return true;   // pre-init (single-threaded) -> no contention
+  return xSemaphoreTake(s_i2c_mtx, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+void board_i2c_unlock() { if (s_i2c_mtx) xSemaphoreGive(s_i2c_mtx); }
+
+// Physical keyboard: the T-Deck's BlackBerry keypad is an ESP32-C3 at I2C 0x55 (Wire, SDA18/SCL8) that
+// returns the next pressed ASCII char (0 = none). Read under the I2C lock so it serializes with the
+// touch task. UITask drives an LVGL keypad indev from this and suppresses the on-screen keyboard.
+#define TDECK_KBD_ADDR 0x55
+bool board_has_physical_kbd() { return true; }
+int  board_kbd_read() {
+  if (!board_i2c_lock(20)) return 0;
+  int r = 0;
+  if (Wire.requestFrom(TDECK_KBD_ADDR, 1) == 1) { int c = Wire.read(); r = (c > 0) ? c : 0; }
+  board_i2c_unlock();
+  return r;
+}
 
 // ---- Runtime radio controls (mirror CrowPanel target.cpp) --------------------
 void radio_sleep()   { radio.sleep(); }
@@ -104,6 +123,7 @@ EnvironmentSensorManager sensors(gps);
 bool radio_init() {
 #ifdef MESH_PROXY
   hspi_mutex_ensure();   // must exist before the radio HAL's first locked transaction (std_init below)
+  if (!s_i2c_mtx) s_i2c_mtx = xSemaphoreCreateMutex();   // before any touch/keyboard/RTC I2C access
 #endif
   fallback_clock.begin();
   rtc_clock.begin(Wire);

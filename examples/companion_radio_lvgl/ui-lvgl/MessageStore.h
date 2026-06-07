@@ -239,4 +239,27 @@ public:
     }
     return n;
   }
+
+  // Virtualized-read support so the chat view works with a RAM-only store (no SD). The ring IS the
+  // whole history, so recordCount = the per-peer ring count and readRecords slices it oldest-first.
+  int recordCount(const char* peer) override {
+    if (!peer) return 0;
+    int start = (_head - _count + CAP) % CAP;
+    int n = 0;
+    for (int i = 0; i < _count; i++)
+      if (strncmp(_buf[(start + i) % CAP].peer, peer, CHAT_PEER_NAME_MAX) == 0) n++;
+    return n;
+  }
+  int readRecords(const char* peer, int first, int max, ChatMessage* out) override {
+    if (!peer || max <= 0 || first < 0 || !out) return 0;
+    int start = (_head - _count + CAP) % CAP;
+    int matched = 0, n = 0;
+    for (int i = 0; i < _count && n < max; i++) {
+      const ChatMessage& m = _buf[(start + i) % CAP];
+      if (strncmp(m.peer, peer, CHAT_PEER_NAME_MAX) != 0) continue;
+      if (matched >= first) out[n++] = m;
+      matched++;
+    }
+    return n;
+  }
 };

@@ -64,6 +64,20 @@ __attribute__((weak)) int  board_i2c_scan(uint8_t* out, int maxn) { (void)out; (
 __attribute__((weak)) bool board_display_bus_shared() { return false; }
 __attribute__((weak)) void board_bus_lock()   {}
 __attribute__((weak)) void board_bus_unlock() {}
+
+// Physical-keyboard hooks. A variant with a hardware keyboard (e.g. T-Deck) returns true from
+// board_has_physical_kbd() and the next pressed ASCII key (0 = none) from board_kbd_read(); UITask
+// then drives an LVGL keypad indev from it and SUPPRESSES the on-screen keyboard. Defaults: no
+// physical keyboard -> on-screen keyboard as usual.
+__attribute__((weak)) bool board_has_physical_kbd() { return false; }
+__attribute__((weak)) int  board_kbd_read()         { return 0; }
+
+// Show an on-screen keyboard -- unless this board has a physical one (then it's a no-op, so the soft
+// keyboard never appears and the layout keeps the full screen). Replaces the bare clear-HIDDEN at the
+// soft-kb show sites.
+static void softKbShow(lv_obj_t* kb) {
+  if (kb && !board_has_physical_kbd()) lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+}
 __attribute__((weak)) void board_set_power_monitor(int type) { (void)type; }  // select battery sensor
 
 // Interrupt-driven touch state (CrowPanel). The ISR notifies a high-priority touch task;
@@ -301,6 +315,25 @@ void UITask::touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   }
 }
 
+// Physical keyboard -> LVGL keypad. board_kbd_read() returns the next pressed ASCII (0 = none);
+// we map the editing keys to LV_KEY_* and pass printables through, reporting PRESSED for the poll
+// that read a key and RELEASED otherwise so LVGL registers one keypress. The focused field in
+// _kbd_group (set when a field is tapped) receives it: printables insert, BACKSPACE deletes, ENTER
+// fires LV_EVENT_READY (= the field's "done"/send).
+void UITask::kbd_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
+  (void)drv;
+  static uint32_t last_key = 0;
+  int c = board_kbd_read();
+  uint32_t k = 0;
+  if      (c == 8 || c == 127) k = LV_KEY_BACKSPACE;
+  else if (c == 13 || c == 10) k = LV_KEY_ENTER;
+  else if (c == 27)            k = LV_KEY_ESC;
+  else if (c == 9)             k = LV_KEY_NEXT;     // tab -> next field
+  else if (c >= 32)            k = (uint32_t)c;     // printable ASCII (UTF-8 lead bytes pass through)
+  if (k) { data->key = k; data->state = LV_INDEV_STATE_PRESSED; last_key = k; }
+  else   { data->key = last_key; data->state = LV_INDEV_STATE_RELEASED; }
+}
+
 // Tap on a screen background (outside any text field / keyboard) -> hide the open
 // keyboard. Attached to each screen's scrollable body; a tap on a field/button is
 // handled by that widget and doesn't reach here (events don't bubble by default).
@@ -393,6 +426,14 @@ lv_obj_t* UITask::makeSelTextarea(lv_obj_t* parent) {
   }
   lv_obj_add_event_cb(ta, UITask::ta_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
   attachClearX(ta);   // one-click clear ✕ (shown only when the field has text)
+  // Physical-keyboard routing: join the keypad group and grab keypad focus when tapped, so the
+  // hardware keyboard types into whichever field the user touched. (Group exists only on T-Deck.)
+  if (_instance && _instance->_kbd_group) {
+    lv_group_add_obj(_instance->_kbd_group, ta);
+    lv_obj_add_event_cb(ta, [](lv_event_t* e) {
+      if (_instance && _instance->_kbd_group) lv_group_focus_obj(lv_event_get_target(e));
+    }, LV_EVENT_CLICKED, NULL);
+  }
   return ta;
 }
 
@@ -1265,7 +1306,7 @@ void UITask::contacts_search_ta_cb(lv_event_t* e) {
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     lv_keyboard_set_textarea(_instance->_contacts_kb, ta);
     lv_keyboard_set_mode(_instance->_contacts_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_contacts_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_contacts_kb);
     lv_obj_align(_instance->_contacts_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_contacts_kb);
   } else if (code == LV_EVENT_VALUE_CHANGED) {
@@ -1701,6 +1742,7 @@ void UITask::chat_search_close_cb(lv_event_t* e) {
 
 void UITask::layoutChatBody(bool keyboard_shown) {
   if (!_chat_history || !_chat_compose) return;
+  if (board_has_physical_kbd()) keyboard_shown = false;   // physical keyboard -> never raise the soft kb
 
   // Only re-pin to the newest message if we were already at the bottom;
   // otherwise leave the scroll where it is so reading history isn't disrupted.
@@ -1930,7 +1972,7 @@ void UITask::pick_search_ta_cb(lv_event_t* e) {
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     lv_keyboard_set_textarea(_instance->_pick_kb, ta);
     lv_keyboard_set_mode(_instance->_pick_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_pick_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_pick_kb);
     lv_obj_align(_instance->_pick_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_pick_kb);
   } else if (code == LV_EVENT_VALUE_CHANGED) {
@@ -2104,7 +2146,7 @@ void UITask::chpick_search_cb(lv_event_t* e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     lv_keyboard_set_textarea(_instance->_chpick_kb, ta);
-    lv_obj_clear_flag(_instance->_chpick_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_chpick_kb);
     lv_obj_align(_instance->_chpick_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_chpick_kb);
   } else if (code == LV_EVENT_VALUE_CHANGED) {
@@ -4378,6 +4420,19 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _indev_drv.read_cb = touchpad_read_cb;
   lv_indev_drv_register(&_indev_drv);
 
+  // Physical keyboard (T-Deck): a keypad indev driven by board_kbd_read(), pointed at a group that
+  // every editable field joins (via makeSelTextarea). Tapping a field focuses it in the group, so
+  // physical keystrokes land in it. No-op on touch-only boards (no group, soft keyboard as usual).
+  if (board_has_physical_kbd()) {
+    _kbd_group = lv_group_create();
+    lv_group_set_wrap(_kbd_group, false);
+    lv_indev_drv_init(&_kbd_drv);
+    _kbd_drv.type    = LV_INDEV_TYPE_KEYPAD;
+    _kbd_drv.read_cb = kbd_read_cb;
+    lv_indev_t* kbd = lv_indev_drv_register(&_kbd_drv);
+    lv_indev_set_group(kbd, _kbd_group);
+  }
+
   // Interrupt-driven touch: if the variant exposes a GT911 INT pin, read coords off the
   // INT edge in a dedicated high-priority task instead of polling getTouch on the LVGL loop.
   // Button hits then land the instant the finger touches, independent of UI frame time.
@@ -5576,7 +5631,7 @@ void UITask::cinfo_ta_event_cb(lv_event_t* e) {
     lv_keyboard_set_textarea(_instance->_cinfo_kb, ta);
     bool num = (ta == _instance->_cinfo_lat_ta || ta == _instance->_cinfo_lon_ta);
     lv_keyboard_set_mode(_instance->_cinfo_kb, num ? LV_KEYBOARD_MODE_NUMBER : LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_cinfo_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_cinfo_kb);
     lv_obj_align(_instance->_cinfo_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_cinfo_kb);
     _instance->raiseFieldForKb(_instance->_cinfo_body, _instance->_cinfo_kb, ta);
@@ -6105,7 +6160,7 @@ void UITask::path_ta_event_cb(lv_event_t* e) {
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     lv_obj_t* ta = lv_event_get_target(e);
     lv_keyboard_set_textarea(_instance->_path_kb, ta);
-    lv_obj_clear_flag(_instance->_path_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_path_kb);
     lv_obj_align(_instance->_path_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_path_kb);
     // ta -> field column -> scrollable body
@@ -6339,7 +6394,7 @@ void UITask::chinfo_ta_event_cb(lv_event_t* e) {
     _instance->_chinfo_active_ta = ta;
     lv_keyboard_set_textarea(_instance->_chinfo_kb, ta);
     lv_keyboard_set_mode(_instance->_chinfo_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_chinfo_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_chinfo_kb);
     lv_obj_align(_instance->_chinfo_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_chinfo_kb);
     _instance->raiseFieldForKb(_instance->_chinfo_body, _instance->_chinfo_kb, ta);
@@ -6675,7 +6730,7 @@ void UITask::newchan_ta_event_cb(lv_event_t* e) {
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     lv_keyboard_set_textarea(_instance->_newchan_kb, ta);
     lv_keyboard_set_mode(_instance->_newchan_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_newchan_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_newchan_kb);
     lv_obj_align(_instance->_newchan_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_newchan_kb);
     _instance->raiseFieldForKb(lv_obj_get_parent(lv_obj_get_parent(ta)), _instance->_newchan_kb, ta);
@@ -7018,7 +7073,7 @@ void UITask::login_ta_event_cb(lv_event_t* e) {
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     lv_keyboard_set_textarea(_instance->_login_kb, _instance->_login_pw_ta);
     lv_keyboard_set_mode(_instance->_login_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_login_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_login_kb);
     lv_obj_align(_instance->_login_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_login_kb);
   }
@@ -7784,7 +7839,7 @@ void UITask::admin_login_pw_event_cb(lv_event_t* e) {
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     lv_keyboard_set_textarea(s->_admin_login_kb, s->_admin_login_pw);
     lv_keyboard_set_mode(s->_admin_login_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(s->_admin_login_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(s->_admin_login_kb);
     lv_obj_align(s->_admin_login_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(s->_admin_login_kb);
   }
@@ -8220,7 +8275,7 @@ void UITask::admin_field_event_cb(lv_event_t* e) {
     lv_keyboard_set_textarea(s->_admin_kb, w);
     lv_keyboard_set_mode(s->_admin_kb, (sp.kind == AK_INT || sp.kind == AK_FLOAT || sp.kind == AK_RADIO_TUPLE)
                          ? LV_KEYBOARD_MODE_NUMBER : LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(s->_admin_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(s->_admin_kb);
     lv_obj_align(s->_admin_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(s->_admin_kb);
     s->raiseFieldForKb(s->_admin_body, s->_admin_kb, w);
@@ -8278,7 +8333,7 @@ void UITask::admin_perm_open_cb(lv_event_t* e) {
       if (c == LV_EVENT_FOCUSED || c == LV_EVENT_CLICKED) {
         lv_keyboard_set_textarea(z->_admin_perm_kb, lv_event_get_target(ev));
         lv_keyboard_set_mode(z->_admin_perm_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-        lv_obj_clear_flag(z->_admin_perm_kb, LV_OBJ_FLAG_HIDDEN);
+        softKbShow(z->_admin_perm_kb);
         lv_obj_align(z->_admin_perm_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
         lv_obj_move_foreground(z->_admin_perm_kb);
       }
@@ -9467,7 +9522,7 @@ void UITask::set_name_ta_event_cb(lv_event_t* e) {
     _instance->_set_active_ta = ta;
     lv_keyboard_set_textarea(_instance->_profile_kb, ta);
     lv_keyboard_set_mode(_instance->_profile_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_profile_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_profile_kb);
     lv_obj_align(_instance->_profile_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_profile_kb);
     _instance->raiseFieldForKb(_instance->_profile_body, _instance->_profile_kb, ta);
@@ -9484,7 +9539,7 @@ void UITask::set_radio_ta_event_cb(lv_event_t* e) {
     _instance->_set_active_ta = ta;
     lv_keyboard_set_textarea(_instance->_set_kb, ta);
     lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
-    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_set_kb);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
     _instance->raiseFieldForKb(_instance->_set_active_pane ? _instance->_set_active_pane
@@ -10542,7 +10597,7 @@ void UITask::set_time_ta_event_cb(lv_event_t* e) {
     _instance->_set_active_ta = ta;
     lv_keyboard_set_textarea(_instance->_set_kb, ta);
     lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
-    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_set_kb);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
     _instance->raiseFieldForKb(_instance->_set_active_pane ? _instance->_set_active_pane
@@ -10930,7 +10985,7 @@ void UITask::set_advnum_ta_event_cb(lv_event_t* e) {
     _instance->_set_active_ta = ta;
     lv_keyboard_set_textarea(_instance->_set_kb, ta);
     lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
-    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_set_kb);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
     _instance->raiseFieldForKb(_instance->_set_active_pane ? _instance->_set_active_pane
@@ -11091,7 +11146,7 @@ void UITask::pinset_ta_event_cb(lv_event_t* e) {
   if (lv_event_get_code(e) == LV_EVENT_FOCUSED || lv_event_get_code(e) == LV_EVENT_CLICKED) {
     lv_keyboard_set_textarea(_instance->_pinset_kb, lv_event_get_target(e));
     lv_keyboard_set_mode(_instance->_pinset_kb, LV_KEYBOARD_MODE_NUMBER);
-    lv_obj_clear_flag(_instance->_pinset_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_pinset_kb);
     lv_obj_align(_instance->_pinset_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_pinset_kb);
   }
@@ -11200,7 +11255,7 @@ void UITask::sigmod_ta_event_cb(lv_event_t* e) {
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     lv_keyboard_set_textarea(_instance->_sigmod_kb, ta);
     lv_keyboard_set_mode(_instance->_sigmod_kb, LV_KEYBOARD_MODE_NUMBER);
-    lv_obj_clear_flag(_instance->_sigmod_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_sigmod_kb);
     lv_obj_align(_instance->_sigmod_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_sigmod_kb);
   } else if (code == LV_EVENT_DEFOCUSED) {
@@ -11243,7 +11298,7 @@ void UITask::net_ta_event_cb(lv_event_t* e) {
     _instance->_set_active_ta = ta;
     lv_keyboard_set_textarea(_instance->_set_kb, ta);
     lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_set_kb);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
     if (_instance->_set_active_pane) _instance->raiseFieldForKb(_instance->_set_active_pane, _instance->_set_kb, ta);
@@ -11259,7 +11314,7 @@ void UITask::wifi_ta_event_cb(lv_event_t* e) {
     _instance->_set_active_ta = ta;
     lv_keyboard_set_textarea(_instance->_set_kb, ta);
     lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_set_kb);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
     if (_instance->_set_active_pane) _instance->raiseFieldForKb(_instance->_set_active_pane, _instance->_set_kb, ta);
@@ -11356,7 +11411,7 @@ void UITask::set_ota_url_event_cb(lv_event_t* e) {
     _instance->_set_active_ta = ta;
     lv_keyboard_set_textarea(_instance->_update_kb, ta);
     lv_keyboard_set_mode(_instance->_update_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_update_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_update_kb);
     lv_obj_align(_instance->_update_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_update_kb);
     _instance->raiseFieldForKb(_instance->_update_body, _instance->_update_kb, ta);
@@ -11996,7 +12051,7 @@ void UITask::impkey_ta_event_cb(lv_event_t* e) {
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     lv_keyboard_set_textarea(_instance->_impkey_kb, _instance->_impkey_ta);
     lv_keyboard_set_mode(_instance->_impkey_kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_clear_flag(_instance->_impkey_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_impkey_kb);
     lv_obj_align(_instance->_impkey_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_impkey_kb);
   }
@@ -12077,7 +12132,7 @@ void UITask::set_tz_ta_event_cb(lv_event_t* e) {
     _instance->_set_active_ta = ta;
     lv_keyboard_set_textarea(_instance->_set_kb, ta);
     lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
-    lv_obj_clear_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_set_kb);
     lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_set_kb);
     _instance->raiseFieldForKb(_instance->_set_active_pane ? _instance->_set_active_pane
@@ -12096,7 +12151,7 @@ void UITask::set_pos_ta_event_cb(lv_event_t* e) {
     _instance->_set_active_ta = ta;
     lv_keyboard_set_textarea(_instance->_profile_kb, ta);
     lv_keyboard_set_mode(_instance->_profile_kb, LV_KEYBOARD_MODE_NUMBER);
-    lv_obj_clear_flag(_instance->_profile_kb, LV_OBJ_FLAG_HIDDEN);
+    softKbShow(_instance->_profile_kb);
     lv_obj_align(_instance->_profile_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_move_foreground(_instance->_profile_kb);
     _instance->raiseFieldForKb(_instance->_profile_body, _instance->_profile_kb, ta);

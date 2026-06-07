@@ -35,7 +35,7 @@ public:
   TDeckLGFX() {
     {
       auto cfg = _bus.config();
-      cfg.spi_host    = SPI2_HOST;   // MUST match the radio/SD SPIClass(FSPI) in target.cpp. VERIFY.
+      cfg.spi_host    = SPI3_HOST;   // matches the radio/SD default SPIClass (HSPI=bus2=SPI3_HOST on S3)
       cfg.spi_mode    = 0;
       cfg.freq_write  = 40000000;    // VERIFY: drop (e.g. 20-27 MHz) if the shared bus glitches
       cfg.freq_read   = 16000000;
