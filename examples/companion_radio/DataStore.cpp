@@ -227,6 +227,70 @@ bool DataStore::saveMainIdentity(const mesh::LocalIdentity &identity) {
   return identity_store.save("_main", identity);
 }
 
+// Appended UI-field "unset" defaults. Pulled into one helper so they apply on BOTH paths: the
+// file-read path (loadPrefsInt sets them before reading, so a shorter/old file leaves them at these
+// values) AND a fresh device with no prefs file at all (loadPrefs calls this in the no-file case).
+// Previously these lived only inside the file-read path, so a first boot with no file kept them 0
+// from MyMesh's memset -> chat history + notifications + chat colors OFF and the signal meter zeroed.
+// Keep in sync with the NodePrefs tail.
+static void applyAppendedPrefsDefaults(NodePrefs& _prefs) {
+  _prefs.display_brightness = 0;                                                         // 137
+  _prefs.display_rotation = 0;                                                           // 138
+  _prefs.contacts_order = 0xFF;                                                          // 139 (0xFF = unset)
+  _prefs.contacts_filter = 0xFF;                                                         // 140 (0xFF = unset)
+  _prefs.tz_offset_minutes = 0;                                                          // 141 (default UTC)
+  _prefs.clock_12h = 0;                                                                  // 143 (default 24h)
+  _prefs.persist_history = 0xFF;                                                         // 144 (0xFF = unset -> on)
+  _prefs.screen_timeout_s = 0;                                                           // 145 (0 = never / unset)
+  _prefs.radio_off = 0;                                                                  // 147 (default: radio enabled)
+  _prefs.lock_pin[0] = 0;                                                                // 148 (default: no PIN)
+  _prefs.notify_enable = 1;                                                              // 156 (default: notifications on)
+  _prefs.avatar_palette = 0;                                                             // 157 (default: curated palette)
+  _prefs.theme_name[0] = 0;                                                              // 158 (default: "" -> Dark)
+  _prefs.mention_user_colors = 1;                                                        // 159 (default: on)
+  _prefs.hashtag_channel_colors = 1;                                                     // 160 (default: on)
+  _prefs.notify_mute_default = 0;                                                        // 161 (default: opt-out)
+  _prefs.channel_sender_colors = 1;                                                      // 162 (default: on)
+  _prefs.auto_lock = 0;                                                                  // 163 (default: manual lock only)
+  _prefs.wifi_enabled = 0;                                                               // 164 (default: off)
+  _prefs.wifi_ssid[0] = 0;                                                               // 165
+  _prefs.wifi_password[0] = 0;                                                           // 166
+  _prefs.mqtt_enabled = 0;                                                               // 167 (default: off)
+  _prefs.mqtt_host[0] = 0;                                                               // 168
+  _prefs.mqtt_port = 0;                                                                  // 169 (0 = protocol default)
+  _prefs.mqtt_user[0] = 0;                                                               // 170
+  _prefs.mqtt_password[0] = 0;                                                           // 171
+  _prefs.mqtt_topic_prefix[0] = 0;                                                       // 172
+  _prefs.mqtt_tls = 0;                                                                   // 173
+  _prefs.mqtt_publish_rx = 1;                                                            // 174 (default: dump RX)
+  _prefs.mqtt_publish_tx = 0;                                                            // 175
+  _prefs.wifi_dhcp = 1;                                                                  // 176 (default: DHCP on)
+  _prefs.wifi_dns_override = 0;                                                          // 177
+  _prefs.wifi_ip = 0;                                                                    // 178
+  _prefs.wifi_netmask = 0;                                                               // 179
+  _prefs.wifi_gateway = 0;                                                               // 180
+  _prefs.wifi_dns = 0;                                                                   // 181
+  _prefs.ntp_enabled = 1;                                                                // 182 (default: on)
+  _prefs.ntp_server[0] = 0;                                                              // 183 (empty -> pool.ntp.org)
+  _prefs.use_rtc_clock = 0xFF;                                                           // 184 (unset -> on)
+  _prefs.sigmeter_snr_min = -12;                                                         // 185 (default)
+  _prefs.sigmeter_snr_max = 6;                                                           // 186 (default)
+  _prefs.sigmeter_hold_s = 30;                                                           // 187 (default)
+  _prefs.sigmeter_decay_s = 100;                                                         // 188 (default)
+  _prefs.show_chat_meta = 0;                                                             // 189 (default: off)
+  _prefs.ota_url[0] = 0;                                                                 // 190 (empty)
+  _prefs.power_monitor = 0;                                                              // 191 (None)
+  _prefs.batt_type = 0;                                                                  // 192 (1S Li-ion)
+  _prefs.batt_capacity_mah = 0;                                                          // 193 (0 -> default)
+  _prefs.batt_soc_pmille = 0xFFFF;                                                       // 194 (unset)
+  _prefs.gps_uart = 1;                                                                   // 195 (UART1 17/18)
+  _prefs.ota_prerelease = 0;                                                             // 196 (stable only)
+  _prefs.ota_custom_url = 0;                                                             // 197 (GitHub release mode)
+  _prefs.trackball_speed = 0;                                                            // 198 (0 -> UI default)
+  _prefs.trackball_invert = 0;                                                           // 199 (normal direction)
+  _prefs.font_scale = 0;                                                                 // 200 (auto by screen size)
+}
+
 void DataStore::loadPrefs(NodePrefs& prefs, double& node_lat, double& node_lon) {
   recoverTmp(_fs, "/new_prefs.tmp", "/new_prefs");
   if (_fs->exists("/new_prefs")) {
@@ -235,6 +299,8 @@ void DataStore::loadPrefs(NodePrefs& prefs, double& node_lat, double& node_lon) 
     loadPrefsInt("/node_prefs", prefs, node_lat, node_lon);
     savePrefs(prefs, node_lat, node_lon);                // save to new filename
     _fs->remove("/node_prefs"); // remove old
+  } else {
+    applyAppendedPrefsDefaults(prefs);   // fresh device, no prefs file -> still apply the UI defaults
   }
 }
 
@@ -272,63 +338,10 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.rx_boosted_gain, sizeof(_prefs.rx_boosted_gain));         // 89
     file.read((uint8_t *)_prefs.default_scope_name, sizeof(_prefs.default_scope_name));    // 90
     file.read((uint8_t *)_prefs.default_scope_key, sizeof(_prefs.default_scope_key));     // 121
-    // Appended UI fields: default to 0 so a pre-existing (shorter) file leaves them
-    // unset -- file.read() returns 0 at EOF without touching the destination.
-    _prefs.display_brightness = 0;                                                         // 137
-    _prefs.display_rotation = 0;                                                           // 138
-    _prefs.contacts_order = 0xFF;                                                          // 139 (0xFF = unset)
-    _prefs.contacts_filter = 0xFF;                                                         // 140 (0xFF = unset)
-    _prefs.tz_offset_minutes = 0;                                                          // 141 (default UTC)
-    _prefs.clock_12h = 0;                                                                  // 143 (default 24h)
-    _prefs.persist_history = 0xFF;                                                         // 144 (0xFF = unset -> on)
-    _prefs.screen_timeout_s = 0;                                                           // 145 (0 = never / unset)
-    _prefs.radio_off = 0;                                                                  // 147 (default: radio enabled)
-    _prefs.lock_pin[0] = 0;                                                                // 148 (default: no PIN)
-    _prefs.notify_enable = 1;                                                              // 156 (default: notifications on)
-    _prefs.avatar_palette = 0;                                                             // 157 (default: curated palette)
-    _prefs.theme_name[0] = 0;                                                              // 158 (default: "" -> Dark)
-    _prefs.mention_user_colors = 1;                                                        // 159 (default: on)
-    _prefs.hashtag_channel_colors = 1;                                                     // 160 (default: on)
-    _prefs.notify_mute_default = 0;                                                        // 161 (default: opt-out)
-    _prefs.channel_sender_colors = 1;                                                      // 162 (default: on)
-    _prefs.auto_lock = 0;                                                                  // 163 (default: manual lock only)
-    _prefs.wifi_enabled = 0;                                                               // 164 (default: off)
-    _prefs.wifi_ssid[0] = 0;                                                               // 165
-    _prefs.wifi_password[0] = 0;                                                           // 166
-    _prefs.mqtt_enabled = 0;                                                               // 167 (default: off)
-    _prefs.mqtt_host[0] = 0;                                                               // 168
-    _prefs.mqtt_port = 0;                                                                  // 169 (0 = protocol default)
-    _prefs.mqtt_user[0] = 0;                                                               // 170
-    _prefs.mqtt_password[0] = 0;                                                           // 171
-    _prefs.mqtt_topic_prefix[0] = 0;                                                       // 172
-    _prefs.mqtt_tls = 0;                                                                   // 173
-    _prefs.mqtt_publish_rx = 1;                                                            // 174 (default: dump RX)
-    _prefs.mqtt_publish_tx = 0;                                                            // 175
-    _prefs.wifi_dhcp = 1;                                                                  // 176 (default: DHCP on)
-    _prefs.wifi_dns_override = 0;                                                          // 177
-    _prefs.wifi_ip = 0;                                                                    // 178
-    _prefs.wifi_netmask = 0;                                                               // 179
-    _prefs.wifi_gateway = 0;                                                               // 180
-    _prefs.wifi_dns = 0;                                                                   // 181
-    _prefs.ntp_enabled = 1;                                                                // 182 (default: on)
-    _prefs.ntp_server[0] = 0;                                                              // 183 (empty -> pool.ntp.org)
-    _prefs.use_rtc_clock = 0xFF;                                                           // 184 (unset -> on)
-    _prefs.sigmeter_snr_min = -12;                                                         // 185 (default)
-    _prefs.sigmeter_snr_max = 6;                                                           // 186 (default)
-    _prefs.sigmeter_hold_s = 30;                                                           // 187 (default)
-    _prefs.sigmeter_decay_s = 100;                                                         // 188 (default)
-    _prefs.show_chat_meta = 0;                                                             // 189 (default: off)
-    _prefs.ota_url[0] = 0;                                                                 // 190 (empty)
-    _prefs.power_monitor = 0;                                                              // 191 (None)
-    _prefs.batt_type = 0;                                                                  // 192 (1S Li-ion)
-    _prefs.batt_capacity_mah = 0;                                                          // 193 (0 -> default)
-    _prefs.batt_soc_pmille = 0xFFFF;                                                       // 194 (unset)
-    _prefs.gps_uart = 1;                                                                   // 195 (UART1 17/18)
-    _prefs.ota_prerelease = 0;                                                             // 196 (stable only)
-    _prefs.ota_custom_url = 0;                                                             // 197 (GitHub release mode)
-    _prefs.trackball_speed = 0;                                                            // 198 (0 -> UI default)
-    _prefs.trackball_invert = 0;                                                           // 199 (normal direction)
-    _prefs.font_scale = 0;                                                                 // 200 (auto by screen size)
+    // Appended UI fields: set their "unset" defaults BEFORE reading, so a pre-existing (shorter) file
+    // leaves them at these values (file.read() returns 0 at EOF without touching the destination). Same
+    // helper the no-file fresh-device path uses, so both agree.
+    applyAppendedPrefsDefaults(_prefs);
     file.read((uint8_t *)&_prefs.display_brightness, sizeof(_prefs.display_brightness));   // 137
     file.read((uint8_t *)&_prefs.display_rotation, sizeof(_prefs.display_rotation));       // 138
     file.read((uint8_t *)&_prefs.contacts_order, sizeof(_prefs.contacts_order));           // 139
