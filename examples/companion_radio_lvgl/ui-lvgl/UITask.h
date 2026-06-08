@@ -676,6 +676,12 @@ class UITask : public AbstractUITask {
   lv_indev_drv_t     _kbd_drv;             // physical-keyboard keypad indev (T-Deck); unused otherwise
   lv_group_t*        _kbd_group = nullptr; // group the keypad indev drives (textareas join via makeSelTextarea)
   bool               _tb_pressed_prev = false;  // trackball center-click edge state (T-Deck nav ball)
+  // Debounced prefs persist: sliders apply live but their RELEASED can be eaten by the settings
+  // pane's scroll, so a release-only pushPrefs never fires. Mark dirty on value-change; loop() flushes
+  // once the value settles (covers brightness + scroll-speed reliably regardless of the release event).
+  bool               _prefs_dirty = false;
+  uint32_t           _prefs_dirty_ms = 0;
+  void               markPrefsDirty() { _prefs_dirty = true; _prefs_dirty_ms = lv_tick_get(); }
   bool               noteInputWake();      // reset idle timer + wake screen on kbd/ball input (like touch)
   void               pollTrackball();      // nav ball -> scroll the active list/chat (no-op without a ball)
   lv_obj_t*          currentScrollable();  // the container the ball should scroll right now (nullptr = none)

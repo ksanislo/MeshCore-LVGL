@@ -53,6 +53,7 @@ __attribute__((weak)) bool board_i2c_lock(uint32_t ms) { (void)ms; return true; 
 __attribute__((weak)) void board_i2c_unlock() {}
 __attribute__((weak)) int  board_batt_millivolts() { return -1; }  // <0 = board has no battery sensor
 __attribute__((weak)) int  board_batt_current_ma() { return 0; }   // signed mA (+charge / -discharge)
+__attribute__((weak)) bool board_has_builtin_battery() { return false; }  // true = always-on gauge (no Power-monitor setting)
 __attribute__((weak)) int  board_i2c_scan(uint8_t* out, int maxn) { (void)out; (void)maxn; return 0; }
 
 // Shared-SPI-bus hooks. On boards where the display shares its SPI bus with the LoRa radio
@@ -241,9 +242,10 @@ void UITask::setLowMemDrawBuf(bool low) {
 void UITask::battSampleTask(void* arg) {
   UITask* self = static_cast<UITask*>(arg);
   for (;;) {
-    uint8_t mon = self->_node_prefs ? self->_node_prefs->power_monitor : 0;
-    board_set_power_monitor(mon);                  // gate the board read + telemetry's getBatt*()
-    int mv = mon ? board_batt_millivolts() : 0;
+    uint8_t pref = self->_node_prefs ? self->_node_prefs->power_monitor : 0;
+    board_set_power_monitor(pref);                 // selects the optional sensor (no-op with builtin)
+    bool on = board_has_builtin_battery() || pref; // a built-in gauge (T-Deck ADC) is always active
+    int mv = on ? board_batt_millivolts() : 0;
     int ma = mv > 0 ? board_batt_current_ma() : 0;
     self->_batt_raw_mv = mv;
     self->_batt_raw_ma = ma;
@@ -7389,7 +7391,7 @@ void UITask::refreshNodeInfo() {
   n += snprintf(buf + n, sizeof(buf) - n, "Uptime: %ud %uh %um %us\n", d, h, m, sec);
   n += snprintf(buf + n, sizeof(buf) - n, "Free RAM: %u KB (min %u)\n", freeRam, minRam);
   n += snprintf(buf + n, sizeof(buf) - n, "Free PSRAM: %u KB\n", freePs);
-  if (_node_prefs && _node_prefs->power_monitor) {  // battery diagnostics only when a monitor is selected
+  if (_node_prefs && (board_has_builtin_battery() || _node_prefs->power_monitor)) {  // batt diag when a gauge is active
     int bmv = _batt_raw_mv;            // latest core-0 sample; no UI-core I2C read
     if (bmv > 0)
       n += snprintf(buf + n, sizeof(buf) - n, "Battery: %d.%03d V  %+d mA  (%d%%)\n",
@@ -9348,12 +9350,17 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
 
   body = _set_pane_body[CAT_POWER];   // reboot belongs under Power & Lock
 
-  // ----- Battery / power monitor (optional; None by default) -----------------
-  _set_pwrmon_dd = makeDropdownField(body, "Power monitor", "None\nINA219");
-  lv_obj_add_event_cb(_set_pwrmon_dd, set_pwrmon_cb, LV_EVENT_VALUE_CHANGED, NULL);
-  _set_batt_type_dd = makeDropdownField(body, "Battery type", "Li-ion 1S\nLi-ion 2S\nLiFePO4 1S");
-  lv_obj_add_event_cb(_set_batt_type_dd, set_batt_type_cb, LV_EVENT_VALUE_CHANGED, NULL);
-  _set_batt_cap_ta = makeNumberField(body, "Capacity (mAh)", set_radio_ta_event_cb);
+  // ----- Battery / power monitor -----------------
+  // These settings are only shown when the board has NO built-in gauge. A board with a built-in
+  // battery ADC (T-Deck) has a fixed pack (1S Li-ion = the default curve) and is voltage-only, so the
+  // sensor selector, chemistry, and capacity are all moot -- the gauge just runs with the defaults.
+  if (!board_has_builtin_battery()) {
+    _set_pwrmon_dd = makeDropdownField(body, "Power monitor", "None\nINA219");
+    lv_obj_add_event_cb(_set_pwrmon_dd, set_pwrmon_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    _set_batt_type_dd = makeDropdownField(body, "Battery type", "Li-ion 1S\nLi-ion 2S\nLiFePO4 1S");
+    lv_obj_add_event_cb(_set_batt_type_dd, set_batt_type_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    _set_batt_cap_ta = makeNumberField(body, "Capacity (mAh)", set_radio_ta_event_cb);
+  }
 
   // Reboot button -- handy on battery, and a clean software restart (esp_restart)
   // vs the hardware RESET line.
@@ -9739,18 +9746,19 @@ void UITask::set_pathmode_cb(lv_event_t* e) {
 
 void UITask::set_bright_cb(lv_event_t* e) {
   if (!_instance) return;
-  lv_event_code_t code = lv_event_get_code(e);
+  // Only act on real value changes. The cb is registered for LV_EVENT_ALL, but other events (press,
+  // focus, delete, pane-scroll teardown) can read lv_slider_get_value() as 0 -> duty 1 -> a near-off
+  // value gets saved. VALUE_CHANGED fires for every genuine change during the drag (and the final
+  // position), so it both applies live and captures the value to persist -- no release dependency.
+  if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
   int pct = (int)lv_slider_get_value(lv_event_get_target(e));
   uint8_t duty = (uint8_t)((pct * 255 + 50) / 100);
   if (duty < 1) duty = 1;
   _instance->_backlight_duty = duty;   // also the level restored on wake from idle-off
-  if (code == LV_EVENT_VALUE_CHANGED) {
-    board_set_backlight(duty);  // live preview while dragging
-  } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-    if (_instance->_node_prefs) {
-      _instance->_node_prefs->display_brightness = duty;
-      pushPrefs();
-    }
+  board_set_backlight(duty);           // live
+  if (_instance->_node_prefs && duty != _instance->_node_prefs->display_brightness) {
+    _instance->_node_prefs->display_brightness = duty;
+    _instance->markPrefsDirty();       // debounced persist (loop() flushes once it settles)
   }
 }
 
@@ -9758,12 +9766,13 @@ void UITask::set_bright_cb(lv_event_t* e) {
 // pass), persists on release. Mirrors set_bright_cb's live-preview / save-on-release split.
 void UITask::set_scrollspeed_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
-  lv_event_code_t code = lv_event_get_code(e);
+  if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;   // real changes only (see set_bright_cb)
   int v = (int)lv_slider_get_value(lv_event_get_target(e));
   if (v < SCROLL_SPEED_MIN) v = SCROLL_SPEED_MIN;
   if (v > SCROLL_SPEED_MAX) v = SCROLL_SPEED_MAX;
+  if ((uint8_t)v == _instance->_node_prefs->trackball_speed) return;   // no real change
   _instance->_node_prefs->trackball_speed = (uint8_t)v;   // live: next roll uses it immediately
-  if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) pushPrefs();  // persist on release
+  _instance->markPrefsDirty();                            // debounced persist (release may not fire)
 }
 
 // Trackball "Reverse scroll direction" checkbox (T-Deck). Applies live (pollTrackball reads
@@ -12558,6 +12567,9 @@ void UITask::loop() {
 #endif
 
   pollTrackball();  // T-Deck nav ball -> scroll the active list/chat (no-op without a ball)
+
+  // Flush a debounced prefs change (slider edits) once it settles -- see markPrefsDirty().
+  if (_prefs_dirty && (uint32_t)(lv_tick_get() - _prefs_dirty_ms) > 800) { _prefs_dirty = false; pushPrefs(); }
 
   // Periodically discipline the system clock from the battery-backed RTC chip: its
   // crystal is more stable than the MCU's, so this corrects ESP32 drift between the

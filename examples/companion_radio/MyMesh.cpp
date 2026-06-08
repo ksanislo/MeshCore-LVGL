@@ -2201,7 +2201,11 @@ void MyMesh::handleCmdFrame(size_t len) {
     uint8_t reply[11];
     int i = 0;
     reply[i++] = RESP_CODE_BATT_AND_STORAGE;
-    uint16_t battery_millivolts = board.getBattMilliVolts();
+    // Prefer the UI fuel-gauge voltage (INA219 on CrowPanel, the GPIO4 ADC on T-Deck) -- this board's
+    // getBattMilliVolts() has no internal sense and returns 0, so the companion app saw no battery.
+    // g_batt_mv is 0 until the gauge runs, so variants without a fuel gauge fall back to the board ADC
+    // exactly as before (the app derives % from this voltage; the frame carries voltage, not a %).
+    uint16_t battery_millivolts = (g_batt_mv > 0) ? (uint16_t)g_batt_mv : board.getBattMilliVolts();
     uint32_t used = _store->getStorageUsedKb();
     uint32_t total = _store->getStorageTotalKb();
     memcpy(&reply[i], &battery_millivolts, 2); i += 2;

@@ -85,6 +85,10 @@ bool sd_card_begin() {
 extern "C" void board_set_backlight(uint8_t duty) {
   static bool inited = false;
   if (!inited) { ledcSetup(7, 5000, 8); ledcAttachPin(PIN_TDECK_BL, 7); inited = true; }
+  // ESP32-S3 LEDC at the 8-bit max (255 = the duty==period edge) dips this backlight's output instead
+  // of holding it high, so the TOP slider step looked dimmer than the step below it. Clamp to 254 so
+  // max is the brightest RELIABLE level (the lost 1/256 is imperceptible).
+  if (duty > 254) duty = 254;
   ledcWrite(7, duty);
 }
 int  board_touch_int_pin()      { return 16; }   // GT911 INT (T-Deck Plus) -- VERIFY
@@ -153,6 +157,19 @@ void board_trackball_read(int16_t* dx, int16_t* dy, bool* pressed) {
   if (dy) *dy = (int16_t)(down - up);
   if (dx) *dx = (int16_t)(right - left);
   if (pressed) *pressed = (digitalRead(PIN_USER_BTN) == LOW);   // active-low button
+}
+
+// ---- Built-in battery sense (always present) --------------------------------
+// The T-Deck Plus has a 100k/100k divider from VBAT to GPIO4 (PIN_VBAT_READ, TDeckBoard.h), so the
+// pack voltage is always readable -- no optional sensor. board_has_builtin_battery() makes UITask run
+// the fuel gauge unconditionally (no "Power monitor" setting). Read with the ADC's factory calibration
+// (analogReadMilliVolts) and x2 for the divider; averaged. Voltage only -- there's no current sense,
+// so board_batt_current_ma() stays the weak 0 and the gauge runs voltage-anchored (no charge bolt).
+bool board_has_builtin_battery() { return true; }
+int  board_batt_millivolts() {
+  uint32_t acc = 0;
+  for (int i = 0; i < BATTERY_SAMPLES; i++) acc += analogReadMilliVolts(PIN_VBAT_READ);
+  return (int)((acc / BATTERY_SAMPLES) * 2);   // 100k/100k divider -> x2
 }
 
 // ---- Runtime radio controls (mirror CrowPanel target.cpp) --------------------
