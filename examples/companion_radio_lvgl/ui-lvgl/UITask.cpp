@@ -366,11 +366,24 @@ void UITask::kbd_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     data->key = last_key; data->state = LV_INDEV_STATE_RELEASED;
     return;
   }
+  // CardKB Fn+Enter (0xA3): insert a literal newline in the multi-line chat compose (a bare Enter
+  // sends, above). Elsewhere it falls through to behave as a normal Enter.
+  if (c == 0xA3 && _instance && _instance->_nav_group &&
+      lv_group_get_focused(_instance->_nav_group) == _instance->_chat_input) {
+    lv_textarea_add_char(_instance->_chat_input, '\n');
+    data->key = last_key; data->state = LV_INDEV_STATE_RELEASED;
+    return;
+  }
   uint32_t k = 0;
   if      (c == 8 || c == 127) k = LV_KEY_BACKSPACE;
   else if (c == 13 || c == 10) k = LV_KEY_ENTER;
+  else if (c == 0xA3)          k = LV_KEY_ENTER;    // CardKB Fn+Enter outside chat -> plain Enter
   else if (c == 27)            k = LV_KEY_ESC;
   else if (c == 9)             k = LV_KEY_NEXT;     // tab -> next field
+  else if (c == 0xB4)          k = LV_KEY_LEFT;     // M5 CardKB arrows (0xB4..0xB7); handled before the
+  else if (c == 0xB5)          k = LV_KEY_UP;       // c>=32 catch-all so they don't read as Latin-1 chars
+  else if (c == 0xB6)          k = LV_KEY_DOWN;
+  else if (c == 0xB7)          k = LV_KEY_RIGHT;
   else if (c >= 32)            k = (uint32_t)c;     // printable ASCII (UTF-8 lead bytes pass through)
   if (k) { data->key = k; data->state = LV_INDEV_STATE_PRESSED; last_key = k; }
   else   { data->key = last_key; data->state = LV_INDEV_STATE_RELEASED; }

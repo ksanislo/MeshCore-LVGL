@@ -161,10 +161,38 @@ int board_i2c_scan(uint8_t* out, int maxn) {
 }
 int  board_touch_int_pin() { return P_TOUCH_INT; }   // UITask uses this to drive touch off the INT
 
+// Optional M5Stack CardKB (mini I2C QWERTY keyboard, addr 0x5F) on the shared touch I2C bus. Probed
+// once at radio_init (after the RTC brings Wire up on the touch pins); if present, the UI drives an
+// LVGL keypad indev from board_kbd_read() -- same path as the T-Deck's built-in keyboard. Absent ->
+// the on-screen keyboard. Boot-time detection only. Arrows are 0xB4..0xB7 (mapped in kbd_read_cb).
+#ifndef CARDKB_ADDR
+  #define CARDKB_ADDR 0x5F
+#endif
+static int8_t s_cardkb = -1;            // -1 unprobed, 0 absent, 1 present
+static void cardkb_probe() {            // Wire must already be up on P_TOUCH_SDA/SCL
+  s_cardkb = 0;
+  Wire.beginTransmission(CARDKB_ADDR);
+  if (Wire.endTransmission() == 0) s_cardkb = 1;
+}
+bool board_has_physical_kbd() { return s_cardkb == 1; }
+int  board_kbd_read() {                 // next pressed ASCII (0 = none); shares the touch bus + i2c lock
+  if (s_cardkb != 1) return 0;
+  if (!board_i2c_lock(20)) return 0;
+  static bool claimed = false;
+  if (!claimed) { Wire.end(); claimed = true; }     // claim port 0 off the LGFX touch driver (INA219 wrinkle)
+  Wire.begin(P_TOUCH_SDA, P_TOUCH_SCL);
+  Wire.setClock(100000);
+  int r = 0;
+  if (Wire.requestFrom((int)CARDKB_ADDR, 1) == 1) { int c = Wire.read(); r = (c > 0) ? c : 0; }
+  board_i2c_unlock();
+  return r;
+}
+
 bool radio_init() {
   hspi_mutex_ensure();   // before any radio/SD SPI transaction can take it
   if (!s_i2c_mtx) s_i2c_mtx = xSemaphoreCreateMutex();   // before the first RTC bus access
   rtc_clock.begin();
+  cardkb_probe();        // RTC just brought Wire up on the touch pins -> detect an optional CardKB
 
   lora_spi.begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI);
   return radio.std_init(&lora_spi);
