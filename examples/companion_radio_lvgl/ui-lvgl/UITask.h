@@ -418,6 +418,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_ota_btn;         // "Update firmware" button (greyed when no IP)
   lv_obj_t*       _set_ota_lbl;         // its label -> toggles to "Cancel upgrade" while downloading
   lv_obj_t*       _set_ota_curlatest;   // "Current: X" / "Latest: Y" version label (two lines)
+  lv_obj_t*       _set_ota_refresh_btn; // manual "check now" button by the Firmware-update heading
   lv_obj_t*       _set_ota_release_field;// makeField column wrapping the release dropdown
   lv_obj_t*       _set_ota_release_dd;  // release picker dropdown (shown when Additional options is on)
   lv_obj_t*       _set_ota_prerel_chk;  // "Include pre-releases" checkbox
@@ -1087,6 +1088,7 @@ private:
   static void presets_update_cb(lv_event_t* e); // "Update radio presets"
   static void set_ota_url_event_cb(lv_event_t* e); // OTA URL field: kb on focus, commit on defocus
   static void ota_update_cb(lv_event_t* e);     // "Update firmware" -> resolve source -> post OtaUpdate
+  static void ota_refresh_cb(lv_event_t* e);    // manual refresh -> force a manifest re-fetch
   static void ota_prerelease_cb(lv_event_t* e);    // include pre-releases (saved) -> re-fetch + rebuild list
   static void ota_custom_url_cb(lv_event_t* e);    // custom-URL mode (saved) -> reveal URL field
   static void ota_release_dd_cb(lv_event_t* e);    // release picked -> refresh current/latest hint

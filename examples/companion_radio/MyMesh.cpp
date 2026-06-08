@@ -412,9 +412,19 @@ void MyMesh::wifiLoop() {
 
   bool up = (WiFi.status() == WL_CONNECTED);
 
-  // On the rising edge of connectivity, (re)arm NTP if enabled.
-  if (up && !_wifi_was_up) applyNtpConfig();
+  // On the rising edge of connectivity, (re)arm NTP if enabled + the first manifest check (a few
+  // seconds out, so it doesn't fight the boot-time UI build for TLS RAM).
+  if (up && !_wifi_was_up) { applyNtpConfig(); _releases_next_check_ms = millis() + 8000; }
   _wifi_was_up = up;
+
+  // Hourly background OTA-manifest check so the update picker is fresh without the user opening the
+  // page (these are long-running devices; a one-shot fetch would miss everything between reboots).
+  // Mirrors the NTP cadence. Skipped while a fetch or an OTA download is already in flight.
+  if (up && _releases_next_check_ms != 0 && millis() >= _releases_next_check_ms
+      && !_releases_fetching && !_ota_busy) {
+    _releases_next_check_ms = millis() + 3600000UL;   // re-check hourly
+    updateReleaseList();
+  }
 
   // Adopt NTP time when it resolves (and re-check periodically so a long uptime
   // stays corrected). configTime() leaves the system clock at epoch 0 until the
@@ -566,7 +576,7 @@ void MyMesh::updateReleaseList() {
 
   // Bounded DNS pre-resolve (HTTPClient's own lookup isn't bounded and can wedge); also lets the UI
   // core get a couple of loop passes in to shrink the draw buffer before we open the TLS socket.
-  const char* host = "api.github.com";
+  const char* host = "raw.githubusercontent.com";
   IPAddress rip;
   DBG_LOGF("[REL] free-int=%u before resolve\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   if (!WiFi.hostByName(host, rip)) { fail("can't resolve host"); return; }
@@ -590,22 +600,23 @@ void MyMesh::updateReleaseList() {
   http.setTimeout(8000);
   http.setConnectTimeout(8000);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  // Fetch our static manifest from raw.githubusercontent.com -- ONE host, ONE TLS handshake, no
+  // cross-host redirect (a release-asset URL would bounce github.com -> objects.githubusercontent.com
+  // = a second stall). Tiny + board-count-independent: the device constructs its own download URL
+  // from each entry's ver+sha below, so the manifest never carries per-board data.
   char api[160];
-  snprintf(api, sizeof(api), "https://api.github.com/repos/%s/%s/releases?per_page=%d",
-           OTA_GH_OWNER, OTA_GH_REPO, OTA_RELEASES_PER_PAGE);
+  snprintf(api, sizeof(api), "https://raw.githubusercontent.com/%s/%s/main/firmware-manifest.json",
+           OTA_GH_OWNER, OTA_GH_REPO);
   if (!http.begin(client, api)) { fail("connect failed"); return; }
-  http.addHeader("User-Agent", "MeshCore-LVGL-OTA");        // GitHub returns 403 without a User-Agent
-  http.addHeader("Accept", "application/vnd.github+json");
+  http.addHeader("User-Agent", "MeshCore-LVGL-OTA");        // be polite; raw serves the file directly
   int code = http.GET();
   DBG_LOGF("[REL] GET -> %d, free-int=%u\n", code, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   if (code != 200) { http.end(); char b[40]; snprintf(b, sizeof(b), "HTTP %d", code); fail(b); return; }
 
-  // Stream the (chunked) body into a PSRAM buffer instead of an internal-SRAM String. CAP must hold the
-  // WHOLE response: GitHub's release JSON is ~7 KB/release (mostly per-asset uploader/author objects we
-  // don't use), so per_page=10 runs ~55-70 KB. The old 48 KB silently truncated the body once we passed
-  // ~7 releases -> cJSON_Parse failed on the cut-off JSON -> the entire list dropped to "none". 128 KB
-  // (freed right after the parse) covers per_page=10 with margin; per_page bounds it from growing further.
-  const size_t CAP = 128 * 1024;
+  // Stream the body into a PSRAM buffer (cJSON DOM is PSRAM too via hooks). The manifest is ~60 bytes
+  // per release, so ~1-2 KB total regardless of how many boards we support -- 32 KB is plenty of margin
+  // and bounds it from ever truncating (the old GitHub-API path needed 384 KB and still overflowed).
+  const size_t CAP = 32 * 1024;
   char* body = (char*)ps_malloc(CAP);
   if (!body) { http.end(); fail("no PSRAM"); return; }
   WiFiClient* stream = http.getStreamPtr();
@@ -628,46 +639,34 @@ void MyMesh::updateReleaseList() {
 
   cJSON* root = cJSON_Parse(body);
   free(body);                                                // cJSON copied what it needs
-  if (!cJSON_IsArray(root)) { if (root) cJSON_Delete(root); fail("bad JSON"); return; }
+  cJSON* releases = root ? cJSON_GetObjectItem(root, "releases") : nullptr;
+  if (!cJSON_IsArray(releases)) { if (root) cJSON_Delete(root); fail("bad manifest"); return; }
 
   int n = 0;
   cJSON* rel = nullptr;
-  cJSON_ArrayForEach(rel, root) {
+  cJSON_ArrayForEach(rel, releases) {
     if (n >= OTA_RELEASES_PER_PAGE) break;
-    cJSON* tag    = cJSON_GetObjectItem(rel, "tag_name");
-    cJSON* pre    = cJSON_GetObjectItem(rel, "prerelease");
-    cJSON* assets = cJSON_GetObjectItem(rel, "assets");
-    if (!cJSON_IsString(tag) || !cJSON_IsArray(assets)) continue;
-    const char* dl = nullptr;                                // find OUR app image's download URL
-    cJSON* a = nullptr;
-    size_t pl = strlen(OTA_ASSET_PREFIX);
-    cJSON_ArrayForEach(a, assets) {
-      cJSON* aname = cJSON_GetObjectItem(a, "name");
-      if (!cJSON_IsString(aname)) continue;
-      const char* nm = aname->valuestring;
-      size_t nl = strlen(nm);
-      // Our board's app image: "<prefix>...bin", but NOT the "-merged" factory image. (The .md5
-      // sibling fails the ".bin" suffix.) Matches the versionless rc1-rc4 name AND a versioned
-      // "<prefix>-<ver>-<sha>.bin" -- so version+sha in the filename doesn't break the match.
-      if (nl < pl + 4 || strncmp(nm, OTA_ASSET_PREFIX, pl) != 0) continue;
-      if (strcmp(nm + nl - 4, ".bin") != 0 || strstr(nm, "-merged")) continue;
-      cJSON* aurl = cJSON_GetObjectItem(a, "browser_download_url");
-      if (cJSON_IsString(aurl)) dl = aurl->valuestring;
-      break;
-    }
-    if (!dl) continue;                                       // no firmware for this board in this release
+    cJSON* ver = cJSON_GetObjectItem(rel, "ver");
+    cJSON* sha = cJSON_GetObjectItem(rel, "sha");
+    cJSON* pre = cJSON_GetObjectItem(rel, "pre");
+    if (!cJSON_IsString(ver) || !cJSON_IsString(sha) || !ver->valuestring[0]) continue;
     OtaRelease& r = _ota_releases[n];
     memset(&r, 0, sizeof(r));
-    strncpy(r.tag, tag->valuestring, sizeof(r.tag) - 1);
+    strncpy(r.tag, ver->valuestring, sizeof(r.tag) - 1);
     r.prerelease = cJSON_IsTrue(pre);
-    strncpy(r.url, dl, sizeof(r.url) - 1);
+    // Construct THIS board's download URL from the manifest's ver+sha + our compiled-in prefix.
+    // Asset names are deterministic ("<prefix>-<ver>-<sha>.bin"), and the tag == ver, so the
+    // manifest stays board-agnostic. The .bin download (and its .md5 sibling) follow the normal
+    // github.com -> CDN redirect in otaFromUrl(); only this CHECK is redirect-free.
+    snprintf(r.url, sizeof(r.url), "https://github.com/%s/%s/releases/download/%s/%s-%s-%s.bin",
+             OTA_GH_OWNER, OTA_GH_REPO, r.tag, OTA_ASSET_PREFIX, r.tag, sha->valuestring);
     n++;
   }
   cJSON_Delete(root);
   _ota_release_count = n;
-  if (n == 0) snprintf(_ota_release_status, sizeof(_ota_release_status), "no matching assets");
+  if (n == 0) snprintf(_ota_release_status, sizeof(_ota_release_status), "no releases");
   else        snprintf(_ota_release_status, sizeof(_ota_release_status), "%d releases", n);
-  DBG_LOGF("[REL] parsed %d releases (%u bytes)\n", n, (unsigned)len);
+  DBG_LOGF("[REL] manifest: %d releases (%u bytes)\n", n, (unsigned)len);
   done();
 }
 

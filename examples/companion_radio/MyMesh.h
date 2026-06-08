@@ -129,8 +129,8 @@ public:
 #ifndef OTA_RELEASES_PER_PAGE
   #define OTA_RELEASES_PER_PAGE 10
 #endif
-  struct OtaRelease { char tag[24]; bool prerelease; char url[160]; };  // url[160]: GitHub asset URLs exceed 96
-  void updateReleaseList();                // GET api.github.com/.../releases -> _ota_releases (backend core)
+  struct OtaRelease { char tag[24]; bool prerelease; char url[192]; };  // url: constructed github.com asset URL (long board prefixes push past 160)
+  void updateReleaseList();                // fetch firmware-manifest.json -> _ota_releases (backend core)
   int  numReleases() const { return _ota_release_count; }
   bool getRelease(int idx, OtaRelease& out) const;
   void getReleaseStatus(char* out, size_t cap);
@@ -170,6 +170,7 @@ protected:
   bool _wifi_was_up = false;          // edge-detect link-up to (re)arm NTP
   bool _ntp_synced = false;           // NTP has set the RTC at least once
   uint32_t _ntp_next_check_ms = 0;    // next time() poll / re-sync (millis)
+  uint32_t _releases_next_check_ms = 0;  // next hourly manifest check while WiFi is up (millis); 0 = unarmed
   bool     _gps_owned_clock = false;  // GPS-preferred time: GPS held the clock last pass (NTP deferred)
   uint32_t _gps_lost_ms = 0;          // millis the GPS fix dropped (0 = healthy; grace before NTP takes over)
   char _preset_status[40] = "";       // last preset-update result, for the UI

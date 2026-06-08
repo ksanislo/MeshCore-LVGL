@@ -5048,16 +5048,31 @@ void UITask::notify(UIEventType t) {
 
 // ===== Notifications =====================================================
 
-// Copy the first UTF-8 codepoint of `in` into `out` (1-4 bytes + NUL), uppercasing
-// a lone ASCII letter. Used for the avatar grapheme; routes through withEmoji so an
-// emoji/CJK leading character renders. Empty if `in` is empty.
+// Pick the avatar grapheme from `in` into `out` (1-4 UTF-8 bytes + NUL). Prefer the FIRST
+// EMOJI codepoint anywhere in the name (so "Bob 🎸" shows the guitar, not "B"); if the name
+// has no emoji, fall back to the first character as-is (preserve case, emoji, CJK). Routes
+// through withEmoji so the chosen glyph renders in color. Empty if `in` is empty.
 static void firstGrapheme(const char* in, char* out, size_t cap) {
   out[0] = 0;
   if (!in || !in[0] || cap < 5) return;
+  // First pass: the leading emoji, if any (skin-tone/VS16 modifiers fall away -- the emoji
+  // bundles are keyed by the base codepoint, which is what we copy).
+  uint32_t i = 0;
+  while (in[i]) {
+    uint32_t start = i;
+    uint32_t cp = _lv_txt_encoded_next(in, &i);   // codepoint at `start`; i advances past it
+    if (cp == 0) break;
+    if (isEmojiCp(cp)) {
+      uint32_t len = i - start;
+      if (len > 0 && len < cap) { memcpy(out, in + start, len); out[len] = 0; }
+      return;
+    }
+  }
+  // No emoji -> first character.
   uint32_t next = 0;
-  _lv_txt_encoded_next(in, &next);   // advances `next` past one UTF-8 char
+  _lv_txt_encoded_next(in, &next);
   if (next == 0 || next >= cap) return;
-  memcpy(out, in, next);   // first character as-is (preserve case, emoji, CJK)
+  memcpy(out, in, next);
   out[next] = 0;
 }
 
@@ -7564,12 +7579,27 @@ void UITask::buildUpdateScreen() {
   lv_obj_set_style_pad_row(body, 8, 0);
 
   // ----- Firmware update (OTA). Greys out when there's no IP (WiFi off/broken). -----
-  { lv_obj_t* sec = lv_label_create(body);
+  // Header row: "Firmware update" + a manual refresh button (forces a manifest re-fetch).
+  { lv_obj_t* hr = lv_obj_create(body);
+    lv_obj_remove_style_all(hr);
+    lv_obj_set_width(hr, LV_PCT(100));
+    lv_obj_set_height(hr, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(hr, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(hr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(hr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t* sec = lv_label_create(hr);
     lv_label_set_text(sec, "Firmware update");
     lv_obj_set_style_text_color(sec, lv_color_hex(UI_ACCENT), 0);
-    lv_obj_set_style_text_font(sec, fontHeading(), 0); }
-  // Current / Latest version -- two separate lines (filled in refreshUpdate). The list auto-refreshes
-  // on open (fresh boot / stale); fast dev iteration uses Custom URL, so there's no manual check button.
+    lv_obj_set_style_text_font(sec, fontHeading(), 0);
+    lv_obj_set_flex_grow(sec, 1);
+    _set_ota_refresh_btn = lv_btn_create(hr);
+    lv_obj_set_size(_set_ota_refresh_btn, 34, 34);
+    lv_obj_set_style_radius(_set_ota_refresh_btn, 17, 0);
+    lv_obj_add_event_cb(_set_ota_refresh_btn, ota_refresh_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* rl = lv_label_create(_set_ota_refresh_btn);
+    lv_label_set_text(rl, LV_SYMBOL_REFRESH); lv_obj_center(rl); }
+  // Current / Latest version -- two separate lines (filled in refreshUpdate). Auto-refreshes on open
+  // (fresh boot / stale) + hourly in the background; the refresh button above forces a re-check.
   _set_ota_curlatest = lv_label_create(body);
   lv_obj_set_width(_set_ota_curlatest, LV_PCT(100));
   lv_label_set_long_mode(_set_ota_curlatest, LV_LABEL_LONG_WRAP);
@@ -11928,6 +11958,20 @@ void UITask::set_ota_url_event_cb(lv_event_t* e) {
     _instance->_node_prefs->ota_url[sizeof(_instance->_node_prefs->ota_url) - 1] = 0;
     pushPrefs();
   }
+}
+
+// Manual "check now": force a manifest re-fetch even when a list is already cached (the auto-retry in
+// refreshUpdate only fires on a cold/empty cache). refreshUpdate edge-detects completion + rebuilds.
+void UITask::ota_refresh_cb(lv_event_t* e) {
+  (void)e;
+  if (!_instance) return;
+  char ip[24], m[24], g[24], d[24];
+  mproxy::wifiIpInfo(ip, m, g, d, 24);
+  if (!ip[0]) { _instance->showToast("No WiFi"); return; }
+  if (mproxy::releasesFetching()) return;            // already checking
+  _instance->_ota_fetch_tries = 0;                   // also re-arm the cold-cache retry path
+  _instance->_ota_last_check_ms = millis();
+  mproxy::updateReleases();
 }
 
 void UITask::ota_update_cb(lv_event_t* e) {
