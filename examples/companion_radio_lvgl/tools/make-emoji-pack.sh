@@ -11,7 +11,7 @@
 #   gh release create emoji-emj1 --repo ksanislo/MeshCore-LVGL --title "Emoji pack (EMJ1)" <out_dir>/*.bin.gz
 set -euo pipefail
 SRC="${1:?bundle dir}"; OUT="${2:?out dir}"; FMT="${3:-emj1}"
-SIZES="12 14 16 20 28"   # keep in sync with EMOJI_SIZES in ui-lvgl/SdCard.h
+SIZES="10 12 14 16 18 20 24 28"   # keep in sync with EMOJI_SIZES in ui-lvgl/SdCard.h
 mkdir -p "$OUT"
 for s in $SIZES; do
   in="$SRC/$s.bin"; out="$OUT/emoji-$FMT-$s.bin.gz"

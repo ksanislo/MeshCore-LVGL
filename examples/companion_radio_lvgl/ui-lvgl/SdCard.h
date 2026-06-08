@@ -25,8 +25,12 @@
 // renders. The pack downloader builds its GitHub asset names from these; keep in sync with the packer
 // (tools/emoji_pack.py --sizes). A format bump (EMJ2) changes EMOJI_PACK_FMT -> a new emoji-emj2 release.
 #define EMOJI_PACK_FMT      "emj1"
-static const int EMOJI_SIZES[]   = {12, 14, 16, 20, 28};   // /emoji/<size>.bin
-static const int EMOJI_SIZE_COUNT = 5;
+// Union of every font-ramp size (UITask FONT_RAMP: Small/Medium/Large) so emoji render in color at
+// any selectable Font size. 10/18/24 were added with the font-size feature. Each needs an
+// emoji-emj1-<size>.bin.gz asset on the emoji-emj1 release before shipping (the downloader aborts the
+// whole pack on the first missing size). Keep in sync with tools/emoji_pack.py + make-emoji-pack.sh.
+static const int EMOJI_SIZES[]   = {10, 12, 14, 16, 18, 20, 24, 28};   // /emoji/<size>.bin
+static const int EMOJI_SIZE_COUNT = (int)(sizeof(EMOJI_SIZES) / sizeof(EMOJI_SIZES[0]));
 
 extern SdFs sd;  // the shared filesystem handle (defined in the variant)
 extern volatile uint8_t sd_last_err_code;  // SdFat error from the last failed mount (diagnostic)

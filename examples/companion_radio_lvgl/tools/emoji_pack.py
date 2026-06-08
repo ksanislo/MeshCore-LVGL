@@ -68,7 +68,7 @@ def main():
     ap = argparse.ArgumentParser(description="Twemoji PNGs -> per-size LVGL emoji bundles")
     ap.add_argument("src", help="dir of Twemoji 72x72 PNGs")
     ap.add_argument("out", help="output dir; writes <out>/emoji/<size>.bin (copy /emoji to SD)")
-    ap.add_argument("--sizes", default="12,14,16,20,28", help="comma px sizes")
+    ap.add_argument("--sizes", default="10,12,14,16,18,20,24,28", help="comma px sizes")
     a = ap.parse_args()
     sizes = [int(s) for s in a.sizes.split(",")]
     out_dir = os.path.join(a.out, "emoji")
