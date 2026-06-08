@@ -361,11 +361,16 @@ void MapView::build(lv_obj_t* parent, uint16_t w, uint16_t h, MarkerTapCb cb, vo
   _root = parent; _tap_cb = cb; _tap_user = user;
   _vw = w; _vh = h;
 
-  // Oversized buffer: viewport + one viewport of margin on every side (3x3). The margin
-  // is pre-rendered, so a drag reveals real content live; on release we scroll the buffer
-  // and only decode the freshly-exposed strip. Fall back to a viewport-only buffer if the
-  // big allocation doesn't fit.
-  _mx = _vw; _my = _vh;
+  // Oversized buffer: viewport + a pre-rendered margin on every side, so a drag reveals real
+  // content live; on release we scroll the buffer and only decode the freshly-exposed strip.
+  // The margin is a fraction f of the viewport, BYTE-CAPPED so the buffer fits PSRAM: a full
+  // viewport each side is ~2 MB at 480x232 but >5 MB at 800x480. Solve (1+2f)^2 * vp*2 <= CAP,
+  // clamp f to [0,1] -> small screens keep the full (f=1) margin; big screens shrink it.
+  const size_t MAP_BUF_CAP = 2u * 1024 * 1024;
+  double vp = (double)_vw * _vh * sizeof(lv_color_t);
+  double f = (sqrt((double)MAP_BUF_CAP / (2.0 * vp)) - 1.0) / 2.0;
+  if (f > 1.0) f = 1.0; else if (f < 0.0) f = 0.0;
+  _mx = (uint16_t)(f * _vw); _my = (uint16_t)(f * _vh);
   _cw = _vw + 2 * _mx; _ch = _vh + 2 * _my;
   size_t bytes = (size_t)_cw * _ch * sizeof(lv_color_t);
   _cbuf = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);

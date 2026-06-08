@@ -1,0 +1,138 @@
+#include "CrowPanelBoard.h"
+
+// Deterministic GT911 power-on reset. The controller latches BOTH its I2C slave
+// address and its startup state from the INT line level at the moment RST is
+// released. LovyanGFX's Touch_GT911::init() pulses only RST and leaves INT
+// floating, so it occasionally comes up ACKing I2C but never asserting data-ready
+// -- touch is then dead with no recovery (the second lgfx.init() in
+// ui_task.begin() early-returns once _inited latched true). We do the reset here,
+// before display.begin(), with the datasheet INT/RST timing and INT held HIGH at
+// the RST rising edge to select addr 0x14 (matching CrowPanelLGFX's touch config).
+#ifndef CROWPANEL_RGB
+static void gt911_reset() {
+  pinMode(PIN_TOUCH_RST, OUTPUT);
+  pinMode(PIN_TOUCH_INT, OUTPUT);
+  digitalWrite(PIN_TOUCH_RST, LOW);    // assert reset
+  digitalWrite(PIN_TOUCH_INT, LOW);
+  delay(11);                           // hold in reset (>10 ms)
+  digitalWrite(PIN_TOUCH_INT, HIGH);   // INT high at release -> I2C addr 0x14
+  delayMicroseconds(120);              // >100 us of INT setup before release
+  digitalWrite(PIN_TOUCH_RST, HIGH);   // release reset; address/state latch now
+  delay(6);                            // hold INT through the latch window (>5 ms)
+  digitalWrite(PIN_TOUCH_INT, LOW);
+  delay(55);                           // firmware boot (>50 ms) before first I2C
+  pinMode(PIN_TOUCH_INT, INPUT);       // hand INT back as the interrupt line
+}
+#endif
+
+void CrowPanelBoard::begin() {
+  ESP32Board::begin();
+
+#ifndef CROWPANEL_RGB
+  // ---- SPI tier (2.4/2.8/3.5): SPI display, GT911 on its own INT/RST, PWM backlight, audio path ----
+  // Bring the touch controller up deterministically before anything probes it.
+  gt911_reset();
+
+  pinMode(PIN_LORA_MIC_MUX, OUTPUT);
+  digitalWrite(PIN_LORA_MIC_MUX, LOW);
+
+  // Backlight at ~60% via high-frequency (inaudible) PWM instead of full-on.
+  // A low PWM frequency would whine; 30 kHz is well above hearing.
+  ledcSetup(BL_LEDC_CHANNEL, 30000, 8);          // 30 kHz, 8-bit
+  ledcAttachPin(PIN_TFT_BL, BL_LEDC_CHANNEL);
+  ledcWrite(BL_LEDC_CHANNEL, BL_DEFAULT_DUTY);   // ~60%
+
+  // Quiet the audio path so it doesn't click on touch/SPI EMI. Matches the
+  // factory firmware's idle state: buzzer low, GPIO14 low, speaker-amp muted
+  // (GPIO21 high). None of these should float.
+  pinMode(PIN_BUZZER, OUTPUT);
+  digitalWrite(PIN_BUZZER, LOW);
+  pinMode(PIN_SPK_CTL, OUTPUT);
+  digitalWrite(PIN_SPK_CTL, LOW);
+  pinMode(PIN_SPK_MUTE, OUTPUT);
+  digitalWrite(PIN_SPK_MUTE, HIGH);
+  // Park the I2S output lines low (no clock/data) so the amp can't pick up
+  // EMI from the display SPI bus and turn it into audible noise.
+  pinMode(PIN_I2S_BCLK, OUTPUT);  digitalWrite(PIN_I2S_BCLK, LOW);
+  pinMode(PIN_I2S_LRCK, OUTPUT);  digitalWrite(PIN_I2S_LRCK, LOW);
+  pinMode(PIN_I2S_DOUT, OUTPUT);  digitalWrite(PIN_I2S_DOUT, LOW);
+#else
+  // ---- RGB tier (4.3/5/7): RGB-parallel display; GT911 reset + backlight are LovyanGFX/expander's job ----
+  // BLIND BRING-UP TODO (tester): backlight on these units is gated by an I2C IO-expander (PCA9557)
+  // or an STC8H MCU, not a plain PWM pin. If a direct BL GPIO exists, drive it on; otherwise the
+  // panel/expander init must be added here. We avoid blind I2C-expander writes (could wedge the bus).
+  #ifdef PIN_TFT_BL
+    pinMode(PIN_TFT_BL, OUTPUT);
+    digitalWrite(PIN_TFT_BL, HIGH);   // VERIFY: most RGB units use an expander instead of this pin
+  #endif
+#endif
+}
+
+// Backlight brightness hook used by the LVGL Settings tab (which is variant-agnostic and only knows
+// this weak symbol). SPI tier drives the LEDC duty; RGB tier is on/off (or no-op) until the expander
+// path is brought up.
+extern "C" void board_set_backlight(uint8_t duty) {
+#ifndef CROWPANEL_RGB
+  ledcWrite(BL_LEDC_CHANNEL, duty);
+#else
+  #ifdef PIN_TFT_BL
+    digitalWrite(PIN_TFT_BL, duty ? HIGH : LOW);
+  #else
+    (void)duty;
+  #endif
+#endif
+}
+
+// ---- INA219 battery monitor -------------------------------------------------
+// On the shared touch I2C bus (PIN_TOUCH_SDA/SCL), alongside the GT911 and the
+// PCF8563 RTC. We take the same board_i2c_lock and re-assert the bus pins per
+// access (touch reconfigures them on every read), exactly like CrowPanelRTCClock.
+extern bool board_i2c_lock(uint32_t timeout_ms);
+extern void board_i2c_unlock();
+
+// Set false to force ONE full Wire.end()+begin() on the next read. We do NOT end()+begin() per read:
+// that uninstalls/reallocates the IDF i2c driver every time, fragmenting the internal heap over hours
+// (which starved lwIP/TLS and dragged OTA). But a single full re-init IS required to bootstrap the bus:
+// the RTC's boot Wire.begin() isn't enough once the LGFX touch driver has configured port 0, so a cold
+// read just returns 0 (icon never appears) until something does a real end()+begin() -- which is why
+// opening Node Info, whose board_i2c_scan() does exactly that, used to "fix" it. So: full re-init once
+// at first read (and again after any failure, to self-heal a wedged bus), cheap no-op begin() after.
+static bool s_ina_bus_inited = false;
+
+static bool ina219_read16(uint8_t reg, uint16_t& out) {
+  if (!board_i2c_lock(100)) return false;
+  if (!s_ina_bus_inited) {
+    Wire.end();                                 // one-shot: claim port 0 cleanly from the touch driver
+    s_ina_bus_inited = true;
+  }
+  Wire.begin(PIN_TOUCH_SDA, PIN_TOUCH_SCL);     // installs on the post-end() call; cheap no-op after
+  Wire.setClock(100000);                        // 100 kHz: robust on the multi-drop touch bus
+  bool ok = false;
+  for (int attempt = 0; attempt < 4 && !ok; attempt++) {   // contended bus -> retry a few times
+    Wire.beginTransmission(INA219_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(true) != 0) { delay(1); continue; }   // STOP (not repeated-start)
+    if (Wire.requestFrom((int)INA219_ADDR, 2) != 2) { delay(1); continue; }
+    out = ((uint16_t)Wire.read() << 8) | (uint8_t)Wire.read();
+    ok = true;
+  }
+  if (!ok) s_ina_bus_inited = false;            // bus may be wedged -> force a full re-init next read
+  board_i2c_unlock();
+  return ok;
+}
+
+uint16_t CrowPanelBoard::getBattMilliVolts() {
+  if (_power_monitor != 1) return 0;             // no monitor selected -> don't touch I2C
+  uint16_t raw;
+  if (!ina219_read16(0x02, raw)) return 0;       // bus-voltage reg; 0 = sensor absent/no ACK
+  return (uint16_t)((raw >> 3) * 4);             // bits[15:3], 4 mV/LSB
+}
+
+int32_t CrowPanelBoard::getBattCurrentMa() {
+  if (_power_monitor != 1) return 0;
+  uint16_t raw;
+  if (!ina219_read16(0x01, raw)) return 0;        // shunt-voltage reg (signed), 10 uV/LSB
+  // I[mA] = Vshunt[uV] / Rshunt[mOhm] = (raw*10) / R_mOhm. Negated: this board's shunt IN+/IN- are
+  // wired so the raw sign is inverted vs our convention -> make + = charging, - = discharging.
+  return -(((int32_t)(int16_t)raw * 10) / (int32_t)INA219_SHUNT_MILLIOHM);
+}
