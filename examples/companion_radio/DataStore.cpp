@@ -289,6 +289,7 @@ static void applyAppendedPrefsDefaults(NodePrefs& _prefs) {
   _prefs.trackball_speed = 0;                                                            // 198 (0 -> UI default)
   _prefs.trackball_invert = 0;                                                           // 199 (normal direction)
   _prefs.font_scale = 0;                                                                 // 200 (auto by screen size)
+  _prefs.touch_suppress_ms = 250;                                                        // 201 (default 250ms; 0 = off)
 }
 
 void DataStore::loadPrefs(NodePrefs& prefs, double& node_lat, double& node_lon) {
@@ -397,6 +398,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.trackball_speed, sizeof(_prefs.trackball_speed));             // 198
     file.read((uint8_t *)&_prefs.trackball_invert, sizeof(_prefs.trackball_invert));           // 199
     file.read((uint8_t *)&_prefs.font_scale, sizeof(_prefs.font_scale));                       // 200
+    file.read((uint8_t *)&_prefs.touch_suppress_ms, sizeof(_prefs.touch_suppress_ms));         // 201
 
     file.close();
   }
@@ -493,6 +495,7 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.trackball_speed, sizeof(_prefs.trackball_speed));            // 198
     file.write((uint8_t *)&_prefs.trackball_invert, sizeof(_prefs.trackball_invert));          // 199
     file.write((uint8_t *)&_prefs.font_scale, sizeof(_prefs.font_scale));                      // 200
+    file.write((uint8_t *)&_prefs.touch_suppress_ms, sizeof(_prefs.touch_suppress_ms));        // 201
 
     file.close();
     commitTmp(_fs, "/new_prefs.tmp", "/new_prefs");

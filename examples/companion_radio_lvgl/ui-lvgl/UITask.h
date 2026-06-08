@@ -373,6 +373,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_bright_slider;
   lv_obj_t*       _set_scroll_slider = nullptr;  // trackball "Scroll speed" (created only on trackball boards)
   lv_obj_t*       _set_scroll_inv_chk = nullptr; // trackball "Reverse scroll direction" (trackball boards only)
+  lv_obj_t*       _set_touchlock_slider = nullptr; // trackball "Scroll touch-lock" ms (trackball boards only)
   lv_obj_t*       _set_rot_dd;
   lv_obj_t*       _set_font_dd = nullptr;   // UI "Font size" tier dropdown (Auto/Small/Medium/Large)
   lv_obj_t*       _set_screen_dd;       // screen idle-off timeout dropdown
@@ -676,6 +677,7 @@ class UITask : public AbstractUITask {
   lv_indev_drv_t     _kbd_drv;             // physical-keyboard keypad indev (T-Deck); unused otherwise
   lv_group_t*        _kbd_group = nullptr; // group the keypad indev drives (textareas join via makeSelTextarea)
   bool               _tb_pressed_prev = false;  // trackball center-click edge state (T-Deck nav ball)
+  uint32_t           _tb_scroll_ms = 0;         // lv_tick of the last trackball scroll (touch swallowed briefly after)
   // Debounced prefs persist: sliders apply live but their RELEASED can be eaten by the settings
   // pane's scroll, so a release-only pushPrefs never fires. Mark dirty on value-change; loop() flushes
   // once the value settles (covers brightness + scroll-speed reliably regardless of the release event).
@@ -973,6 +975,7 @@ private:
   static void set_bright_cb(lv_event_t* e);
   static void set_scrollspeed_cb(lv_event_t* e);   // trackball scroll-speed slider (T-Deck)
   static void set_scrollinvert_cb(lv_event_t* e);  // trackball reverse-direction checkbox (T-Deck)
+  static void set_touchlock_cb(lv_event_t* e);     // trackball scroll touch-lock slider (T-Deck)
   static void set_rot_cb(lv_event_t* e);
   static void set_font_cb(lv_event_t* e);   // UI font-size tier dropdown (restart to apply)
   static void set_screen_cb(lv_event_t* e);

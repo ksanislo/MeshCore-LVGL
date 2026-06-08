@@ -110,4 +110,6 @@ struct NodePrefs {  // persisted to file
   uint8_t  trackball_invert;    // 1 = reverse nav-ball scroll direction; 0 = normal (default). Trackball boards only.
   uint8_t  font_scale;          // UI type-ramp size: 0 = auto (by screen size), 1 = Small, 2 = Medium, 3 = Large.
                                 // Applied at boot (restart to change). LVGL UI only.
+  uint16_t touch_suppress_ms;   // trackball boards: swallow touch for N ms after a scroll (anti-thumb-tap);
+                                // 0 = off, capped at 1000. Default 250. LVGL UI only.
 };

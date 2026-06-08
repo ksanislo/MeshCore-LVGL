@@ -84,6 +84,11 @@ __attribute__((weak)) void board_trackball_read(int16_t* dx, int16_t* dy, bool* 
 // Trackball scroll speed = pixels scrolled per net roll-pulse: the Settings slider range + the
 // value used when the setting is unset (0). 16 ~ 2x the original fixed feel (8 was too slow).
 static const int SCROLL_SPEED_MIN = 4, SCROLL_SPEED_MAX = 60, SCROLL_SPEED_DEFAULT = 16;
+// After a trackball scroll, swallow touch for this long so a thumb on the screen can't tap mid-scroll.
+// TB_TOUCH_SUPPRESS_MS is the fallback default; the live value is the persisted touch_suppress_ms
+// ("Scroll touch-lock" slider, 0..TOUCH_LOCK_MAX_MS, 0 = off).
+static const uint32_t TB_TOUCH_SUPPRESS_MS = 250;
+static const int      TOUCH_LOCK_MAX_MS    = 1000;
 
 // Show an on-screen keyboard -- unless this board has a physical one (then it's a no-op, so the soft
 // keyboard never appears and the layout keeps the full screen). Replaces the bare clear-HIDDEN at the
@@ -304,6 +309,15 @@ void UITask::touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     phys = down;
   }
   _instance->_touch_down = phys;            // physical finger state -> loop() defers heavy rebuilds while down
+  // Just scrolled with the trackball? Swallow touch for a moment so a thumb brushing the screen
+  // mid-scroll can't fire a tap. Duration is the "Scroll touch-lock" setting (0 = off). Only the
+  // T-Deck sets _tb_scroll_ms, so this is a no-op elsewhere.
+  uint32_t supp = _instance->_node_prefs ? _instance->_node_prefs->touch_suppress_ms : TB_TOUCH_SUPPRESS_MS;
+  if (supp > 1000) supp = 1000;                 // guard a stale prefs value
+  if (supp && _instance->_tb_scroll_ms && lv_tick_elaps(_instance->_tb_scroll_ms) < supp) {
+    data->state = LV_INDEV_STATE_REL;
+    return;
+  }
   if (down) {
     _instance->_last_input_ms = millis();   // reset the idle-off timer
     if (_instance->_display_off) {
@@ -2394,13 +2408,21 @@ void UITask::pollTrackball() {
   if (dy == 0) return;                          // vertical only for now (dx reserved)
   lv_obj_t* target = currentScrollable();
   if (!target) return;
+  // A roll on a real scrollable: briefly swallow touch so a thumb resting on the screen can't tap
+  // mid-scroll (touchpad_read_cb honors this window). Re-armed every roll, so it covers the whole scroll.
+  _tb_scroll_ms = lv_tick_get();
   // Pixels per net pulse, from the persisted "Scroll speed" setting (Settings > Display). 0 = unset
   // -> default. The Settings slider clamps the user range; clamp here too against a stale prefs byte.
   int step = (_node_prefs && _node_prefs->trackball_speed) ? _node_prefs->trackball_speed : SCROLL_SPEED_DEFAULT;
   if (step < SCROLL_SPEED_MIN) step = SCROLL_SPEED_MIN;
   if (step > SCROLL_SPEED_MAX) step = SCROLL_SPEED_MAX;
   if (_node_prefs && _node_prefs->trackball_invert) step = -step;   // "Reverse scroll" setting
-  lv_obj_scroll_by(target, 0, (lv_coord_t)dy * step, LV_ANIM_OFF);  // +dy (rolled down) -> scroll down
+  // Hard-stop at the content ends: clamp the delta to the remaining scroll distance so the ball can't
+  // overscroll / elastic-bounce past the top or bottom (+dy reveals content above, -dy below).
+  lv_coord_t dy_px = (lv_coord_t)dy * step;
+  if (dy_px > 0)      { lv_coord_t top = lv_obj_get_scroll_top(target);    if (top < 0) top = 0; if (dy_px >  top) dy_px =  top; }
+  else if (dy_px < 0) { lv_coord_t bot = lv_obj_get_scroll_bottom(target); if (bot < 0) bot = 0; if (-dy_px > bot) dy_px = -bot; }
+  if (dy_px) lv_obj_scroll_by(target, 0, dy_px, LV_ANIM_OFF);
 }
 
 void UITask::convKey(const uint8_t* key6, bool is_channel, char* out, size_t cap) {
@@ -9213,6 +9235,16 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
     lv_checkbox_set_text(_set_scroll_inv_chk, "Reverse scroll direction");
     lv_obj_set_style_text_color(_set_scroll_inv_chk, lv_color_hex(FG_HEX), 0);
     lv_obj_add_event_cb(_set_scroll_inv_chk, set_scrollinvert_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // How long to ignore touch after a scroll (anti-thumb-tap). 0..1000 ms; left edge = off.
+    lv_obj_t* ftl = makeField(body, "Scroll touch-lock (0-1s)");
+    lv_obj_set_style_pad_top(ftl, 6, 0);
+    lv_obj_set_style_pad_bottom(ftl, 10, 0);
+    lv_obj_set_style_pad_right(ftl, 8, 0);
+    _set_touchlock_slider = lv_slider_create(ftl);
+    lv_slider_set_range(_set_touchlock_slider, 0, TOUCH_LOCK_MAX_MS);
+    lv_obj_set_width(_set_touchlock_slider, LV_PCT(100));
+    lv_obj_add_event_cb(_set_touchlock_slider, set_touchlock_cb, LV_EVENT_ALL, NULL);
   }
 
   lv_obj_t* fr = makeField(body, "Rotation (restart)");
@@ -9431,6 +9463,11 @@ void UITask::populateSettings() {
   if (_set_scroll_inv_chk) {
     if (_node_prefs->trackball_invert) lv_obj_add_state(_set_scroll_inv_chk, LV_STATE_CHECKED);
     else                               lv_obj_clear_state(_set_scroll_inv_chk, LV_STATE_CHECKED);
+  }
+  if (_set_touchlock_slider) {
+    int tl = _node_prefs->touch_suppress_ms;
+    if (tl < 0) tl = 0; if (tl > TOUCH_LOCK_MAX_MS) tl = TOUCH_LOCK_MAX_MS;
+    lv_slider_set_value(_set_touchlock_slider, tl, LV_ANIM_OFF);
   }
 
   lv_dropdown_set_selected(_set_rot_dd, _lgfx ? (_lgfx->getRotation() & 3) : 0);
@@ -9773,6 +9810,19 @@ void UITask::set_scrollspeed_cb(lv_event_t* e) {
   if ((uint8_t)v == _instance->_node_prefs->trackball_speed) return;   // no real change
   _instance->_node_prefs->trackball_speed = (uint8_t)v;   // live: next roll uses it immediately
   _instance->markPrefsDirty();                            // debounced persist (release may not fire)
+}
+
+// Trackball "Scroll touch-lock" slider (T-Deck): ms of touch suppression after a scroll. Same
+// VALUE_CHANGED + debounced-persist pattern as the scroll-speed slider.
+void UITask::set_touchlock_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;
+  int v = (int)lv_slider_get_value(lv_event_get_target(e));
+  if (v < 0) v = 0;
+  if (v > TOUCH_LOCK_MAX_MS) v = TOUCH_LOCK_MAX_MS;
+  if ((uint16_t)v == _instance->_node_prefs->touch_suppress_ms) return;   // no real change
+  _instance->_node_prefs->touch_suppress_ms = (uint16_t)v;   // live: touchpad_read_cb reads it each pass
+  _instance->markPrefsDirty();
 }
 
 // Trackball "Reverse scroll direction" checkbox (T-Deck). Applies live (pollTrackball reads
