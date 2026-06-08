@@ -7,6 +7,7 @@
 #include "../../companion_radio/NodePrefs.h"
 #include "MessageStore.h"
 #include "MeshProxy.h"   // mproxy:: snapshot reads + command/event mailboxes
+#include "MapView.h"     // offline-tile Map tab (value member)
 #ifdef HAS_SD_CARD
   #include "SdMessageStore.h"
 #endif
@@ -52,6 +53,16 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _tab_contacts;
   lv_obj_t*       _tab_channels;
   lv_obj_t*       _tab_settings;
+  lv_obj_t*       _tab_map;             // offline-tile Map tab (leftmost)
+  // Tab indices (left -> right). Map is leftmost; the app still lands on Contacts.
+  static const int MAP_TAB_IDX      = 0;
+  static const int CONTACTS_TAB_IDX = 1;
+  static const int CHANNELS_TAB_IDX = 2;
+  static const int SETTINGS_TAB_IDX = 3;
+  MapView         _mapview;             // owns the map canvas + markers
+  bool            _map_pending;         // snapshot/own-pos changed -> remark map when visible
+  MapThumb        _cinfo_map;           // static location preview under the contact-info hero
+  MapThumb        _profile_map;         // ...and under the owner profile hero
   // Contacts list: a recycled pool of real row widgets (avatar circle + name +
   // last-seen + unread dot) floating over a spacer that sizes the virtual content.
   // ~pool_n widgets cover the viewport regardless of contact count -> scales + holds
@@ -906,6 +917,7 @@ class UITask : public AbstractUITask {
 
   // Contact Info page
   void      openContactInfo(const uint8_t* pubkey, lv_obj_t* return_screen);
+  static void map_marker_tap_trampoline(const uint8_t* pubkey, void* user);  // MapView marker tap -> openContactInfo
   void      buildContactInfoScreen();
   // Owner profile = a contact page for yourself. openProfile() is the single entry
   // point (launcher hero, or any link to our own pubkey).
@@ -1270,6 +1282,7 @@ public:
       _header(NULL), _header_logo(NULL), _clock_label(NULL), _clock_last(0), _clock_blink(0),
       _tabview(NULL),
       _tab_contacts(NULL), _tab_channels(NULL), _tab_settings(NULL),
+      _tab_map(NULL), _map_pending(false),
       _clist{},
       _contacts_search_ta(NULL), _contacts_kb(NULL),
       _contacts_filter_btn(NULL), _cfilt_popup(NULL), _cfilt_order_grp(NULL),

@@ -11,6 +11,7 @@
 #include <esp_core_dump.h>              // boot-time crash report (coredump-to-flash is on)
 #include <sys/time.h>                   // settimeofday for the manual set-time field fallback
 #include "SdCard.h"                     // SdSvc + the shared `sd` handle, to save crash reports
+#include "MapView.h"                    // offline-tile Map tab
 #include "EmojiPack.h"                  // on-device emoji-pack downloader (Update screen)
 #include "DebugLog.h"                   // g_dbg_serial: drop [OTA] diagnostics when WiFi owns USB Serial
 #include <SPIFFS.h>                     // internal fallback for the crash report
@@ -717,8 +718,7 @@ lv_obj_t* UITask::buildHomeScreen() {
                               LV_PART_ITEMS | LV_STATE_CHECKED);
   lv_obj_set_style_border_width(tab_btns, 0, 0);
 
-  // Three tabs in ~320 px = ~107 px each. Map lives behind context menus
-  // off contacts/channels, since it'll be referenced from those views.
+  _tab_map      = lv_tabview_add_tab(_tabview, LV_SYMBOL_GPS      " Map");
   _tab_contacts = lv_tabview_add_tab(_tabview, LV_SYMBOL_LIST     " Contacts");
   _tab_channels = lv_tabview_add_tab(_tabview, LV_SYMBOL_WIFI     " Channels");
   _tab_settings = lv_tabview_add_tab(_tabview, LV_SYMBOL_SETTINGS " Settings");
@@ -727,7 +727,7 @@ lv_obj_t* UITask::buildHomeScreen() {
   // transparent, which forces a full-screen background recomposite (and thus
   // repaint of the static header + tab bar) whenever a page's content scrolls.
   // Making them opaque confines scroll repaints to the page's own area.
-  for (lv_obj_t* page : {_tab_contacts, _tab_channels, _tab_settings}) {
+  for (lv_obj_t* page : {_tab_contacts, _tab_channels, _tab_settings, _tab_map}) {
     lv_obj_set_style_bg_color(page, lv_color_hex(BG_HEX), 0);
     lv_obj_set_style_bg_opa(page, LV_OPA_COVER, 0);
   }
@@ -793,7 +793,24 @@ lv_obj_t* UITask::buildHomeScreen() {
   // ----- Settings tab -----
   buildSettingsTab(scr);
 
+  // ----- Map tab: offline-tile basemap + contact markers -----
+  lv_obj_set_style_pad_all(_tab_map, 0, 0);
+  lv_obj_clear_flag(_tab_map, LV_OBJ_FLAG_SCROLLABLE);
+  // Content area = full tab width x (tabview height - tab bar). pad_all=0 above so the
+  // canvas fills the page exactly.
+  _mapview.build(_tab_map, _screen_w, (uint16_t)(_screen_h - HEADER_H - TABBAR_H),
+                 &UITask::map_marker_tap_trampoline, this);
+
+  // Map is leftmost (tab 0), but the app should still land on Contacts.
+  lv_tabview_set_act(_tabview, CONTACTS_TAB_IDX, LV_ANIM_OFF);
+
   return scr;
+}
+
+// A map marker was tapped -> open that contact's info card.
+void UITask::map_marker_tap_trampoline(const uint8_t* pubkey, void* user) {
+  UITask* s = (UITask*)user;
+  if (s) s->openContactInfo(pubkey, s->_home_screen);
 }
 
 static const char* contactSymbol(uint8_t type) {
@@ -1277,6 +1294,11 @@ void UITask::clist_row_cb(lv_event_t* e) {
 // Contacts tab tap behavior: open the tapped contact's chat.
 void UITask::clistOpenContact(const ContactInfo& c) {
   if (!_instance) return;
+  // Favorites jump straight to the conversation; other contacts open their info/details page first.
+  if (!(c.flags & CONTACT_FLAG_FAVOURITE)) {
+    _instance->openContactInfo(c.id.pub_key, _instance->_home_screen);
+    return;
+  }
   _instance->_chat_is_channel = false;
   memcpy(_instance->_chat_pubkey, c.id.pub_key, 6);
   _instance->openChat(c.name);
@@ -2392,9 +2414,9 @@ lv_obj_t* UITask::currentScrollable() {
   if (_chat_screen && lv_scr_act() == _chat_screen) return _chat_history;
   if (_tabview) {
     uint16_t t = lv_tabview_get_tab_act(_tabview);
-    if (t == 0) return _clist.scroll;        // Contacts (virtualized; scroll cb re-windows the pool)
-    if (t == 1) return _channels_list;        // Channels
-    if (t == 2) return _set_active_pane ? _set_active_pane : _set_launcher;  // Settings: open pane or launcher
+    if (t == CONTACTS_TAB_IDX) return _clist.scroll;   // Contacts (virtualized; scroll cb re-windows the pool)
+    if (t == CHANNELS_TAB_IDX) return _channels_list;  // Channels
+    if (t == SETTINGS_TAB_IDX) return _set_active_pane ? _set_active_pane : _set_launcher;  // Settings: open pane or launcher
   }
   return nullptr;
 }
@@ -2488,7 +2510,7 @@ uint32_t UITask::navContextSig() {
 // where a horizontal roll switches tabs.
 bool UITask::atTabTopLevel() {
   if (!_tabview || (_chat_screen && lv_scr_act() == _chat_screen) || topModal()) return false;
-  return !(lv_tabview_get_tab_act(_tabview) == 2 && _set_active_pane);   // inside a settings pane -> no
+  return !(lv_tabview_get_tab_act(_tabview) == SETTINGS_TAB_IDX && _set_active_pane);   // inside a settings pane -> no
 }
 
 // Ball "back" (horizontal-left below the tab top level): dismiss the topmost modal, leave a settings
@@ -2496,7 +2518,7 @@ bool UITask::atTabTopLevel() {
 void UITask::navBack() {
   if (lv_obj_t* m = topModal()) { lv_event_send(m, LV_EVENT_CLICKED, NULL); return; }  // tap backdrop = dismiss
   if (_chat_screen && lv_scr_act() == _chat_screen) { chat_back_cb(nullptr); return; }
-  if (_tabview && lv_tabview_get_tab_act(_tabview) == 2 && _set_active_pane) { settingsBackToLauncher(); return; }
+  if (_tabview && lv_tabview_get_tab_act(_tabview) == SETTINGS_TAB_IDX && _set_active_pane) { settingsBackToLauncher(); return; }
 }
 
 // Populate the nav group for the current context (SELECT mode only) and set _tb_focus_ctx (= "this
@@ -2519,10 +2541,10 @@ void UITask::focusGroupRebuild() {
     return;                                        // chat -> scroll (no discrete items)
   } else if (_tabview) {
     uint16_t t = lv_tabview_get_tab_act(_tabview);
-    if (t == 1 && _channels_list) {                // Channels -> the list rows
+    if (t == CHANNELS_TAB_IDX && _channels_list) { // Channels -> the list rows
       uint32_t n = lv_obj_get_child_cnt(_channels_list);
       for (uint32_t i = 0; i < n; i++) focusAddObj(lv_obj_get_child(_channels_list, i), true);
-    } else if (t == 2) {                           // Settings -> open pane's fields, or launcher rows
+    } else if (t == SETTINGS_TAB_IDX) {            // Settings -> open pane's fields, or launcher rows
       if (_set_active_pane) addFocusablesByType(_set_active_pane);
       else if (_set_launcher) {
         uint32_t n = lv_obj_get_child_cnt(_set_launcher);
@@ -2573,8 +2595,8 @@ void UITask::pollTrackball() {
     while (_tb_h_detent <= -TB_TAB_DETENT) { dir--; _tb_h_detent += TB_TAB_DETENT; }
     if (dir) {
       if (atTabTopLevel() && _tabview) {
-        int t = (int)lv_tabview_get_tab_act(_tabview) + dir;   // 3 tabs: Contacts / Channels / Settings
-        if (t < 0) t = 0; if (t > 2) t = 2;
+        int t = (int)lv_tabview_get_tab_act(_tabview) + dir;   // 4 tabs: Map / Contacts / Channels / Settings
+        if (t < MAP_TAB_IDX) t = MAP_TAB_IDX; if (t > SETTINGS_TAB_IDX) t = SETTINGS_TAB_IDX;
         lv_tabview_set_act(_tabview, (uint16_t)t, LV_ANIM_ON);
         focusGroupRebuild();
       } else if (dir < 0) {
@@ -2593,6 +2615,12 @@ void UITask::pollTrackball() {
       while (_tb_v_detent >=  TB_FOCUS_DETENT) { _tb_focus_accum++; _tb_v_detent -= TB_FOCUS_DETENT; }
       while (_tb_v_detent <= -TB_FOCUS_DETENT) { _tb_focus_accum--; _tb_v_detent += TB_FOCUS_DETENT; }
     }
+    return;
+  }
+
+  // Map tab: no native scrollable -> a vertical roll pans the basemap (touch-drag handles x/y).
+  if (_tabview && lv_tabview_get_tab_act(_tabview) == (uint16_t)MAP_TAB_IDX) {
+    if (dy) _mapview.panBy(0, dy * 16);   // ~16 px/pulse; recompose throttled in service()
     return;
   }
 
@@ -4833,6 +4861,10 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 
   reportCrashIfAny();   // if the last boot panicked, save a decodable report (SD or SPIFFS)
 
+#ifdef MAP_SELFTEST
+  MapView::selfTest();  // spike: decode real /tiles PNGs, log dims/time/free-PSRAM over Serial
+#endif
+
   // Spawn the battery sampler on core 0 (mesh core), priority 1 (== meshTask, so it time-slices and
   // yields under load) -- AFTER display/touch is fully up, so it never races the one-time touch init on
   // the shared I2C bus. Small stack: it only does a register read. No-op on boards with no battery hooks.
@@ -5501,6 +5533,7 @@ void UITask::buildContactInfoScreen() {
   makeHeroCard(_cinfo_body, &_cinfo_avatar, &_cinfo_avatar_lbl, &_cinfo_title,
                &_cinfo_key, nullptr, &_cinfo_hero);   // selectable like a chat contact card
   makeHeroCopyable(_cinfo_hero);   // long-press -> Copy menu (target filled in refreshCinfoHero)
+  _cinfo_map.create(_cinfo_body, _screen_h <= 260 ? 140 : 200);   // location preview (shown when positioned)
 
   // action row (Fav / Telem / Share -- view-mode only)
   lv_obj_t* actions = lv_obj_create(_cinfo_body);
@@ -5740,7 +5773,7 @@ void UITask::delc_confirm_cb(lv_event_t* e) {
   if (_instance->_delc_popup) lv_obj_add_flag(_instance->_delc_popup, LV_OBJ_FLAG_HIDDEN);
   _instance->_contacts_dirty = true;   // rebuild the list (snapshot will also bump)
   // Back to the Contacts list, not the deleted contact's chat (which no longer exists).
-  if (_instance->_tabview) lv_tabview_set_act(_instance->_tabview, 0, LV_ANIM_OFF);
+  if (_instance->_tabview) lv_tabview_set_act(_instance->_tabview, CONTACTS_TAB_IDX, LV_ANIM_OFF);
   lv_scr_load(_instance->_home_screen);
   _instance->showToast("Contact deleted");
 }
@@ -5815,6 +5848,9 @@ void UITask::populateContactInfo() {
   if (c->gps_lat || c->gps_lon) {
     snprintf(latbuf, sizeof(latbuf), "%.6f", c->gps_lat / 1e6);
     snprintf(lonbuf, sizeof(lonbuf), "%.6f", c->gps_lon / 1e6);
+    _cinfo_map.render(c->gps_lat / 1e6, c->gps_lon / 1e6);   // location preview below the hero
+  } else {
+    _cinfo_map.hide();
   }
   lv_textarea_set_text(_cinfo_lat_ta, latbuf);
   lv_textarea_set_text(_cinfo_lon_ta, lonbuf);
@@ -6665,7 +6701,7 @@ void UITask::delch_confirm_cb(lv_event_t* e) {
   if (_instance->_delch_popup) lv_obj_add_flag(_instance->_delch_popup, LV_OBJ_FLAG_HIDDEN);
   _instance->_channels_pending = true;   // rebuild the list (the slot is now empty)
   // Back to the Channels list, not the deleted channel's chat (which no longer exists).
-  if (_instance->_tabview) lv_tabview_set_act(_instance->_tabview, 1, LV_ANIM_OFF);
+  if (_instance->_tabview) lv_tabview_set_act(_instance->_tabview, CHANNELS_TAB_IDX, LV_ANIM_OFF);
   lv_scr_load(_instance->_home_screen);
   _instance->showToast("Channel deleted");
 }
@@ -8907,6 +8943,18 @@ void UITask::settings_tab_changed_cb(lv_event_t* e) {
   // Any tab switch lands on a top-level view: reset Settings to its launcher and
   // restore the header (also covers leaving a pane via the tab bar).
   _instance->settingsBackToLauncher();
+  // Map tab: drive its show/hide lifecycle, and DISABLE the tabview's horizontal swipe-to-switch
+  // while it's up (a map pan otherwise bubbles up and flips tabs). Tab buttons + trackball still
+  // switch (those use lv_tabview_set_act, which scrolls programmatically regardless of the flag).
+  bool on_map = lv_tabview_get_tab_act(_instance->_tabview) == (uint32_t)MAP_TAB_IDX;
+  lv_obj_t* content = lv_tabview_get_content(_instance->_tabview);
+  if (on_map) {
+    _instance->_mapview.onShow();
+    if (content) lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+  } else {
+    _instance->_mapview.onHide();
+    if (content) lv_obj_add_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+  }
 }
 
 // The owner profile as a full-screen "contact page for yourself": same header bar
@@ -8944,6 +8992,7 @@ void UITask::buildProfileScreen() {
   // Big hero card (avatar + name over the tappable "<pub..key>"), like any contact.
   makeHeroCard(_profile_body, &_prof_avatar, &_prof_avatar_lbl, &_prof_name, &_prof_key, nullptr, &_prof_hero);
   makeHeroCopyable(_prof_hero);   // long-press -> Copy menu (target filled in the profile refresh)
+  _profile_map.create(_profile_body, _screen_h <= 260 ? 140 : 200);   // our location preview
 
   // ===== Public Info (owner-only edit options) =====
   addSettingsSection(_profile_body, "Public Info");
@@ -9868,6 +9917,9 @@ void UITask::refreshProfilePosition() {
   if (have) {
     snprintf(latb, sizeof(latb), "%.6f", _sensors->node_lat);
     snprintf(lonb, sizeof(lonb), "%.6f", _sensors->node_lon);
+    _profile_map.render(_sensors->node_lat, _sensors->node_lon);   // re-renders only when the position moves
+  } else {
+    _profile_map.hide();
   }
   lv_textarea_set_text(_set_lat_ta, latb);
   lv_textarea_set_text(_set_lon_ta, lonb);
@@ -11225,7 +11277,7 @@ void UITask::applyTheme(const UiPalette& pal) {
   ensureBanner();                                                  // rebuild now, themed (keeps the fast first frame)
   if (_toast) { lv_obj_del(_toast); _toast = NULL; }               // rebuilt on next showToast
   if (_lock_screen) { lv_obj_del(_lock_screen); _lock_screen = NULL; _lock_err = NULL; }  // rebuilt on next lock
-  if (_tabview) lv_tabview_set_act(_tabview, 2, LV_ANIM_OFF);       // stay on the Settings tab
+  if (_tabview) lv_tabview_set_act(_tabview, SETTINGS_TAB_IDX, LV_ANIM_OFF);   // stay on the Settings tab
   lv_scr_load(_home_screen);
   // Deferred: applyTheme runs from the theme dropdown's own event callback, and the
   // dropdown lives on old_home -- deleting it synchronously would be a use-after-free.
@@ -12991,6 +13043,7 @@ void UITask::loop() {
     if (const NodePrefs* p = mproxy::prefsSnap()) *_node_prefs = *p;  // pick up backend-side pref edits
     _contacts_pending = true;
     _channels_pending = true;
+    _map_pending      = true;   // contacts/own-pos may have moved -> remark the map when visible
     // Keep the chat header live (route learned/changed, rename) while it's on screen.
     if (_chat_screen && lv_scr_act() == _chat_screen) updateChatHeader();
   }
@@ -13035,6 +13088,11 @@ void UITask::loop() {
     if (_channels_pending) {
       _channels_pending = false;
       rebuildChannelsList();
+    }
+    // Map: recompose tiles + reposition markers only while its tab is up and settled.
+    if (_tabview && lv_tabview_get_tab_act(_tabview) == (uint32_t)MAP_TAB_IDX) {
+      if (_map_pending) { _map_pending = false; _mapview.markContactsDirty(); }
+      _mapview.service(now);
     }
   }
 

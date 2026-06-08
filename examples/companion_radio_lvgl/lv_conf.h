@@ -193,7 +193,7 @@
 #define LV_USE_FS_POSIX                 0
 #define LV_USE_FS_WIN32                 0
 #define LV_USE_FS_FATFS                 0
-#define LV_USE_PNG                      0
+#define LV_USE_PNG                      1   // un-guards bundled lodepng (Map tiles call lodepng_decode32 directly; allocators routed to PSRAM via LODEPNG_NO_COMPILE_ALLOCATORS). The stock lv_img png decoder it registers is unused (no .png lv_img sources).
 #define LV_USE_BMP                      0
 #define LV_USE_SJPG                     0
 #define LV_USE_GIF                      0
