@@ -576,7 +576,7 @@ void MyMesh::updateReleaseList() {
 
   // Bounded DNS pre-resolve (HTTPClient's own lookup isn't bounded and can wedge); also lets the UI
   // core get a couple of loop passes in to shrink the draw buffer before we open the TLS socket.
-  const char* host = "raw.githubusercontent.com";
+  const char* host = "raw.githubusercontent.com";   // manifest lives on the dev branch (always current; main only ff's on finals)
   IPAddress rip;
   DBG_LOGF("[REL] free-int=%u before resolve\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   if (!WiFi.hostByName(host, rip)) { fail("can't resolve host"); return; }
@@ -604,8 +604,11 @@ void MyMesh::updateReleaseList() {
   // cross-host redirect (a release-asset URL would bounce github.com -> objects.githubusercontent.com
   // = a second stall). Tiny + board-count-independent: the device constructs its own download URL
   // from each entry's ver+sha below, so the manifest never carries per-board data.
+  // The manifest is regenerated + committed every release on the dev branch (main is only
+  // fast-forwarded on finals, so it'd be stale for rc testers). dev is permanent + always current,
+  // and reading it never diverges the main-ff flow.
   char api[160];
-  snprintf(api, sizeof(api), "https://raw.githubusercontent.com/%s/%s/main/firmware-manifest.json",
+  snprintf(api, sizeof(api), "https://raw.githubusercontent.com/%s/%s/dev/firmware-manifest.json",
            OTA_GH_OWNER, OTA_GH_REPO);
   if (!http.begin(client, api)) { fail("connect failed"); return; }
   http.addHeader("User-Agent", "MeshCore-LVGL-OTA");        // be polite; raw serves the file directly
