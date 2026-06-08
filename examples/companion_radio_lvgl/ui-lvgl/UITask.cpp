@@ -356,6 +356,15 @@ void UITask::kbd_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     data->key = last_key; data->state = LV_INDEV_STATE_RELEASED;
     return;
   }
+  // Enter in the chat compose = SEND (the textarea is multi-line, so a bare Enter would
+  // otherwise just insert a newline). Specific to _chat_input; every other focused field
+  // still gets LV_KEY_ENTER (commit / READY). Multi-line entry needs a different key.
+  if ((c == 13 || c == 10) && _instance && _instance->_nav_group &&
+      lv_group_get_focused(_instance->_nav_group) == _instance->_chat_input) {
+    _instance->sendCurrentMessage();
+    data->key = last_key; data->state = LV_INDEV_STATE_RELEASED;
+    return;
+  }
   uint32_t k = 0;
   if      (c == 8 || c == 127) k = LV_KEY_BACKSPACE;
   else if (c == 13 || c == 10) k = LV_KEY_ENTER;
@@ -2415,6 +2424,9 @@ void UITask::enc_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 void UITask::focusAddObj(lv_obj_t* o, bool ring) {
   if (!o || !_nav_group) return;
   lv_group_add_obj(_nav_group, o);
+  // Auto-scroll the focused item into view as the selection reaches a list edge -- NOT a default flag,
+  // so LVGL's scroll-to-view-on-focus (lv_obj.c) is otherwise skipped and the ring would stick at the edge.
+  lv_obj_add_flag(o, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
   if (ring && !lv_obj_has_flag(o, LV_OBJ_FLAG_USER_1)) {
     static lv_style_t s_ring; static bool inited = false;
     if (!inited) {
