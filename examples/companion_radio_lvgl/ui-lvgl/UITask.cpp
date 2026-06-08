@@ -6938,13 +6938,16 @@ bool UITask::createChannelFromForm() {
              || isPublicName(name);
 
   if (pub) {
-    // A public/#hashtag channel's key + name come from the BARE tag, exactly like tapping a
-    // #hashtag in chat. Strip any leading '#' the user typed so we don't store "#general" here
-    // while the chip path stores "general" -- same channel, two names (and a missed dedup).
-    { char* nm = name; while (*nm == '#') nm++; if (nm != name) memmove(name, nm, strlen(nm) + 1); }
-    if (!name[0]) { fail("Enter a channel name"); return false; }
-    uint8_t psk[16]; derivePublicChannelKey(name, psk);
+    // A public/#hashtag channel's key comes from the BARE tag (deriveHashtagPsk strips any
+    // leading '#'), so dedup is by secret, not name. But STORE the name WITH its '#' so the
+    // channel reads as "#general", matching the join-from-chat path (joinch_join_cb). The
+    // well-known "Public" channel keeps its plain name (no '#').
+    char bare[32]; { const char* nm = name; while (*nm == '#') nm++; snprintf(bare, sizeof(bare), "%s", nm); }
+    if (!bare[0]) { fail("Enter a channel name"); return false; }
+    uint8_t psk[16]; derivePublicChannelKey(bare, psk);
     memcpy(secret, psk, 16); len = 16;
+    if (!isPublicName(bare)) snprintf(name, sizeof(name), "#%s", bare);   // store/display with the '#'
+    else                     snprintf(name, sizeof(name), "%s", bare);
   } else {
     // The key field also accepts a pasted "meshcore://channel/add?name=..&secret=hex"
     // link (the phone app's Share Channel format): pull name+secret out of it.
