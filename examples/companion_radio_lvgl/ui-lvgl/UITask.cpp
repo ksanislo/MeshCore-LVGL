@@ -346,7 +346,7 @@ void UITask::touchpad_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 // Physical keyboard -> LVGL keypad. board_kbd_read() returns the next pressed ASCII (0 = none);
 // we map the editing keys to LV_KEY_* and pass printables through, reporting PRESSED for the poll
 // that read a key and RELEASED otherwise so LVGL registers one keypress. The focused field in
-// _kbd_group (set when a field is tapped) receives it: printables insert, BACKSPACE deletes, ENTER
+// _nav_group (set when a field is tapped) receives it: printables insert, BACKSPACE deletes, ENTER
 // fires LV_EVENT_READY (= the field's "done"/send).
 void UITask::kbd_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
   (void)drv;
@@ -458,12 +458,15 @@ lv_obj_t* UITask::makeSelTextarea(lv_obj_t* parent) {
   }
   lv_obj_add_event_cb(ta, UITask::ta_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
   attachClearX(ta);   // one-click clear ✕ (shown only when the field has text)
-  // Physical-keyboard routing: join the keypad group and grab keypad focus when tapped, so the
-  // hardware keyboard types into whichever field the user touched. (Group exists only on T-Deck.)
-  if (_instance && _instance->_kbd_group) {
-    lv_group_add_obj(_instance->_kbd_group, ta);
+  // Physical-keyboard routing: on tap, (re)join the nav group and grab focus so the hardware keyboard
+  // types into the tapped field -- works in any ball mode and survives focusGroupRebuild's remove_all
+  // (which only repopulates focusable items in select mode). (Group exists only on T-Deck.)
+  if (_instance && _instance->_nav_group) {
     lv_obj_add_event_cb(ta, [](lv_event_t* e) {
-      if (_instance && _instance->_kbd_group) lv_group_focus_obj(lv_event_get_target(e));
+      if (_instance && _instance->_nav_group) {
+        lv_group_add_obj(_instance->_nav_group, lv_event_get_target(e));   // no-op if already a member
+        lv_group_focus_obj(lv_event_get_target(e));
+      }
     }, LV_EVENT_CLICKED, NULL);
   }
   return ta;
@@ -1571,6 +1574,7 @@ void UITask::rebuildChannelsList() {
     if (!mproxy::getChannel(idx, ch) || ch.name[0] == 0) continue;
     buildChannelRow(_channels_list, idx, ch, channel_clicked_cb, /*show_unread*/true);
   }
+  focusGroupRebuild();   // rows were recreated -> re-add them to the focus group (no-op if not nav hardware)
 }
 
 // One channel list row (name-colored circle + name, optional unread badge). Shared by
@@ -2386,9 +2390,141 @@ lv_obj_t* UITask::currentScrollable() {
   return nullptr;
 }
 
-// Poll the nav ball each UI pass and turn rolls into scrolls. Cadence-independent: counts accumulate
-// in the ISR and we consume the net, so total scroll == total pulses regardless of how often we poll.
-// Center click = a context action (chat: jump to the live tail); edge-triggered. STEP tunes feel.
+// ---- Trackball focus-navigation (stable-widget screens) ---------------------
+// Pulses-per-focus-step (vertical) and per-tab-switch (horizontal). Fixed; tuned on device.
+// FOCUS_DETENT=1 -> one ball pulse moves the selection one item (most responsive). Bump to 2 if a
+// fast roll overshoots. TAB switching keeps a higher detent so it's deliberate, not accidental.
+static const int TB_FOCUS_DETENT = 1;
+static const int TB_TAB_DETENT   = 2;
+static const uint32_t TB_LONGPRESS_MS = 500;   // hold the center button this long to toggle scroll<->select
+
+// Encoder indev read_cb: a pure drain of what pollTrackball stashed. Reports the whole accumulated
+// focus delta at once (snappy) and a one-shot click as the ENTER press. Never reads the ball.
+void UITask::enc_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
+  (void)drv;
+  if (!_instance) { data->enc_diff = 0; data->state = LV_INDEV_STATE_RELEASED; return; }
+  data->enc_diff = _instance->_tb_focus_accum;
+  _instance->_tb_focus_accum = 0;
+  data->state = _instance->_tb_click_pending ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+  _instance->_tb_click_pending = false;
+}
+
+// Add `o` to the nav group, and (when ring) give it a focus outline shown only on key/encoder focus
+// (LV_STATE_FOCUS_KEY -> never on a casual touch). The ring style + the once-flag (USER_1) make this
+// idempotent across the many group rebuilds.
+void UITask::focusAddObj(lv_obj_t* o, bool ring) {
+  if (!o || !_nav_group) return;
+  lv_group_add_obj(_nav_group, o);
+  if (ring && !lv_obj_has_flag(o, LV_OBJ_FLAG_USER_1)) {
+    static lv_style_t s_ring; static bool inited = false;
+    if (!inited) {
+      lv_style_init(&s_ring);
+      lv_style_set_outline_width(&s_ring, 2);
+      lv_style_set_outline_color(&s_ring, lv_color_hex(UI_ACCENT));
+      lv_style_set_outline_opa(&s_ring, LV_OPA_COVER);
+      lv_style_set_outline_pad(&s_ring, 1);
+      inited = true;
+    }
+    lv_obj_add_style(o, &s_ring, LV_STATE_FOCUS_KEY);
+    lv_obj_add_flag(o, LV_OBJ_FLAG_USER_1);
+  }
+}
+
+static bool isNativeFocusable(lv_obj_t* o) {
+  return lv_obj_check_type(o, &lv_btn_class)      || lv_obj_check_type(o, &lv_checkbox_class)
+      || lv_obj_check_type(o, &lv_dropdown_class) || lv_obj_check_type(o, &lv_slider_class)
+      || lv_obj_check_type(o, &lv_switch_class)   || lv_obj_check_type(o, &lv_textarea_class);
+}
+
+// Recurse a heterogeneous container (a settings pane / modal card) adding the native interactive
+// widgets in tree (= visual) order. Containers are descended into; focusable leaves are added.
+void UITask::addFocusablesByType(lv_obj_t* root) {
+  if (!root) return;
+  uint32_t n = lv_obj_get_child_cnt(root);
+  for (uint32_t i = 0; i < n; i++) {
+    lv_obj_t* c = lv_obj_get_child(root, i);
+    if (lv_obj_has_flag(c, LV_OBJ_FLAG_HIDDEN)) continue;
+    if (isNativeFocusable(c)) focusAddObj(c, true);
+    else                      addFocusablesByType(c);
+  }
+}
+
+// Topmost full-screen modal/picker on the top layer (or null) -- a backdrop occupying >= 3/4 screen.
+lv_obj_t* UITask::topModal() {
+  lv_obj_t* top = lv_layer_top();
+  lv_coord_t sw = lv_obj_get_width(lv_scr_act()), sh = lv_obj_get_height(lv_scr_act());
+  for (int i = (int)lv_obj_get_child_cnt(top) - 1; i >= 0; i--) {
+    lv_obj_t* c = lv_obj_get_child(top, i);
+    if (lv_obj_has_flag(c, LV_OBJ_FLAG_HIDDEN)) continue;
+    if (lv_obj_get_width(c) >= (sw * 3) / 4 && lv_obj_get_height(c) >= (sh * 3) / 4) return c;
+  }
+  return nullptr;
+}
+
+// A cheap signature of the active context. loop() rebuilds the focus group whenever this changes, so
+// every screen/tab/pane/modal transition is picked up without editing each call site. (Channel-row
+// recreation keeps the same context, so rebuildChannelsList rebuilds the group explicitly.)
+uint32_t UITask::navContextSig() {
+  uint32_t s = (uint32_t)(uintptr_t)lv_scr_act();
+  if (_tabview) s = s * 31u + lv_tabview_get_tab_act(_tabview);
+  s = s * 31u + (uint32_t)(uintptr_t)_set_active_pane;
+  s = s * 31u + (uint32_t)(uintptr_t)topModal();
+  return s;
+}
+
+// True when the tabview is at a tab's top level (not inside an open settings pane, a modal, or chat) --
+// where a horizontal roll switches tabs.
+bool UITask::atTabTopLevel() {
+  if (!_tabview || (_chat_screen && lv_scr_act() == _chat_screen) || topModal()) return false;
+  return !(lv_tabview_get_tab_act(_tabview) == 2 && _set_active_pane);   // inside a settings pane -> no
+}
+
+// Ball "back" (horizontal-left below the tab top level): dismiss the topmost modal, leave a settings
+// pane, or exit chat -- so the ball can climb back out of anything it navigated into.
+void UITask::navBack() {
+  if (lv_obj_t* m = topModal()) { lv_event_send(m, LV_EVENT_CLICKED, NULL); return; }  // tap backdrop = dismiss
+  if (_chat_screen && lv_scr_act() == _chat_screen) { chat_back_cb(nullptr); return; }
+  if (_tabview && lv_tabview_get_tab_act(_tabview) == 2 && _set_active_pane) { settingsBackToLauncher(); return; }
+}
+
+// Populate the nav group for the current context (SELECT mode only) and set _tb_focus_ctx (= "this
+// context has focusable items"). In SCROLL mode the group is left empty so no ring shows and the ball
+// scrolls. Keyboard routing doesn't depend on this -- makeSelTextarea's tap handler joins+focuses a
+// tapped field on demand. Called on context change (loop signature), mode toggle, and channels rebuild.
+// Precedence mirrors currentScrollable(): topmost modal, then chat, then the active tab.
+void UITask::focusGroupRebuild() {
+  if (!_nav_group) return;
+  lv_group_remove_all_objs(_nav_group);
+  lv_group_set_editing(_nav_group, false);
+  _tb_v_detent = _tb_h_detent = 0; _tb_focus_accum = 0;
+  _tb_focus_ctx = false;
+  if (!_tb_select_mode) return;                    // SCROLL mode -> empty group, no ring, ball scrolls
+
+  if (lv_obj_t* m = topModal()) {                  // a modal -> its buttons/items
+    if (m == _pick_popup || m == _chpick_popup) return;   // virtualized picker -> scroll/touch only
+    addFocusablesByType(m);
+  } else if (_chat_screen && lv_scr_act() == _chat_screen) {
+    return;                                        // chat -> scroll (no discrete items)
+  } else if (_tabview) {
+    uint16_t t = lv_tabview_get_tab_act(_tabview);
+    if (t == 1 && _channels_list) {                // Channels -> the list rows
+      uint32_t n = lv_obj_get_child_cnt(_channels_list);
+      for (uint32_t i = 0; i < n; i++) focusAddObj(lv_obj_get_child(_channels_list, i), true);
+    } else if (t == 2) {                           // Settings -> open pane's fields, or launcher rows
+      if (_set_active_pane) addFocusablesByType(_set_active_pane);
+      else if (_set_launcher) {
+        uint32_t n = lv_obj_get_child_cnt(_set_launcher);
+        for (uint32_t i = 0; i < n; i++) focusAddObj(lv_obj_get_child(_set_launcher, i), true);
+      }
+    }
+    // t == 0 (Contacts) -> virtualized -> no focusables -> scroll
+  }
+  _tb_focus_ctx = (lv_group_get_focused(_nav_group) != nullptr);
+}
+
+// Poll the nav ball each UI pass. In a focus context the roll moves the selection ring (LVGL encoder
+// auto-scrolls it into view) and the click activates; otherwise it scrolls as before. Horizontal roll
+// switches tabs at the tab top level. Cadence-independent (ISR counters accumulate).
 void UITask::pollTrackball() {
   if (!board_has_trackball()) return;
   int16_t dx = 0, dy = 0; bool pressed = false;
@@ -2397,15 +2533,60 @@ void UITask::pollTrackball() {
   bool activity = dx || dy || (pressed && !_tb_pressed_prev);   // any roll or a fresh click
   if (activity && noteInputWake()) {            // was asleep -> this roll/click just wakes; swallow it
     _tb_pressed_prev = pressed;
+    _tb_focus_accum = 0; _tb_click_pending = false; _tb_v_detent = _tb_h_detent = 0;
+    _tb_longpress_done = true;                   // don't let the waking press toggle the mode or click
     return;
   }
 
-  if (pressed && !_tb_pressed_prev) {           // click: context action
-    if (_chat_screen && lv_scr_act() == _chat_screen) _chat_want_bottom = true;  // snap to latest
+  // Press tracking: a SHORT click activates (select mode) / jumps-to-latest (chat scroll); a LONG press
+  // toggles the ball between SCROLL and SELECT modes (with a toast).
+  if (pressed && !_tb_pressed_prev) { _tb_press_ms = lv_tick_get(); _tb_longpress_done = false; }
+  if (pressed && _tb_pressed_prev && !_tb_longpress_done && lv_tick_elaps(_tb_press_ms) > TB_LONGPRESS_MS) {
+    _tb_select_mode = !_tb_select_mode;
+    _tb_longpress_done = true;
+    focusGroupRebuild();                         // (un)populate the focus group + ring for the new mode
+    showToast(_tb_select_mode ? "Ball: select" : "Ball: scroll");
   }
+  bool shortClick = (!pressed && _tb_pressed_prev && !_tb_longpress_done);   // release after a short press
   _tb_pressed_prev = pressed;
 
-  if (dy == 0) return;                          // vertical only for now (dx reserved)
+  bool selecting = _tb_select_mode && _tb_focus_ctx;   // ball moves a selection ring (else it scrolls)
+
+  // Horizontal roll: at the tab top level -> previous/next tab; deeper (pane / modal / chat) -> left
+  // backs out a level (right is ignored). Both modes. Separate GPIO axes, so vertical won't drift in.
+  if (dx) {
+    _tb_h_detent += dx;
+    int dir = 0;
+    while (_tb_h_detent >=  TB_TAB_DETENT) { dir++; _tb_h_detent -= TB_TAB_DETENT; }
+    while (_tb_h_detent <= -TB_TAB_DETENT) { dir--; _tb_h_detent += TB_TAB_DETENT; }
+    if (dir) {
+      if (atTabTopLevel() && _tabview) {
+        int t = (int)lv_tabview_get_tab_act(_tabview) + dir;   // 3 tabs: Contacts / Channels / Settings
+        if (t < 0) t = 0; if (t > 2) t = 2;
+        lv_tabview_set_act(_tabview, (uint16_t)t, LV_ANIM_ON);
+        focusGroupRebuild();
+      } else if (dir < 0) {
+        navBack();   // left below the top level = back out (loop's signature check rebuilds the group)
+      }
+    }
+  }
+
+  // SELECT mode (on a screen with focusables): vertical roll -> move the selection ring (drained by
+  // enc_read_cb -> the encoder auto-scrolls it into view); click -> ENTER (activate / slider edit).
+  if (selecting) {
+    if (shortClick) _tb_click_pending = true;
+    if (dy) {
+      int d = (_node_prefs && _node_prefs->trackball_invert) ? -dy : dy;  // reverse-scroll also reverses focus
+      _tb_v_detent += d;
+      while (_tb_v_detent >=  TB_FOCUS_DETENT) { _tb_focus_accum++; _tb_v_detent -= TB_FOCUS_DETENT; }
+      while (_tb_v_detent <= -TB_FOCUS_DETENT) { _tb_focus_accum--; _tb_v_detent += TB_FOCUS_DETENT; }
+    }
+    return;
+  }
+
+  // SCROLL mode (or select mode on a non-focusable screen like Contacts/chat).
+  if (shortClick && _chat_screen && lv_scr_act() == _chat_screen) _chat_want_bottom = true;  // jump to latest
+  if (dy == 0) return;
   lv_obj_t* target = currentScrollable();
   if (!target) return;
   // A roll on a real scrollable: briefly swallow touch so a thumb resting on the screen can't tap
@@ -4566,17 +4747,27 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _indev_drv.read_cb = touchpad_read_cb;
   lv_indev_drv_register(&_indev_drv);
 
-  // Physical keyboard (T-Deck): a keypad indev driven by board_kbd_read(), pointed at a group that
-  // every editable field joins (via makeSelTextarea). Tapping a field focuses it in the group, so
-  // physical keystrokes land in it. No-op on touch-only boards (no group, soft keyboard as usual).
-  if (board_has_physical_kbd()) {
-    _kbd_group = lv_group_create();
-    lv_group_set_wrap(_kbd_group, false);
-    lv_indev_drv_init(&_kbd_drv);
-    _kbd_drv.type    = LV_INDEV_TYPE_KEYPAD;
-    _kbd_drv.read_cb = kbd_read_cb;
-    lv_indev_t* kbd = lv_indev_drv_register(&_kbd_drv);
-    lv_indev_set_group(kbd, _kbd_group);
+  // One shared focus group, driven by the keyboard keypad indev AND (T-Deck) a trackball ENCODER indev.
+  // Editable fields join it (makeSelTextarea) so physical keystrokes land in the tapped field; and
+  // focusGroupRebuild() populates it with the active screen's focusable items so the ball can move a
+  // selection ring + click. No-op on touch-only boards (no group, no encoder, soft keyboard as usual).
+  if (board_has_trackball() || board_has_physical_kbd()) {
+    _nav_group = lv_group_create();
+    lv_group_set_wrap(_nav_group, false);
+    if (board_has_physical_kbd()) {
+      lv_indev_drv_init(&_kbd_drv);
+      _kbd_drv.type    = LV_INDEV_TYPE_KEYPAD;
+      _kbd_drv.read_cb = kbd_read_cb;
+      lv_indev_t* kbd = lv_indev_drv_register(&_kbd_drv);
+      lv_indev_set_group(kbd, _nav_group);
+    }
+    if (board_has_trackball()) {              // encoder: roll = focus prev/next, click = activate/edit
+      lv_indev_drv_init(&_enc_drv);
+      _enc_drv.type    = LV_INDEV_TYPE_ENCODER;
+      _enc_drv.read_cb = enc_read_cb;
+      _enc_indev = lv_indev_drv_register(&_enc_drv);
+      lv_indev_set_group(_enc_indev, _nav_group);
+    }
   }
 
   // Interrupt-driven touch: if the variant exposes a GT911 INT pin, read coords off the
@@ -12617,6 +12808,13 @@ void UITask::loop() {
 #endif
 
   pollTrackball();  // T-Deck nav ball -> scroll the active list/chat (no-op without a ball)
+
+  // Rebuild the focus group whenever the active context changes (tab / pane / chat / modal). Cheap
+  // signature compare; the per-context decision (focus vs scroll) lands in _tb_focus_ctx. No-op group.
+  if (_nav_group) {
+    uint32_t sig = navContextSig();
+    if (sig != _nav_ctx_sig) { _nav_ctx_sig = sig; focusGroupRebuild(); }
+  }
 
   // Flush a debounced prefs change (slider edits) once it settles -- see markPrefsDirty().
   if (_prefs_dirty && (uint32_t)(lv_tick_get() - _prefs_dirty_ms) > 800) { _prefs_dirty = false; pushPrefs(); }

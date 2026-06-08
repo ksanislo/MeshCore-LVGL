@@ -675,9 +675,32 @@ class UITask : public AbstractUITask {
   lv_disp_drv_t      _disp_drv;
   lv_indev_drv_t     _indev_drv;
   lv_indev_drv_t     _kbd_drv;             // physical-keyboard keypad indev (T-Deck); unused otherwise
-  lv_group_t*        _kbd_group = nullptr; // group the keypad indev drives (textareas join via makeSelTextarea)
+  lv_indev_drv_t     _enc_drv;            // trackball encoder indev (T-Deck focus nav); unused otherwise
+  lv_indev_t*        _enc_indev = nullptr;// registered encoder indev (group set/cleared per context)
+  lv_group_t*        _nav_group = nullptr; // shared focus group: keyboard keypad + trackball encoder both drive it
   bool               _tb_pressed_prev = false;  // trackball center-click edge state (T-Deck nav ball)
   uint32_t           _tb_scroll_ms = 0;         // lv_tick of the last trackball scroll (touch swallowed briefly after)
+  // Trackball focus-navigation (stable-widget screens). pollTrackball() stays the sole ball consumer and
+  // stashes focus steps / a click here; enc_read_cb drains them into the encoder indev. _tb_focus_ctx is
+  // the explicit per-context decision "ball does focus" (vs scroll) -- NOT "group non-empty" (chat keeps a
+  // textarea in the group for keyboard routing yet must still scroll).
+  bool               _tb_focus_ctx = false;     // current context has focusable items (populated in select mode)
+  bool               _tb_select_mode = false;    // ball mode: false = scroll, true = select. Long-press toggles.
+  uint32_t           _tb_press_ms = 0;           // center-button press start (lv_tick) for long-press detection
+  bool               _tb_longpress_done = false; // the long-press already toggled this press (suppress its click)
+  int16_t            _tb_focus_accum = 0;  // un-consumed focus steps for enc_read_cb to drain (signed)
+  bool               _tb_click_pending = false; // a focus-context click waiting to become an ENTER
+  int16_t            _tb_v_detent = 0;     // raw vertical pulses toward one focus step
+  int16_t            _tb_h_detent = 0;     // raw horizontal pulses toward one tab switch
+  void               focusGroupRebuild();  // repopulate _nav_group for the current context + set _tb_focus_ctx
+  void               focusAddObj(lv_obj_t* o, bool ring); // add to _nav_group (+ focus ring when ring)
+  void               addFocusablesByType(lv_obj_t* root); // recurse: add native focusable widgets in tree order
+  bool               atTabTopLevel();      // on the tabview at a tab's top level (not a pane/modal/chat)
+  void               navBack();            // ball "back": dismiss modal / leave pane / exit chat
+  lv_obj_t*          topModal();           // topmost full-screen modal on the top layer, or null
+  uint32_t           navContextSig();      // cheap signature of the active context (screen/tab/pane/modal)
+  uint32_t           _nav_ctx_sig = 0;     // last-seen context signature; loop() rebuilds the group on change
+  static void        enc_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data);
   // Debounced prefs persist: sliders apply live but their RELEASED can be eaten by the settings
   // pane's scroll, so a release-only pushPrefs never fires. Mark dirty on value-change; loop() flushes
   // once the value settles (covers brightness + scroll-speed reliably regardless of the release event).
