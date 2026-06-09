@@ -115,6 +115,7 @@ static void rebuild(MyMesh& mesh, MeshSnapshot* dst) {
   memcpy(dst->self_pub_key, mesh.self_id.pub_key, PUB_KEY_SIZE);
   dst->has_connection = true;
   dst->prefs = *mesh.getNodePrefs();
+  dst->active_ble_pin = mesh.getBLEPin();   // live pairing passkey (constant per boot); shown read-only in the UI
   int n = mesh.getNumContacts();
   if (n > MAX_CONTACTS) n = MAX_CONTACTS;
   dst->contact_count = (uint16_t)n;
@@ -609,6 +610,7 @@ bool getNameOverride(const uint8_t* pubkey, char* out, size_t cap) {
 }
 
 const NodePrefs* prefsSnap() { const MeshSnapshot* s = readBuf(); return s ? &s->prefs : nullptr; }
+uint32_t activeBlePin()      { const MeshSnapshot* s = readBuf(); return s ? s->active_ble_pin : 0; }
 uint32_t rtcSeconds()        { return the_mesh.getRTCClock()->getCurrentTime(); }
 
 // ---- Signal-strength meter (SNR peak-hold-with-decay) ----------------------

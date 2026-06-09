@@ -46,6 +46,7 @@ struct MeshSnapshot {
   uint8_t        self_pub_key[PUB_KEY_SIZE];
   bool           has_connection;
   NodePrefs      prefs;
+  uint32_t       active_ble_pin;   // the live BLE pairing passkey (random per-boot when has_display); 0 if BLE off
   uint16_t       contact_count;
   ContactSnap    contacts[MAX_CONTACTS];
   ChannelDetails channels[MAX_GROUP_CHANNELS];   // unused slots have name[0]==0
@@ -183,6 +184,7 @@ bool getChannel(int idx, ChannelDetails& out);
 void getStats(NodeStats& out);     // latest node/radio counters (display-only, lock-protected copy)
 bool getNameOverride(const uint8_t* pubkey, char* out, size_t cap);
 const NodePrefs* prefsSnap();      // current published prefs (UI seeds its working copy from this)
+uint32_t activeBlePin();           // live BLE pairing passkey to show on screen (0 = BLE not active / no pin)
 bool exportPrivKey(uint8_t out[64]);   // copy our 64-byte private key out (UI key export)
 void wifiStatus(char* out, size_t cap);   // human-readable WiFi status for the UI
 void mqttStatus(char* out, size_t cap);   // human-readable MQTT status for the UI
