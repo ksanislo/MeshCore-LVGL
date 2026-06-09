@@ -229,45 +229,114 @@ bool MapView::stepRecompose(int max_tiles) {
 }
 
 void MapView::drawTile(int z, int tx, int ty, int64_t ox, int64_t oy) {
-  uint16_t w = 0, h = 0;
-  lv_color_t* px = getTile(z, tx, ty, w, h);   // cache hit -> blit only; miss -> decode + cache
-  if (!px) return;                              // missing/!ok -> leave background
-  _rc_drawn++;
-  blit565(px, w, h, (int)((int64_t)tx * 256 - ox), (int)((int64_t)ty * 256 - oy));
+  int dx = (int)((int64_t)tx * 256 - ox), dy = (int)((int64_t)ty * 256 - oy);
+  if (cacheBlit(z, tx, ty, dx, dy)) { _rc_drawn++; return; }   // hit (maybe prefetched) -> blit only
+  cacheEnsure(z, tx, ty);                                       // miss -> decode (SD+PNG, off-lock)
+  if (cacheBlit(z, tx, ty, dx, dy)) _rc_drawn++;               // now blit; still miss -> tile absent on SD
 }
 
-// Cached decoded tile: return its RGB565 buffer (decoding + caching on a miss), or null.
-lv_color_t* MapView::getTile(int z, int tx, int ty, uint16_t& w, uint16_t& h) {
-  TileCacheEntry* free_e = nullptr; TileCacheEntry* lru_e = nullptr;
+void MapView::cacheLock()   { if (_cache_mtx) xSemaphoreTake((SemaphoreHandle_t)_cache_mtx, portMAX_DELAY); }
+void MapView::cacheUnlock() { if (_cache_mtx) xSemaphoreGive((SemaphoreHandle_t)_cache_mtx); }
+
+// Blit a cached tile into the canvas, HELD under the cache lock so a concurrent evict (prefetch task)
+// can't free the buffer mid-copy. Returns false (no blit) if the tile isn't in the cache.
+bool MapView::cacheBlit(int z, int tx, int ty, int dst_x, int dst_y) {
+  cacheLock();
   for (auto& e : _tcache) {
-    if (e.px && e.z == z && e.tx == tx && e.ty == ty) {   // hit
-      e.lru = ++_lru_clock; w = e.w; h = e.h; return e.px;
+    if (e.px && e.z == z && e.tx == tx && e.ty == ty) {
+      e.lru = ++_lru_clock;
+      blit565(e.px, e.w, e.h, dst_x, dst_y);
+      cacheUnlock();
+      return true;
     }
-    if (!e.px && !free_e) free_e = &e;
-    if (e.px && (!lru_e || e.lru < lru_e->lru)) lru_e = &e;
   }
-  // Miss: read + decode from SD (off-bus), convert to RGB565 into a cache slot.
+  cacheUnlock();
+  return false;
+}
+
+// Decode (z,tx,ty) into the cache if absent. The slow SD read + PNG decode + RGB565 conversion run
+// OUTSIDE the lock (on their own buffer); only the dedup checks + slot store are locked. Called by both
+// the UI core (drawTile fallback) and the background prefetch task -> the lock makes that safe.
+void MapView::cacheEnsure(int z, int tx, int ty) {
+  cacheLock();                                  // already cached? (e.g. the prefetch task beat us)
+  for (auto& e : _tcache) if (e.px && e.z == z && e.tx == tx && e.ty == ty) { cacheUnlock(); return; }
+  cacheUnlock();
+
   char path[48];
   snprintf(path, sizeof(path), "/tiles/%d/%d/%d.png", z, tx, ty);
   uint8_t* rgba = nullptr; uint32_t iw = 0, ih = 0;
-  if (!decodeTileRGBA(path, &rgba, &iw, &ih)) return nullptr;
-
-  TileCacheEntry* e = free_e ? free_e : lru_e;   // reuse a free slot, else evict the LRU
-  if (!e) { heap_caps_free(rgba); return nullptr; }
-  size_t need = (size_t)iw * ih * sizeof(lv_color_t);
-  if (e->px && (e->w != iw || e->h != ih)) { heap_caps_free(e->px); e->px = nullptr; }
-  if (!e->px) e->px = (lv_color_t*)heap_caps_malloc(need, MALLOC_CAP_SPIRAM);
-  if (!e->px) { heap_caps_free(rgba); return nullptr; }   // no PSRAM: skip caching this tile
-
-  for (uint32_t i = 0; i < iw * ih; i++)
-    e->px[i] = lv_color_make(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]);
+  if (!decodeTileRGBA(path, &rgba, &iw, &ih)) return;          // missing/!ok -> leave it uncached
+  lv_color_t* px = (lv_color_t*)heap_caps_malloc((size_t)iw * ih * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+  if (px) for (uint32_t i = 0; i < iw * ih; i++) px[i] = lv_color_make(rgba[i*4], rgba[i*4+1], rgba[i*4+2]);
   heap_caps_free(rgba);
-  e->z = z; e->tx = tx; e->ty = ty; e->w = (uint16_t)iw; e->h = (uint16_t)ih; e->lru = ++_lru_clock;
-  w = e->w; h = e->h; return e->px;
+  if (!px) return;
+
+  cacheLock();
+  for (auto& e : _tcache) if (e.px && e.z == z && e.tx == tx && e.ty == ty) { cacheUnlock(); heap_caps_free(px); return; }  // raced -> drop ours
+  TileCacheEntry* free_e = nullptr; TileCacheEntry* lru_e = nullptr;
+  for (auto& e : _tcache) {
+    if (!e.px && !free_e) free_e = &e;
+    if (e.px && (!lru_e || e.lru < lru_e->lru)) lru_e = &e;
+  }
+  TileCacheEntry* e = free_e ? free_e : lru_e;
+  if (e) {
+    if (e->px) heap_caps_free(e->px);
+    e->px = px; e->z = z; e->tx = tx; e->ty = ty; e->w = (uint16_t)iw; e->h = (uint16_t)ih; e->lru = ++_lru_clock;
+  } else heap_caps_free(px);
+  cacheUnlock();
 }
 
 void MapView::tileCacheEvictAll() {
+  cacheLock();
   for (auto& e : _tcache) { if (e.px) { heap_caps_free(e.px); e.px = nullptr; } e.z = -1; }
+  cacheUnlock();
+}
+
+// --- background prefetch task ---------------------------------------------------
+void MapView::prefetchTaskFn(void* arg) {
+  MapView* self = (MapView*)arg;
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);   // sleep until the UI core posts a request
+    self->runPrefetch();
+  }
+}
+
+// Queue a directional decode-ahead for the current origin/zoom (UI core, after a pan).
+void MapView::prefetchPost(int dx, int dy) {
+  if (!_prefetch_task) return;
+  cacheLock();
+  _pf_z = _z; _pf_ox = _origin_wx; _pf_oy = _origin_wy; _pf_dx = dx; _pf_dy = dy; _pf_gen++;
+  cacheUnlock();
+  xTaskNotifyGive((TaskHandle_t)_prefetch_task);
+}
+
+// Decode the band a continued pan in the (dx,dy) direction will reveal -- one ~half-viewport beyond the
+// buffer edge on the DOMINANT axis, full perpendicular extent -- into the cache, so the next pan's
+// exposed strip is a cache hit (fast refill between quick swipes). Bails on a newer request or on leave.
+void MapView::runPrefetch() {
+  cacheLock();
+  int z = _pf_z, dx = _pf_dx, dy = _pf_dy; int64_t ox = _pf_ox, oy = _pf_oy; uint32_t gen = _pf_gen;
+  cacheUnlock();
+  if (!_pf_active || z <= 0 || (dx == 0 && dy == 0)) return;
+  const int ntiles = 1 << z;
+  int64_t x0 = ox, y0 = oy, x1 = ox + _cw - 1, y1 = oy + _ch - 1;
+  if (abs(dx) >= abs(dy)) {                                   // horizontal: band past the left/right edge
+    int depth = _vw / 2;
+    if (dx > 0) { x0 = ox - depth; x1 = ox - 1; }             // content moved right -> next reveal is LEFT
+    else        { x0 = ox + _cw;   x1 = ox + _cw + depth - 1; }
+  } else {                                                    // vertical: band past the top/bottom edge
+    int depth = _vh / 2;
+    if (dy > 0) { y0 = oy - depth; y1 = oy - 1; }
+    else        { y0 = oy + _ch;   y1 = oy + _ch + depth - 1; }
+  }
+  int tx0 = (int)floor((double)x0 / 256), ty0 = (int)floor((double)y0 / 256);
+  int tx1 = (int)floor((double)x1 / 256), ty1 = (int)floor((double)y1 / 256);
+  for (int ty = ty0; ty <= ty1; ty++)
+    for (int tx = tx0; tx <= tx1; tx++) {
+      if (gen != _pf_gen || !_pf_active) return;              // superseded / left the map -> stop
+      if (tx < 0 || ty < 0 || tx >= ntiles || ty >= ntiles) continue;
+      cacheEnsure(z, tx, ty);
+    }
 }
 
 // RGB565 tile -> canvas, row/col-clipped (per-row memcpy of the visible span).
@@ -363,12 +432,13 @@ void MapView::build(lv_obj_t* parent, uint16_t w, uint16_t h, MarkerTapCb cb, vo
 
   // Oversized buffer: viewport + a pre-rendered margin on every side, so a drag reveals real
   // content live; on release we scroll the buffer and only decode the freshly-exposed strip.
-  // The margin is a fraction f of the viewport, BYTE-CAPPED so the buffer fits PSRAM: a full
-  // viewport each side is ~2 MB at 480x232 but >5 MB at 800x480. Solve (1+2f)^2 * vp*2 <= CAP,
-  // clamp f to [0,1] -> small screens keep the full (f=1) margin; big screens shrink it.
+  // The margin is a fraction f of the viewport, BYTE-CAPPED so the buffer fits PSRAM. `vp` is one
+  // viewport in BYTES; the buffer is (1+2f)^2 * vp, so (1+2f)^2 * vp <= CAP -> f = (sqrt(CAP/vp)-1)/2.
+  // Clamp f to [0,1]: small screens keep the full (f=1) one-viewport-per-side margin (~1.9 MB at
+  // 480x232), big 800x480 screens shrink it to fit (a full margin there would be ~5.6 MB).
   const size_t MAP_BUF_CAP = 2u * 1024 * 1024;
   double vp = (double)_vw * _vh * sizeof(lv_color_t);
-  double f = (sqrt((double)MAP_BUF_CAP / (2.0 * vp)) - 1.0) / 2.0;
+  double f = (sqrt((double)MAP_BUF_CAP / vp) - 1.0) / 2.0;
   if (f > 1.0) f = 1.0; else if (f < 0.0) f = 0.0;
   _mx = (uint16_t)(f * _vw); _my = (uint16_t)(f * _vh);
   _cw = _vw + 2 * _mx; _ch = _vh + 2 * _my;
@@ -380,6 +450,12 @@ void MapView::build(lv_obj_t* parent, uint16_t w, uint16_t h, MarkerTapCb cb, vo
     _cbuf = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
   }
   if (!_cbuf) { Serial.printf("[MAP] canvas alloc %u bytes FAILED\n", (unsigned)bytes); return; }
+
+  // Cache mutex + background prefetch task (core 0, low priority): the task decodes look-ahead tiles
+  // into the cache off the UI core so quick successive swipes don't outrun the renderer. It only
+  // touches the (mutex-guarded) tile cache, never _cbuf, so it can't race the LVGL flush.
+  _cache_mtx = xSemaphoreCreateMutex();
+  xTaskCreatePinnedToCore(prefetchTaskFn, "mapPrefetch", 8192, this, 1, (TaskHandle_t*)&_prefetch_task, 0);
 
   // Layer holds the canvas + markers; its resting position is (-_mx,-_my) so the viewport
   // (the buffer's center region) aligns with the tab. A drag offsets it from that base.
@@ -480,6 +556,7 @@ void MapView::onShow() {
   // Tile decode wants ~256 KB PSRAM transients; reclaim the emoji glyph cache (up to
   // ~768 KB) if we're getting tight. The emoji cache repopulates lazily afterward.
   if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < 1024 * 1024) SdSvc::emojiBitmapCacheEvict();
+  _pf_active = true;   // allow background prefetch while the map is on screen
   if (!_centered_once) { _centered_once = true; centerOnSelf(); }
   // Force a clean full render on (re)entry -- the buffer may be stale/partial from a prior visit.
   _recompose_pending = true;
@@ -492,7 +569,9 @@ void MapView::onShow() {
 
 void MapView::onHide() {
   _dragging = false;
-  tileCacheEvictAll();   // return the ~1.5 MB tile cache while the map isn't on screen
+  _pf_active = false;    // stop the prefetch task before we free the cache it writes into
+  _pf_gen++;             // cancel any in-flight sweep
+  tileCacheEvictAll();   // return the ~2 MB tile cache while the map isn't on screen
 }
 
 bool MapView::service(uint32_t now_ms) {
@@ -532,6 +611,7 @@ void MapView::panBy(int dx, int dy) {
   _buf_complete = false;
   _recompose_pending = true;
   repositionMarkers();                 // markers to the new origin immediately (no 1-frame lag)
+  prefetchPost(sx, sy);                // decode-ahead the next reveal in this motion direction (off the UI core)
 }
 
 // --- event trampolines ----------------------------------------------------------

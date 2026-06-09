@@ -85,13 +85,22 @@ private:
   bool     _rc_strip_only=false;              // this pass redraws ONLY the exposed strip (buffer was complete)
   bool     _buf_complete=false;               // whole buffer is rendered for the current origin (gates strip-only)
 
-  // --- decoded-tile LRU cache (RGB565 in PSRAM, keyed by (z,tx,ty)) so panning
-  //     back over a tile re-blits instead of re-reading+decoding from SD. Freed on
-  //     leaving the map (onHide) to return the PSRAM. ~128 KB per 256^2 entry. ---
-  static const int TILE_CACHE_MAX = 12;       // ~1.5 MB ceiling
+  // --- decoded-tile LRU cache (RGB565 in PSRAM, keyed by (z,tx,ty)). Shared by the UI core (blit) and
+  //     a background prefetch task (decode-ahead), so it's mutex-guarded; the slow SD+PNG decode runs
+  //     OUTSIDE the lock, only the cache slot + blit are locked. Freed on leaving the map. ~128 KB/entry. ---
+  static const int TILE_CACHE_MAX = 16;       // ~2 MB ceiling (room for a directional look-ahead ring)
   struct TileCacheEntry { int z=-1, tx=0, ty=0; uint32_t lru=0; lv_color_t* px=nullptr; uint16_t w=0, h=0; };
   TileCacheEntry _tcache[TILE_CACHE_MAX];
   uint32_t _lru_clock = 0;
+  void*    _cache_mtx = nullptr;               // SemaphoreHandle_t (void* typedef) guarding _tcache/_lru_clock
+
+  // --- background prefetch: decode the tiles a continued pan will reveal (in the last-motion
+  //     direction) into the cache, off the UI core, so the next pan's strip is a cache hit. ---
+  void*           _prefetch_task = nullptr;    // TaskHandle_t
+  volatile bool   _pf_active = false;          // only prefetch while the map tab is on screen
+  int             _pf_z = 0, _pf_dx = 0, _pf_dy = 0;
+  int64_t         _pf_ox = 0, _pf_oy = 0;
+  volatile uint32_t _pf_gen = 0;               // request generation; a newer one cancels an in-flight sweep
 
   // --- drag / double-tap ---
   bool       _dragging = false;
@@ -114,8 +123,15 @@ private:
   void blitRGBA(const uint8_t* rgba, uint32_t w, uint32_t h, int dst_x, int dst_y);
   void blit565(const lv_color_t* src, uint32_t w, uint32_t h, int dst_x, int dst_y);
   // (decodeTileRGBA is declared public above -- shared with MapThumb)
-  lv_color_t* getTile(int z, int tx, int ty, uint16_t& w, uint16_t& h);  // cached RGB565 (decode on miss); null if missing
+  void cacheLock();
+  void cacheUnlock();
+  bool cacheBlit(int z, int tx, int ty, int dst_x, int dst_y);  // blit a cached tile (held under the lock); false if not cached
+  void cacheEnsure(int z, int tx, int ty);                       // decode -> cache if absent (SD+PNG outside the lock)
   void tileCacheEvictAll();
+  // background prefetch
+  void prefetchPost(int dx, int dy);          // queue a directional decode-ahead for the current origin
+  void runPrefetch();                         // (task body) decode the look-ahead band into the cache
+  static void prefetchTaskFn(void* arg);
   void repositionMarkers();
   void centerOnSelf();
   bool firstContactPos(double& lat, double& lon);   // fallback center: first contact carrying a position
