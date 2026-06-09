@@ -392,14 +392,18 @@ void UITask::kbd_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 // Tap on a screen background (outside any text field / keyboard) -> hide the open
 // keyboard. Attached to each screen's scrollable body; a tap on a field/button is
 // handled by that widget and doesn't reach here (events don't bubble by default).
+// Hide every on-screen keyboard (and restore the chat layout if its kb was up). Shared by the
+// background-tap dismiss and by ensureKbdIndev() (a detected physical keyboard drops the soft one).
+void UITask::hideSoftKeyboards() {
+  if (_chat_keyboard && lv_scr_act() == _chat_screen) layoutChatBody(false);  // also restores chat layout
+  lv_obj_t* kbs[] = { _set_kb, _cinfo_kb, _path_kb, _newchan_kb, _login_kb,
+                      _contacts_kb, _pick_kb, _pinset_kb, _profile_kb, _update_kb };
+  for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+}
+
 void UITask::dismiss_kb_cb(lv_event_t* e) {
   (void)e;
-  if (!_instance) return;
-  UITask* s = _instance;
-  if (s->_chat_keyboard && lv_scr_act() == s->_chat_screen) s->layoutChatBody(false);  // also restores chat layout
-  lv_obj_t* kbs[] = { s->_set_kb, s->_cinfo_kb, s->_path_kb, s->_newchan_kb, s->_login_kb,
-                      s->_contacts_kb, s->_pick_kb, s->_pinset_kb, s->_profile_kb, s->_update_kb };
-  for (lv_obj_t* kb : kbs) if (kb) lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+  if (_instance) _instance->hideSoftKeyboards();
 }
 
 static void styleAsDarkScreen(lv_obj_t* scr) {
@@ -483,15 +487,15 @@ lv_obj_t* UITask::makeSelTextarea(lv_obj_t* parent) {
   attachClearX(ta);   // one-click clear ✕ (shown only when the field has text)
   // Physical-keyboard routing: on tap, (re)join the nav group and grab focus so the hardware keyboard
   // types into the tapped field -- works in any ball mode and survives focusGroupRebuild's remove_all
-  // (which only repopulates focusable items in select mode). (Group exists only on T-Deck.)
-  if (_instance && _instance->_nav_group) {
-    lv_obj_add_event_cb(ta, [](lv_event_t* e) {
-      if (_instance && _instance->_nav_group) {
-        lv_group_add_obj(_instance->_nav_group, lv_event_get_target(e));   // no-op if already a member
-        lv_group_focus_obj(lv_event_get_target(e));
-      }
-    }, LV_EVENT_CLICKED, NULL);
-  }
+  // (which only repopulates focusable items in select mode). Attached UNCONDITIONALLY (the handler
+  // no-ops until a keyboard is detected and the nav group exists), so fields built BEFORE a CardKB is
+  // probed/hot-plugged still route once it appears. (Touch-only boards: no group -> the tap is a no-op.)
+  lv_obj_add_event_cb(ta, [](lv_event_t* e) {
+    if (_instance && _instance->_nav_group) {
+      lv_group_add_obj(_instance->_nav_group, lv_event_get_target(e));   // no-op if already a member
+      lv_group_focus_obj(lv_event_get_target(e));
+    }
+  }, LV_EVENT_CLICKED, NULL);
   return ta;
 }
 
@@ -2532,6 +2536,28 @@ void UITask::navBack() {
   if (lv_obj_t* m = topModal()) { lv_event_send(m, LV_EVENT_CLICKED, NULL); return; }  // tap backdrop = dismiss
   if (_chat_screen && lv_scr_act() == _chat_screen) { chat_back_cb(nullptr); return; }
   if (_tabview && lv_tabview_get_tab_act(_tabview) == SETTINGS_TAB_IDX && _set_active_pane) { settingsBackToLauncher(); return; }
+}
+
+// Register the physical-keyboard keypad indev the first time a keyboard is detected -- T-Deck's
+// built-in keyboard (present at boot) or a CardKB, which is probed lazily and may be hot-plugged after
+// boot. Idempotent (returns once registered). Creates the shared nav group if the trackball path
+// didn't, then drops any on-screen keyboard so we behave like the T-Deck: a dedicated input device,
+// no soft keyboard (softKbShow() suppresses future ones via board_has_physical_kbd()). Called from
+// loop(), so detection of a late/hot-plugged unit takes effect within a frame.
+void UITask::ensureKbdIndev() {
+  if (_kbd_indev) return;                  // already registered
+  if (!board_has_physical_kbd()) return;   // not present yet (this also drives the throttled CardKB probe)
+  if (!_nav_group) {
+    _nav_group = lv_group_create();
+    lv_group_set_wrap(_nav_group, false);
+  }
+  lv_indev_drv_init(&_kbd_drv);
+  _kbd_drv.type    = LV_INDEV_TYPE_KEYPAD;
+  _kbd_drv.read_cb = kbd_read_cb;
+  _kbd_indev = lv_indev_drv_register(&_kbd_drv);
+  lv_indev_set_group(_kbd_indev, _nav_group);
+  focusGroupRebuild();                     // populate the group for the current screen (arrows/Tab nav)
+  hideSoftKeyboards();                      // hot-plug: drop any soft keyboard currently open
 }
 
 // Populate the nav group for the current context (SELECT mode only) and set _tb_focus_ctx (= "this
@@ -4804,24 +4830,20 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   // Editable fields join it (makeSelTextarea) so physical keystrokes land in the tapped field; and
   // focusGroupRebuild() populates it with the active screen's focusable items so the ball can move a
   // selection ring + click. No-op on touch-only boards (no group, no encoder, soft keyboard as usual).
-  if (board_has_trackball() || board_has_physical_kbd()) {
+  // The trackball (encoder) is wired here at boot; the KEYBOARD keypad indev is registered lazily by
+  // ensureKbdIndev() (called from loop()) so a CardKB that isn't ACKing yet -- or is hot-plugged after
+  // boot -- is still picked up. The makeSelTextarea tap handler is attached unconditionally, so fields
+  // built before detection route correctly once the group exists.
+  if (board_has_trackball()) {              // encoder: roll = focus prev/next, click = activate/edit
     _nav_group = lv_group_create();
     lv_group_set_wrap(_nav_group, false);
-    if (board_has_physical_kbd()) {
-      lv_indev_drv_init(&_kbd_drv);
-      _kbd_drv.type    = LV_INDEV_TYPE_KEYPAD;
-      _kbd_drv.read_cb = kbd_read_cb;
-      lv_indev_t* kbd = lv_indev_drv_register(&_kbd_drv);
-      lv_indev_set_group(kbd, _nav_group);
-    }
-    if (board_has_trackball()) {              // encoder: roll = focus prev/next, click = activate/edit
-      lv_indev_drv_init(&_enc_drv);
-      _enc_drv.type    = LV_INDEV_TYPE_ENCODER;
-      _enc_drv.read_cb = enc_read_cb;
-      _enc_indev = lv_indev_drv_register(&_enc_drv);
-      lv_indev_set_group(_enc_indev, _nav_group);
-    }
+    lv_indev_drv_init(&_enc_drv);
+    _enc_drv.type    = LV_INDEV_TYPE_ENCODER;
+    _enc_drv.read_cb = enc_read_cb;
+    _enc_indev = lv_indev_drv_register(&_enc_drv);
+    lv_indev_set_group(_enc_indev, _nav_group);
   }
+  ensureKbdIndev();   // register the keypad indev now if a physical keyboard is already present (T-Deck)
 
   // Interrupt-driven touch: if the variant exposes a GT911 INT pin, read coords off the
   // INT edge in a dedicated high-priority task instead of polling getTouch on the LVGL loop.
@@ -12932,6 +12954,7 @@ void UITask::loop() {
 #endif
 
   pollTrackball();  // T-Deck nav ball -> scroll the active list/chat (no-op without a ball)
+  ensureKbdIndev(); // pick up a lazily-probed / hot-plugged physical keyboard (CardKB); no-op once set
 
   // Rebuild the focus group whenever the active context changes (tab / pane / chat / modal). Cheap
   // signature compare; the per-context decision (focus vs scroll) lands in _tb_focus_ctx. No-op group.

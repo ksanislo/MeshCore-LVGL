@@ -162,28 +162,42 @@ int board_i2c_scan(uint8_t* out, int maxn) {
 int  board_touch_int_pin() { return P_TOUCH_INT; }   // UITask uses this to drive touch off the INT
 
 // Optional M5Stack CardKB (mini I2C QWERTY keyboard, addr 0x5F) on the shared touch I2C bus. It's an
-// external accessory, so we probe for it ONCE at radio_init (after the RTC has brought Wire up on the
-// touch pins) and only then report a physical keyboard to the UI, which drives an LVGL keypad indev
-// from board_kbd_read() -- the same path as the T-Deck's built-in keyboard. Absent -> the UI keeps the
-// on-screen keyboard. Boot-time detection only (plug it in before power-on). Keys are ASCII; the four
-// arrows are 0xB4..0xB7 (mapped in UITask::kbd_read_cb).
+// external accessory plugged into the same I2C port as the INA219. Detection is LAZY and hot-plug
+// aware: the CardKB is an active microcontroller that often isn't ACKing yet at an early one-shot boot
+// probe (the passive PCF8563 RTC beside it is), and it may be connected AFTER power-on. So instead of a
+// single radio_init probe we re-probe on a ~1 Hz throttle from board_has_physical_kbd() -- which the UI
+// loop calls every pass -- until the unit answers, then latch. Once detected the UI registers a keypad
+// indev and drops the on-screen keyboard (same path as the T-Deck's built-in keyboard); the four arrows
+// are 0xB4..0xB7 (mapped in UITask::kbd_read_cb). Detection + reads share the touch bus: claim port 0
+// from the LGFX touch driver once (Wire.end()), then re-assert the pins per access (touch reconfigures
+// them every read), exactly like the INA219 read / board_i2c_scan.
 #ifndef CARDKB_ADDR
   #define CARDKB_ADDR 0x5F
 #endif
-static int8_t s_cardkb = -1;            // -1 unprobed, 0 absent, 1 present
-static void cardkb_probe() {            // Wire must already be up on P_TOUCH_SDA/SCL
-  s_cardkb = 0;
-  Wire.beginTransmission(CARDKB_ADDR);
-  if (Wire.endTransmission() == 0) s_cardkb = 1;
+static int8_t   s_cardkb = -1;          // -1 never seen, 0 absent (last probe), 1 present (latched)
+static uint32_t s_cardkb_next_ms = 0;   // throttle the re-probe while not yet found
+static bool     s_touchbus_claimed = false;
+static void cardkb_bus_assert() {       // caller holds board_i2c_lock
+  if (!s_touchbus_claimed) { Wire.end(); s_touchbus_claimed = true; }  // one-shot reclaim from touch
+  Wire.begin(P_TOUCH_SDA, P_TOUCH_SCL);
+  Wire.setClock(100000);                // 100 kHz: robust on the multi-drop touch bus
 }
-bool board_has_physical_kbd() { return s_cardkb == 1; }
+bool board_has_physical_kbd() {
+  if (s_cardkb == 1) return true;       // latched once detected (no removal handling)
+  uint32_t now = millis();
+  if (s_cardkb_next_ms != 0 && (int32_t)(now - s_cardkb_next_ms) < 0) return false;  // throttled
+  s_cardkb_next_ms = now + 1000;        // re-probe at most ~1 Hz while absent
+  if (!board_i2c_lock(20)) return false;
+  cardkb_bus_assert();
+  Wire.beginTransmission(CARDKB_ADDR);
+  s_cardkb = (Wire.endTransmission() == 0) ? 1 : 0;
+  board_i2c_unlock();
+  return s_cardkb == 1;
+}
 int  board_kbd_read() {                 // next pressed ASCII (0 = none); shares the touch bus + i2c lock
   if (s_cardkb != 1) return 0;
   if (!board_i2c_lock(20)) return 0;
-  static bool claimed = false;
-  if (!claimed) { Wire.end(); claimed = true; }     // claim port 0 off the LGFX touch driver (INA219 wrinkle)
-  Wire.begin(P_TOUCH_SDA, P_TOUCH_SCL);
-  Wire.setClock(100000);
+  cardkb_bus_assert();
   int r = 0;
   if (Wire.requestFrom((int)CARDKB_ADDR, 1) == 1) { int c = Wire.read(); r = (c > 0) ? c : 0; }
   board_i2c_unlock();
@@ -194,7 +208,8 @@ bool radio_init() {
   hspi_mutex_ensure();   // before any radio/SD SPI transaction can take it
   if (!s_i2c_mtx) s_i2c_mtx = xSemaphoreCreateMutex();   // before the first RTC bus access
   rtc_clock.begin();
-  cardkb_probe();        // RTC just brought Wire up on the touch pins -> detect an optional CardKB
+  // CardKB detection is lazy (board_has_physical_kbd(), driven from the UI loop): a unit not yet
+  // ACKing this early -- or hot-plugged later -- is still picked up. No boot probe needed here.
 
   lora_spi.begin(P_LORA_SCLK, P_LORA_MISO, P_LORA_MOSI);
   return radio.std_init(&lora_spi);

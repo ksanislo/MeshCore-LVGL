@@ -689,6 +689,7 @@ class UITask : public AbstractUITask {
   lv_indev_drv_t     _kbd_drv;             // physical-keyboard keypad indev (T-Deck); unused otherwise
   lv_indev_drv_t     _enc_drv;            // trackball encoder indev (T-Deck focus nav); unused otherwise
   lv_indev_t*        _enc_indev = nullptr;// registered encoder indev (group set/cleared per context)
+  lv_indev_t*        _kbd_indev = nullptr;// registered keypad indev; created lazily on keyboard detection (CardKB hot-plug)
   lv_group_t*        _nav_group = nullptr; // shared focus group: keyboard keypad + trackball encoder both drive it
   bool               _tb_pressed_prev = false;  // trackball center-click edge state (T-Deck nav ball)
   uint32_t           _tb_scroll_ms = 0;         // lv_tick of the last trackball scroll (touch swallowed briefly after)
@@ -704,6 +705,8 @@ class UITask : public AbstractUITask {
   bool               _tb_click_pending = false; // a focus-context click waiting to become an ENTER
   int16_t            _tb_v_detent = 0;     // raw vertical pulses toward one focus step
   int16_t            _tb_h_detent = 0;     // raw horizontal pulses toward one tab switch
+  void               ensureKbdIndev();     // register the keypad indev once a physical keyboard is detected (CardKB lazy/hot-plug)
+  void               hideSoftKeyboards();   // hide every on-screen keyboard (used on dismiss + on keyboard detection)
   void               focusGroupRebuild();  // repopulate _nav_group for the current context + set _tb_focus_ctx
   void               focusAddObj(lv_obj_t* o, bool ring); // add to _nav_group (+ focus ring when ring)
   void               addFocusablesByType(lv_obj_t* root); // recurse: add native focusable widgets in tree order
