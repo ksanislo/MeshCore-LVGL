@@ -217,7 +217,7 @@ void UITask::allocBigDrawBuf() {
 // in-flight async flush DMA first so we never free a buffer the SPI engine is still reading.
 void UITask::setLowMemDrawBuf(bool low) {
   if (low == _lvbuf_lowmem) return;
-  if (_lgfx) { _lgfx->endWrite(); _lgfx->waitDMA(); }   // close + drain the open flush transaction
+  if (_lgfx) { _lgfx->endWrite(); _lgfx->waitDMA(); }   // defensive: ensure no flush transaction/DMA is live before freeing buffers (flushes now self-drain, but cheap insurance)
   if (low) {
     if (_buf2) { heap_caps_free(_buf2); _buf2 = NULL; }
     if (_buf1) { heap_caps_free(_buf1); _buf1 = NULL; }
@@ -267,26 +267,21 @@ void UITask::disp_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t
   uint32_t w = area->x2 - area->x1 + 1;
   uint32_t h = area->y2 - area->y1 + 1;
   LGFX_Device& lcd = *_instance->_lgfx;
-  if (board_display_bus_shared()) {
-    // Shared SPI bus (display + LoRa + SD, e.g. T-Deck): take the bus mutex and do a COMPLETE,
-    // closed transaction so the radio/SD (mesh core) can grab the bus between flushes. endWrite()
-    // waits for the DMA before releasing CS. Slower than the pipelined path below, but bus-safe.
-    board_bus_lock();
-    lcd.startWrite();
-    lcd.setAddrWindow(area->x1, area->y1, w, h);
-    lcd.writePixelsDMA((lgfx::rgb565_t*)color_p, w * h);
-    lcd.endWrite();
-    board_bus_unlock();
-    lv_disp_flush_ready(drv);
-    return;
-  }
-  // Dedicated display bus (CrowPanel SPI2): leave the transaction OPEN -- returns immediately after
-  // queuing the DMA, so LVGL renders the next chunk (other buffer) while this one transfers. The next
-  // flush's setAddrWindow waits for this DMA via bus serialization, and double-buffering guarantees a
-  // buffer's DMA is done before LVGL cycles back to reuse it. bus_shared=0, so holding CS is fine.
+  // Always do a COMPLETE, drained transaction: startWrite -> writePixelsDMA -> endWrite (endWrite
+  // waits for the DMA to finish before releasing CS), and only THEN signal flush_ready. This is the
+  // correct protocol -- the buffer is guaranteed free before LVGL can reuse it, and the bus is never
+  // left open between flushes. (Previously CrowPanel's dedicated-bus path left the transaction OPEN
+  // with the DMA still in flight for a pipelining speed-up, which risked a torn/corrupt display if the
+  // "exactly two buffers, nothing else on the bus" assumptions ever broke. Correctness > a few fps.)
+  // On a SHARED bus (T-Deck: display + LoRa + SD) also bracket it with the bus mutex so the mesh core
+  // can grab the bus between flushes; a dedicated bus (CrowPanel SPI2) needs no lock.
+  const bool shared = board_display_bus_shared();
+  if (shared) board_bus_lock();
   lcd.startWrite();
   lcd.setAddrWindow(area->x1, area->y1, w, h);
   lcd.writePixelsDMA((lgfx::rgb565_t*)color_p, w * h);
+  lcd.endWrite();
+  if (shared) board_bus_unlock();
   lv_disp_flush_ready(drv);
 }
 
@@ -7713,6 +7708,12 @@ void UITask::refreshNodeInfo() {
 #endif
   n += snprintf(buf + n, sizeof(buf) - n, "MeshCore: %s\n", mproxy::firmwareVersion());
   n += snprintf(buf + n, sizeof(buf) - n, "LVGL-GUI: %s (%s, %s)\n", LVGL_GUI_VERSION, FW_GIT_REV, __DATE__);
+  // BLE pairing passkey: the phone is prompted for this (Secure-Connections MITM). It's regenerated
+  // each boot, so show it here so the user can read it off the screen. Only meaningful while BLE is the
+  // active companion transport -- hidden in WiFi mode (companion runs over USB, BLE stack is off).
+  uint32_t blepin = mproxy::activeBlePin();
+  if (blepin && (!p || !p->wifi_enabled))
+    n += snprintf(buf + n, sizeof(buf) - n, "Pairing PIN: %06u\n", (unsigned)blepin);
   n += snprintf(buf + n, sizeof(buf) - n, "Name: %s\n", p ? p->node_name : "?");
   n += snprintf(buf + n, sizeof(buf) - n, "Key: %.16s...\n", keyhex);
   if (p) n += snprintf(buf + n, sizeof(buf) - n, "Radio: %g MHz  SF%u  BW%g  CR%u  %ddBm\n",
