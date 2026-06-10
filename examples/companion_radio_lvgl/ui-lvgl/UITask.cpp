@@ -11230,15 +11230,17 @@ void UITask::set_time_ta_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_obj_t* ta = lv_event_get_target(e);
   lv_event_code_t code = lv_event_get_code(e);
+  // These boxes are raw lv_textarea_create (not makeSelTextarea), so join+focus the keypad nav group
+  // here -- otherwise a physical keyboard (CardKB/T-Deck) can't type or BACKSPACE in them. Do it on the
+  // TAP (CLICKED) ONLY, exactly like makeSelTextarea's own handler: doing it on FOCUSED too makes
+  // lv_group_focus_obj() re-fire FOCUSED and RE-ENTER this cb -- a CardKB-only path (touch has no nav
+  // group) the proven field pattern deliberately avoids.
+  if (code == LV_EVENT_CLICKED && _instance->_nav_group) {
+    lv_group_add_obj(_instance->_nav_group, ta);
+    lv_group_focus_obj(ta);
+  }
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     _instance->_set_active_ta = ta;
-    // These boxes are raw lv_textarea_create (not makeSelTextarea), so join+focus the keypad nav group
-    // here -- otherwise a physical keyboard (CardKB/T-Deck) can't type or BACKSPACE in them (the soft
-    // keyboard is suppressed when a physical one is present, and editing keys route via the group).
-    if (_instance->_nav_group) {
-      lv_group_add_obj(_instance->_nav_group, ta);
-      lv_group_focus_obj(ta);
-    }
     lv_keyboard_set_textarea(_instance->_set_kb, ta);
     lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
     softKbShow(_instance->_set_kb);
@@ -11268,9 +11270,12 @@ void UITask::set_date_ta_event_cb(lv_event_t* e) {
   if (!_instance) return;
   lv_obj_t* ta = lv_event_get_target(e);
   lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_CLICKED && _instance->_nav_group) {   // join the keypad nav group on the TAP only (see set_time_ta_event_cb)
+    lv_group_add_obj(_instance->_nav_group, ta);
+    lv_group_focus_obj(ta);
+  }
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     _instance->_set_active_ta = ta;
-    if (_instance->_nav_group) { lv_group_add_obj(_instance->_nav_group, ta); lv_group_focus_obj(ta); }
     lv_keyboard_set_textarea(_instance->_set_kb, ta);
     lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
     softKbShow(_instance->_set_kb);
