@@ -12251,13 +12251,28 @@ void UITask::mqtt_save_cb(lv_event_t* e) {
   p->mqtt_client_id[sizeof(p->mqtt_client_id) - 1] = 0;
   strncpy(p->mqtt_subscribe, lv_textarea_get_text(_instance->_set_mqtt_subscribe), sizeof(p->mqtt_subscribe) - 1);
   p->mqtt_subscribe[sizeof(p->mqtt_subscribe) - 1] = 0;
+  // Guard: MQTT wildcards (+ #) are valid ONLY in Subscribe. In the prefix or client-id they build
+  // illegal publish topics (e.g. meshcore/+/tx/status) that the broker rejects -> a reconnect/reboot
+  // loop a user often can't escape on-device. Strip them so a misplaced wildcard can never be saved.
+  auto stripWild = [](char* s) -> bool {
+    bool removed = false; char* w = s;
+    for (char* r = s; *r; r++) { if (*r == '+' || *r == '#') { removed = true; continue; } *w++ = *r; }
+    *w = 0; return removed;
+  };
+  bool wild = stripWild(p->mqtt_topic_prefix);
+  wild = stripWild(p->mqtt_client_id) || wild;
+  if (wild) {   // show the corrected values so the user sees what was saved
+    lv_textarea_set_text(_instance->_set_mqtt_topic, p->mqtt_topic_prefix);
+    lv_textarea_set_text(_instance->_set_mqtt_clientid, p->mqtt_client_id);
+  }
   p->mqtt_tls        = lv_obj_has_state(_instance->_set_mqtt_tls, LV_STATE_CHECKED) ? 1 : 0;
   p->mqtt_publish_rx = lv_obj_has_state(_instance->_set_mqtt_rx, LV_STATE_CHECKED) ? 1 : 0;
   p->mqtt_publish_tx = lv_obj_has_state(_instance->_set_mqtt_tx, LV_STATE_CHECKED) ? 1 : 0;
   mproxy::MeshCmd c{}; c.kind = mproxy::CmdKind::ApplyMqtt; c.prefs = *p; mproxy::postCommand(c);
   lv_obj_add_flag(_instance->_set_kb, LV_OBJ_FLAG_HIDDEN);
   _instance->refreshNetStatus();   // show/hide the status line for the new state
-  _instance->showToast(p->mqtt_enabled ? "MQTT connecting..." : "MQTT off");
+  if (wild) _instance->showToast("Removed +/# - wildcards are only valid in Subscribe");
+  else      _instance->showToast(p->mqtt_enabled ? "MQTT connecting..." : "MQTT off");
 }
 
 // ---- Battery fuel gauge (optional power monitor) ----------------------------
