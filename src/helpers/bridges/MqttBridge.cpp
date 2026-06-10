@@ -150,7 +150,12 @@ void MqttBridge::begin() {
   }
   _client.setServer(_prefs->mqtt_host, resolved_port);
   _client.setKeepAlive(30);
-  _client.setSocketTimeout(15);
+  // Bound below the FreeRTOS task watchdog (~5s): loop()/tryConnect() run on the mesh task (core 0),
+  // and PubSubClient's connect/read are SYNCHRONOUS up to this timeout. A broker that stalls the
+  // handshake -- a slow/unreachable broker, a TLS hiccup, or an illegal will-topic -- would otherwise
+  // block core 0 long enough to trip the task-WDT and reboot-loop. 4s leaves margin and a failed
+  // attempt just backs off and retries.
+  _client.setSocketTimeout(4);
 
   _running = true;
   _initialized = true;
