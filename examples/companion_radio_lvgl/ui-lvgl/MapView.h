@@ -114,6 +114,8 @@ private:
   void*       _tap_user = nullptr;
 
   // --- helpers (defined across build steps) ---
+  bool allocCanvasBuf();   // (re)allocate the big PSRAM canvas buffer + bind it to the canvas (on show)
+  void freeCanvasBuf();    // detach the canvas + free the buffer so the map holds no big RAM while hidden
   void recompose();
   void beginRecompose();
   bool stepRecompose(int max_tiles);          // decode up to N tiles; true when the viewport is filled

@@ -425,6 +425,11 @@ void MapView::repositionMarkers() {
 }
 
 // --- lifecycle ------------------------------------------------------------------
+// 1x1 placeholder the canvas points at whenever the real PSRAM buffer (_cbuf) isn't allocated --
+// at build time (before the first show) and while the map is hidden. Keeps lv_canvas valid (never
+// pointing at freed memory) so a stray render can't fault.
+static lv_color_t s_map_stub[1];
+
 void MapView::build(lv_obj_t* parent, uint16_t w, uint16_t h, MarkerTapCb cb, void* user) {
   if (_canvas) return;
   _root = parent; _tap_cb = cb; _tap_user = user;
@@ -436,20 +441,14 @@ void MapView::build(lv_obj_t* parent, uint16_t w, uint16_t h, MarkerTapCb cb, vo
   // viewport in BYTES; the buffer is (1+2f)^2 * vp, so (1+2f)^2 * vp <= CAP -> f = (sqrt(CAP/vp)-1)/2.
   // Clamp f to [0,1]: small screens keep the full (f=1) one-viewport-per-side margin (~1.9 MB at
   // 480x232), big 800x480 screens shrink it to fit (a full margin there would be ~5.6 MB).
+  // The PSRAM buffer itself is allocated LAZILY in allocCanvasBuf() on onShow() and freed on onHide(),
+  // so the map holds none of this ~2 MB while you're on another tab. Here we only fix the geometry.
   const size_t MAP_BUF_CAP = 2u * 1024 * 1024;
   double vp = (double)_vw * _vh * sizeof(lv_color_t);
   double f = (sqrt((double)MAP_BUF_CAP / vp) - 1.0) / 2.0;
   if (f > 1.0) f = 1.0; else if (f < 0.0) f = 0.0;
   _mx = (uint16_t)(f * _vw); _my = (uint16_t)(f * _vh);
   _cw = _vw + 2 * _mx; _ch = _vh + 2 * _my;
-  size_t bytes = (size_t)_cw * _ch * sizeof(lv_color_t);
-  _cbuf = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
-  if (!_cbuf) {
-    _mx = _my = 0; _cw = _vw; _ch = _vh;             // no-margin fallback (still functional, no live fill)
-    bytes = (size_t)_cw * _ch * sizeof(lv_color_t);
-    _cbuf = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
-  }
-  if (!_cbuf) { Serial.printf("[MAP] canvas alloc %u bytes FAILED\n", (unsigned)bytes); return; }
 
   // Cache mutex + background prefetch task (core 0, low priority): the task decodes look-ahead tiles
   // into the cache off the UI core so quick successive swipes don't outrun the renderer. It only
@@ -470,9 +469,8 @@ void MapView::build(lv_obj_t* parent, uint16_t w, uint16_t h, MarkerTapCb cb, vo
   lv_obj_clear_flag(_map_layer, LV_OBJ_FLAG_SCROLLABLE);
 
   _canvas = lv_canvas_create(_map_layer);
-  lv_canvas_set_buffer(_canvas, _cbuf, _cw, _ch, LV_IMG_CF_TRUE_COLOR);
+  lv_canvas_set_buffer(_canvas, s_map_stub, 1, 1, LV_IMG_CF_TRUE_COLOR);   // real _cbuf bound in onShow()
   lv_obj_align(_canvas, LV_ALIGN_TOP_LEFT, 0, 0);
-  lv_canvas_fill_bg(_canvas, lv_color_hex(BG_HEX), LV_OPA_COVER);
   lv_obj_add_flag(_canvas, LV_OBJ_FLAG_CLICKABLE);     // so it receives press events for pan
   lv_obj_add_event_cb(_canvas, canvas_event_cb, LV_EVENT_ALL, this);
 
@@ -538,6 +536,35 @@ void MapView::build(lv_obj_t* parent, uint16_t w, uint16_t h, MarkerTapCb cb, vo
   }
 }
 
+// (Re)allocate the oversized PSRAM canvas buffer for the current geometry and bind it to the canvas.
+// Called from onShow(); idempotent. On alloc failure, falls back to a no-margin (viewport-only) buffer.
+bool MapView::allocCanvasBuf() {
+  if (_cbuf) return true;
+  size_t bytes = (size_t)_cw * _ch * sizeof(lv_color_t);
+  _cbuf = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+  if (!_cbuf && (_mx || _my)) {              // retry smaller: drop the margin to a viewport-only buffer
+    _mx = _my = 0; _cw = _vw; _ch = _vh;
+    lv_obj_set_size(_map_layer, _cw, _ch);
+    bytes = (size_t)_cw * _ch * sizeof(lv_color_t);
+    _cbuf = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+  }
+  if (!_cbuf) { Serial.printf("[MAP] canvas alloc %u bytes FAILED\n", (unsigned)bytes); return false; }
+  lv_canvas_set_buffer(_canvas, _cbuf, _cw, _ch, LV_IMG_CF_TRUE_COLOR);
+  lv_canvas_fill_bg(_canvas, lv_color_hex(BG_HEX), LV_OPA_COVER);
+  lv_obj_set_pos(_map_layer, -_mx, -_my);    // resting position aligns the buffer center with the viewport
+  _buf_complete = false;
+  return true;
+}
+
+// Detach the canvas from _cbuf (point it at the 1x1 stub) and free the buffer. The big PSRAM block is
+// returned whenever the map isn't on screen; allocCanvasBuf() re-creates it on the next onShow().
+void MapView::freeCanvasBuf() {
+  if (!_cbuf) return;
+  if (_canvas) lv_canvas_set_buffer(_canvas, s_map_stub, 1, 1, LV_IMG_CF_TRUE_COLOR);
+  heap_caps_free(_cbuf); _cbuf = nullptr;
+  _buf_complete = false;
+}
+
 void MapView::destroy() {
   if (!_canvas) return;
   tileCacheEvictAll();
@@ -553,6 +580,7 @@ void MapView::destroy() {
 
 void MapView::onShow() {
   if (!_canvas) return;
+  if (!allocCanvasBuf()) return;   // (re)allocate the big canvas buffer for this visit (freed on hide)
   // Tile decode wants ~256 KB PSRAM transients; reclaim the emoji glyph cache (up to
   // ~768 KB) if we're getting tight. The emoji cache repopulates lazily afterward.
   if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < 1024 * 1024) SdSvc::emojiBitmapCacheEvict();
@@ -572,10 +600,11 @@ void MapView::onHide() {
   _pf_active = false;    // stop the prefetch task before we free the cache it writes into
   _pf_gen++;             // cancel any in-flight sweep
   tileCacheEvictAll();   // return the ~2 MB tile cache while the map isn't on screen
+  freeCanvasBuf();       // ...and the ~2 MB canvas buffer too -- the map holds no big RAM while hidden
 }
 
 bool MapView::service(uint32_t now_ms) {
-  if (!_canvas) return false;
+  if (!_canvas || !_cbuf) return false;   // no buffer bound (map hidden) -> nothing to render
   bool did = false;
   if (_recompose_pending && (now_ms - _last_recompose_ms) >= 40) {
     if (!_rc_in_progress) beginRecompose();         // fresh pass (origin/zoom snapshot)
@@ -594,7 +623,7 @@ void MapView::markContactsDirty() { _markers_dirty = true; }
 // existing buffer pixels into place so what was on screen stays put, then queues a SOFT recompose
 // that decodes only the freshly-exposed strip. Used for both touch-drag release and trackball pan.
 void MapView::panBy(int dx, int dy) {
-  if (!_canvas) return;
+  if (!_canvas || !_cbuf) return;
   int64_t ox0 = _origin_wx, oy0 = _origin_wy;
   _origin_wx -= dx; _origin_wy -= dy;
   clampOrigin();
