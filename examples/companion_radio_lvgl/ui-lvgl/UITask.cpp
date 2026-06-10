@@ -9658,6 +9658,37 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
     lv_obj_center(ic);
   }
 
+  // Manual set-date: YYYY - MM - DD (local). Editing a box sets the date while keeping the current
+  // time-of-day. Like the time boxes it's untrusted, but it lets you fix the calendar with no
+  // GPS/NTP/phone (e.g. a dead RTC that came up in 2000). The boxes live-tick (refreshTimeFields).
+  {
+    lv_obj_t* fld = makeField(body, "Set date (local)");
+    lv_obj_t* row = lv_obj_create(fld);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 4, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    auto makeDateBox = [&](lv_obj_t** slot, uint8_t maxlen, int w) {
+      lv_obj_t* ta = lv_textarea_create(row);
+      lv_textarea_set_one_line(ta, true);
+      lv_textarea_set_max_length(ta, maxlen);
+      lv_textarea_set_accepted_chars(ta, "0123456789");
+      lv_obj_set_width(ta, w);
+      lv_obj_add_event_cb(ta, set_date_ta_event_cb, LV_EVENT_ALL, NULL);
+      *slot = ta;
+    };
+    auto dsep = [&]() {
+      lv_obj_t* c = lv_label_create(row);
+      lv_label_set_text(c, "-");
+      lv_obj_set_style_text_color(c, lv_color_hex(FG_HEX), 0);
+    };
+    makeDateBox(&_set_date_yyyy, 4, 64); dsep();
+    makeDateBox(&_set_date_mm, 2, 46);   dsep();
+    makeDateBox(&_set_date_dd, 2, 46);
+  }
+
   addSettingsSection(body, "Appearance");
   // Contact avatar color scheme: our curated palette, or iOS-app parity (same
   // color as the phone app for a given name). See nameColor() in ui_theme.h.
@@ -11079,6 +11110,34 @@ void UITask::set_rtc_cb(lv_event_t* e) {
 // Both editing a box and pressing the ↻ button land here -- the button just re-applies the
 // shown HH:MM:00, zeroing the seconds of the current minute. Writes via the weak
 // board_rtc_set_time hook (UI core = touch/RTC I2C owner), which writes the chip too.
+// Days since the Unix epoch for a civil Y/M/D (proleptic Gregorian; Howard Hinnant's algorithm).
+// Used by commitManualDate so we don't depend on timegm (not always in newlib).
+static long daysFromCivil(int y, unsigned m, unsigned d) {
+  y -= m <= 2;
+  long era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097L + (long)doe - 719468L;
+}
+
+// Shown YYYY-MM-DD -> set the clock's DATE, keeping the current time-of-day. Mirrors commitManualTime
+// (local -> UTC via the tz offset). PCF8563 holds a 2-digit (20xx) year, so we clamp to 2000..2099.
+void UITask::commitManualDate() {
+  if (!_node_prefs || !_set_date_yyyy) return;
+  int yy = atoi(lv_textarea_get_text(_set_date_yyyy));
+  int mo = atoi(lv_textarea_get_text(_set_date_mm));
+  int dd = atoi(lv_textarea_get_text(_set_date_dd));
+  if (yy < 2000) yy = 2000; if (yy > 2099) yy = 2099;
+  if (mo < 1) mo = 1;       if (mo > 12)   mo = 12;
+  if (dd < 1) dd = 1;       if (dd > 31)   dd = 31;
+  long tzoff    = (long)_node_prefs->tz_offset_minutes * 60;
+  long localNow = (long)mproxy::rtcSeconds() + tzoff;
+  long tod      = ((localNow % 86400) + 86400) % 86400;      // keep the current local time-of-day
+  long localNew = daysFromCivil(yy, (unsigned)mo, (unsigned)dd) * 86400L + tod;
+  board_rtc_set_time((uint32_t)(localNew - tzoff));          // local -> UTC
+}
+
 void UITask::commitManualTime() {
   if (!_node_prefs || !_set_time_hh) return;
   int hh = atoi(lv_textarea_get_text(_set_time_hh));
@@ -11111,12 +11170,16 @@ void UITask::refreshTimeFields() {
   time_t t = (time_t)((long)mproxy::rtcSeconds() + (long)_node_prefs->tz_offset_minutes * 60);
   struct tm tmv; gmtime_r(&t, &tmv);
   auto editing = [](lv_obj_t* o) { return (lv_obj_get_state(o) & LV_STATE_FOCUSED) != 0; };
-  char b[4];
+  char b[8];
   int dh = tmv.tm_hour;
   if (h12) { dh %= 12; if (dh == 0) dh = 12; }
   if (!editing(_set_time_hh)) { snprintf(b, sizeof b, "%02d", dh);          lv_textarea_set_text(_set_time_hh, b); }
   if (!editing(_set_time_mm)) { snprintf(b, sizeof b, "%02d", tmv.tm_min);  lv_textarea_set_text(_set_time_mm, b); }
   if (h12 && _set_time_ampm)  lv_dropdown_set_selected(_set_time_ampm, tmv.tm_hour >= 12 ? 1 : 0);
+  // Date boxes track the live clock unless one is being edited.
+  if (_set_date_yyyy && !editing(_set_date_yyyy)) { snprintf(b, sizeof b, "%04d", tmv.tm_year + 1900); lv_textarea_set_text(_set_date_yyyy, b); }
+  if (_set_date_mm   && !editing(_set_date_mm))   { snprintf(b, sizeof b, "%02d", tmv.tm_mon + 1);     lv_textarea_set_text(_set_date_mm, b); }
+  if (_set_date_dd   && !editing(_set_date_dd))   { snprintf(b, sizeof b, "%02d", tmv.tm_mday);        lv_textarea_set_text(_set_date_dd, b); }
 }
 
 // Render _clock_text with the ':' ALWAYS as a recolor span -- visible (UI_FG_STRONG, matching the
@@ -11169,6 +11232,13 @@ void UITask::set_time_ta_event_cb(lv_event_t* e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
     _instance->_set_active_ta = ta;
+    // These boxes are raw lv_textarea_create (not makeSelTextarea), so join+focus the keypad nav group
+    // here -- otherwise a physical keyboard (CardKB/T-Deck) can't type or BACKSPACE in them (the soft
+    // keyboard is suppressed when a physical one is present, and editing keys route via the group).
+    if (_instance->_nav_group) {
+      lv_group_add_obj(_instance->_nav_group, ta);
+      lv_group_focus_obj(ta);
+    }
     lv_keyboard_set_textarea(_instance->_set_kb, ta);
     lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
     softKbShow(_instance->_set_kb);
@@ -11190,6 +11260,28 @@ void UITask::set_time_ampm_cb(lv_event_t* e) {
 void UITask::set_time_reset_cb(lv_event_t* e) {
   (void)e;
   if (_instance) _instance->commitManualTime();   // re-apply shown HH:MM:00 -> zeroes the current minute's seconds
+}
+
+// Date boxes: mirror set_time_ta_event_cb (raise the number kb + join the keypad nav group on focus so
+// a physical keyboard can type/backspace here too), but commit the DATE on defocus.
+void UITask::set_date_ta_event_cb(lv_event_t* e) {
+  if (!_instance) return;
+  lv_obj_t* ta = lv_event_get_target(e);
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+    _instance->_set_active_ta = ta;
+    if (_instance->_nav_group) { lv_group_add_obj(_instance->_nav_group, ta); lv_group_focus_obj(ta); }
+    lv_keyboard_set_textarea(_instance->_set_kb, ta);
+    lv_keyboard_set_mode(_instance->_set_kb, LV_KEYBOARD_MODE_NUMBER);
+    softKbShow(_instance->_set_kb);
+    lv_obj_align(_instance->_set_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_move_foreground(_instance->_set_kb);
+    _instance->raiseFieldForKb(_instance->_set_active_pane ? _instance->_set_active_pane
+                                                           : _instance->_tab_settings,
+                               _instance->_set_kb, ta);
+  } else if (code == LV_EVENT_DEFOCUSED) {
+    _instance->commitManualDate();
+  }
 }
 
 void UITask::set_avatar_cb(lv_event_t* e) {

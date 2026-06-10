@@ -394,6 +394,9 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_time_hh;         // manual set-time: hours box
   lv_obj_t*       _set_time_mm;         // manual set-time: minutes box (seconds aren't shown -- the ↻ button zeroes them)
   lv_obj_t*       _set_time_ampm;       // manual set-time: AM/PM dropdown (12h mode only)
+  lv_obj_t*       _set_date_yyyy;       // manual set-date: year box (4 digits)
+  lv_obj_t*       _set_date_mm;         // manual set-date: month box (1-12)
+  lv_obj_t*       _set_date_dd;         // manual set-date: day box (1-31)
   lv_obj_t*       _set_meta_chk;        // "show metadata in chat" toggle
   lv_obj_t*       _set_autolock_chk;    // auto-lock on sleep toggle
   // Network panes (WiFi + MQTT). Values committed on each pane's Save button.
@@ -1071,8 +1074,10 @@ private:
   static void set_time_ta_event_cb(lv_event_t* e);  // HH/MM/SS boxes: kb on focus, commit on defocus
   static void set_time_ampm_cb(lv_event_t* e);      // AM/PM dropdown change -> commit
   static void set_time_reset_cb(lv_event_t* e);     // ↻ button -> re-apply shown HH:MM:00 (zero seconds)
+  static void set_date_ta_event_cb(lv_event_t* e);  // YYYY/MM/DD boxes: kb on focus, commit on defocus
   void        commitManualTime();                   // shown HH:MM -> set clock to HH:MM:00 (local -> UTC)
-  void        refreshTimeFields();                  // live-tick the boxes not being edited
+  void        commitManualDate();                   // shown YYYY-MM-DD -> set the date, keep the time-of-day (local -> UTC)
+  void        refreshTimeFields();                  // live-tick the date+time boxes not being edited
   void        refreshSignalMeter();                 // 1Hz: decay SNR envelope -> header bars (hysteretic)
   void        renderClock(bool colon_hidden);       // clock w/ fixed-width recolored ':' (blink w/o jiggle)
   void        buildSignalPopup();                   // lazily build the signal-meter tuning modal
@@ -1333,7 +1338,8 @@ public:
       _set_name_ta(NULL), _set_freq_ta(NULL), _set_bw_dd(NULL), _set_sf_dd(NULL),
       _set_cr_dd(NULL), _set_txp_ta(NULL), _set_path_dd(NULL), _set_bright_slider(NULL),
       _set_rot_dd(NULL), _set_screen_dd(NULL), _set_tz_ta(NULL), _set_clock_chk(NULL), _set_rtc_chk(NULL),
-      _set_time_hh(NULL), _set_time_mm(NULL), _set_time_ampm(NULL), _set_meta_chk(NULL), _set_autolock_chk(NULL),
+      _set_time_hh(NULL), _set_time_mm(NULL), _set_time_ampm(NULL),
+      _set_date_yyyy(NULL), _set_date_mm(NULL), _set_date_dd(NULL), _set_meta_chk(NULL), _set_autolock_chk(NULL),
       _set_wifi_en(NULL), _set_wifi_ssid(NULL), _set_wifi_pw(NULL),
       _set_wifi_dhcp(NULL), _set_wifi_dns_ovr(NULL), _set_wifi_ip(NULL), _set_wifi_mask(NULL),
       _set_wifi_gw(NULL), _set_wifi_dns(NULL), _set_wifi_status(NULL),
