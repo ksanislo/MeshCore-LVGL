@@ -12130,6 +12130,14 @@ void UITask::ota_update_cb(lv_event_t* e) {
   // SD on demand afterward. Runs on the UI core (required for the cache's LVGL-ref drop).
   uint32_t psram_before = ESP.getFreePsram();
   SdSvc::emojiBitmapCacheEvict();
+  // Free the big LVGL draw buffer NOW, before the backend spawns the OTA task. That task needs a
+  // contiguous 16KB internal-RAM stack; with the full draw buffer resident, internal RAM can be too
+  // fragmented to find one -> "task spawn failed". Shrinking first frees a large contiguous block. Hold
+  // it shrunk via _ota_arming until otaBusy() takes over (loop() restores it on timeout if the spawn
+  // never reports busy). The progress UI renders fine on the tiny buffer (it just flushes more chunks).
+  _instance->setLowMemDrawBuf(true);
+  _instance->_ota_arming = true;
+  _instance->_ota_arm_ms = millis();
   DBG_LOGF("[OTA] pre-flight: psram %u -> %u, largest-heap=%u\n",
            (unsigned)psram_before, (unsigned)ESP.getFreePsram(), (unsigned)ESP.getMaxAllocHeap());
   mproxy::postCommand(c);
@@ -13278,7 +13286,11 @@ void UITask::loop() {
   // RAM they need (they can't go to PSRAM here), and restore the full buffers once it ends. Both are
   // HTTPS; the release fetch waits ~150ms after raising its flag so this shrink lands before its TLS
   // handshake. Edge-driven + cheap; no-op when state is unchanged.
-  setLowMemDrawBuf(mproxy::otaBusy() || mproxy::releasesFetching() || EmojiPack::fetching());
+  // Hold the draw buffer shrunk from the instant Update is tapped (so the backend OTA task has a
+  // contiguous internal block to spawn into) until otaBusy() takes over -- with a timeout so a failed
+  // or ignored spawn restores the full buffer instead of leaving the UI permanently low-mem.
+  if (_ota_arming && (mproxy::otaBusy() || (uint32_t)(millis() - _ota_arm_ms) > 4000)) _ota_arming = false;
+  setLowMemDrawBuf(_ota_arming || mproxy::otaBusy() || mproxy::releasesFetching() || EmojiPack::fetching());
 
   // Fire any pending notification chime AFTER the wake + banner draw above, so the
   // slow first flush precedes the first note instead of stretching it. Subsequent

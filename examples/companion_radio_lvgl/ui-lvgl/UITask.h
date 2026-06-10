@@ -431,6 +431,8 @@ class UITask : public AbstractUITask {
   bool            _ota_was_fetching = false;  // edge-detect fetch completion -> force a dropdown rebuild
   uint32_t        _ota_last_check_ms = 0;     // millis of the last release check (0 = never; drives auto-recheck)
   uint8_t         _ota_fetch_tries = 0;       // bounded cold-fetch retries this screen visit (transient-failure self-heal)
+  bool            _ota_arming = false;        // Update tapped -> keep the draw buffer shrunk until the backend OTA task spawns (so its 16KB stack has a contiguous internal block)
+  uint32_t        _ota_arm_ms = 0;            // millis when armed; clears arming after a timeout if the spawn never reports busy
   lv_obj_t*       _set_emoji_btn = nullptr;   // "Download emoji" -> morphs to "Cancel" while downloading
   lv_obj_t*       _set_emoji_lbl = nullptr;   // its label
   lv_obj_t*       _set_emoji_status = nullptr;// emoji-pack status/progress line
