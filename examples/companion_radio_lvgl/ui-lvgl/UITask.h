@@ -448,6 +448,8 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_mqtt_user;       // user
   lv_obj_t*       _set_mqtt_pw;         // password (eye-toggle)
   lv_obj_t*       _set_mqtt_topic;      // topic prefix
+  lv_obj_t*       _set_mqtt_clientid;   // client id (empty = auto from pubkey)
+  lv_obj_t*       _set_mqtt_subscribe;  // inbound subscribe topic (empty = "<prefix>/rf")
   lv_obj_t*       _set_mqtt_tls;        // TLS checkbox
   lv_obj_t*       _set_mqtt_rx;         // publish RX checkbox
   lv_obj_t*       _set_mqtt_tx;         // publish TX checkbox
@@ -1352,7 +1354,8 @@ public:
       _update_body(NULL), _update_kb(NULL),
       _otafail_popup(NULL), _otafail_lbl(NULL),
       _set_mqtt_en(NULL), _set_mqtt_host(NULL), _set_mqtt_port(NULL), _set_mqtt_user(NULL), _set_mqtt_pw(NULL),
-      _set_mqtt_topic(NULL), _set_mqtt_tls(NULL), _set_mqtt_rx(NULL), _set_mqtt_tx(NULL), _set_mqtt_status(NULL),
+      _set_mqtt_topic(NULL), _set_mqtt_clientid(NULL), _set_mqtt_subscribe(NULL),
+      _set_mqtt_tls(NULL), _set_mqtt_rx(NULL), _set_mqtt_tx(NULL), _set_mqtt_status(NULL),
       _set_avatar_dd(NULL), _set_theme_dd(NULL), _set_mention_chk(NULL), _set_hashtag_chk(NULL), _set_chsender_chk(NULL), _set_history_chk(NULL), _set_notify_chk(NULL), _set_mutedef_chk(NULL), _set_kb(NULL),
       _set_active_ta(NULL),
       _set_launcher(NULL), _set_pane{}, _set_pane_body{}, _set_active_pane(NULL),

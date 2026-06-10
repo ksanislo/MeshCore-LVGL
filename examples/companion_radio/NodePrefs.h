@@ -112,4 +112,8 @@ struct NodePrefs {  // persisted to file
                                 // Applied at boot (restart to change). LVGL UI only.
   uint16_t touch_suppress_ms;   // trackball boards: swallow touch for N ms after a scroll (anti-thumb-tap);
                                 // 0 = off, capped at 1000. Default 250. LVGL UI only.
+  // MQTT advanced (tail-appended -- kept out of the mqtt_* block above to preserve the prefs byte
+  // layout). Both empty by default; the bridge then auto-derives them. Set either to override.
+  char     mqtt_client_id[24];  // MQTT client id; empty = auto (derived from our pubkey). {pubkey} ok.
+  char     mqtt_subscribe[80];  // inbound subscribe topic; empty = "<topic_prefix>/rf". {client_id}/{pubkey} ok.
 };

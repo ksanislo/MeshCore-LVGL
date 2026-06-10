@@ -5,9 +5,9 @@
 #include <string.h>
 #include "helpers/bridges/MqttBridge.h"   // pulls in CommonCLI's NodePrefs -- THIS TU ONLY
 
-// Private CommonCLI-NodePrefs used solely to feed the bridge. Zero-initialized so
-// the fields we don't expose (mqtt_client_id, mqtt_subscribe, bridge_delay) default
-// to empty/0 (auto client-id, default "<prefix>/rf" subscribe, no inject delay).
+// Private CommonCLI-NodePrefs used solely to feed the bridge. Zero-initialized; setConfig() fills the
+// exposed fields (incl. mqtt_client_id + mqtt_subscribe). The remaining bridge-only fields (e.g.
+// bridge_delay) stay 0. Empty client_id/subscribe => bridge auto-derives (pubkey id, "<prefix>/rf").
 static NodePrefs    s_prefs;
 static MqttBridge*  s_bridge = nullptr;
 
@@ -23,7 +23,8 @@ void init(mesh::PacketManager* mgr, mesh::RTCClock* rtc, const uint8_t* pubkey, 
 
 void setConfig(uint8_t mqtt_enabled, const char* host, uint16_t port,
                const char* user, const char* pass, const char* topic_prefix,
-               uint8_t tls, uint8_t publish_rx, uint8_t publish_tx) {
+               uint8_t tls, uint8_t publish_rx, uint8_t publish_tx,
+               const char* client_id, const char* subscribe) {
   s_prefs.mqtt_enabled = mqtt_enabled;
   s_prefs.mqtt_port    = port;
   s_prefs.mqtt_tls     = tls;
@@ -34,6 +35,8 @@ void setConfig(uint8_t mqtt_enabled, const char* host, uint16_t port,
   cp(s_prefs.mqtt_user,         sizeof(s_prefs.mqtt_user),         user);
   cp(s_prefs.mqtt_password,     sizeof(s_prefs.mqtt_password),     pass);
   cp(s_prefs.mqtt_topic_prefix, sizeof(s_prefs.mqtt_topic_prefix), topic_prefix);
+  cp(s_prefs.mqtt_client_id,    sizeof(s_prefs.mqtt_client_id),    client_id);   // empty -> bridge auto-derives from pubkey
+  cp(s_prefs.mqtt_subscribe,    sizeof(s_prefs.mqtt_subscribe),    subscribe);   // empty -> bridge uses "<prefix>/rf"
 }
 
 void begin() {

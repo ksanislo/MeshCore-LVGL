@@ -25,7 +25,8 @@ void init(mesh::PacketManager* mgr, mesh::RTCClock* rtc, const uint8_t* pubkey, 
 // Push the companion's current settings into the bridge's private config.
 void setConfig(uint8_t mqtt_enabled, const char* host, uint16_t port,
                const char* user, const char* pass, const char* topic_prefix,
-               uint8_t tls, uint8_t publish_rx, uint8_t publish_tx);
+               uint8_t tls, uint8_t publish_rx, uint8_t publish_tx,
+               const char* client_id, const char* subscribe);
 
 void begin();                 // (re)start per current config (end() first if running)
 void end();

@@ -9512,6 +9512,18 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
     lv_textarea_set_max_length(_set_mqtt_topic, 47);
     lv_obj_set_width(_set_mqtt_topic, LV_PCT(100));
     lv_obj_add_event_cb(_set_mqtt_topic, net_ta_event_cb, LV_EVENT_ALL, NULL); }
+  { lv_obj_t* f = makeField(body, "Client ID (blank = auto)");
+    _set_mqtt_clientid = makeSelTextarea(f);
+    lv_textarea_set_one_line(_set_mqtt_clientid, true); lv_obj_add_event_cb(_set_mqtt_clientid, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_textarea_set_max_length(_set_mqtt_clientid, 23);   // mqtt_client_id[24]
+    lv_obj_set_width(_set_mqtt_clientid, LV_PCT(100));
+    lv_obj_add_event_cb(_set_mqtt_clientid, net_ta_event_cb, LV_EVENT_ALL, NULL); }
+  { lv_obj_t* f = makeField(body, "Subscribe topic (blank = <prefix>/rf)");
+    _set_mqtt_subscribe = makeSelTextarea(f);
+    lv_textarea_set_one_line(_set_mqtt_subscribe, true); lv_obj_add_event_cb(_set_mqtt_subscribe, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_textarea_set_max_length(_set_mqtt_subscribe, 79);  // mqtt_subscribe[80]
+    lv_obj_set_width(_set_mqtt_subscribe, LV_PCT(100));
+    lv_obj_add_event_cb(_set_mqtt_subscribe, net_ta_event_cb, LV_EVENT_ALL, NULL); }
   _set_mqtt_tls = lv_checkbox_create(body);
   lv_checkbox_set_text(_set_mqtt_tls, "TLS (insecure - no cert check)");
   lv_obj_set_style_text_color(_set_mqtt_tls, lv_color_hex(FG_HEX), 0);
@@ -9881,6 +9893,8 @@ void UITask::populateSettings() {
   if (_set_mqtt_user)  lv_textarea_set_text(_set_mqtt_user, _node_prefs->mqtt_user);
   if (_set_mqtt_pw)    lv_textarea_set_text(_set_mqtt_pw, _node_prefs->mqtt_password);
   if (_set_mqtt_topic) lv_textarea_set_text(_set_mqtt_topic, _node_prefs->mqtt_topic_prefix);
+  if (_set_mqtt_clientid)  lv_textarea_set_text(_set_mqtt_clientid, _node_prefs->mqtt_client_id);
+  if (_set_mqtt_subscribe) lv_textarea_set_text(_set_mqtt_subscribe, _node_prefs->mqtt_subscribe);
   setSw(_set_mqtt_tls, _node_prefs->mqtt_tls);
   setSw(_set_mqtt_rx,  _node_prefs->mqtt_publish_rx);
   setSw(_set_mqtt_tx,  _node_prefs->mqtt_publish_tx);
@@ -12233,6 +12247,10 @@ void UITask::mqtt_save_cb(lv_event_t* e) {
   p->mqtt_password[sizeof(p->mqtt_password) - 1] = 0;
   strncpy(p->mqtt_topic_prefix, lv_textarea_get_text(_instance->_set_mqtt_topic), sizeof(p->mqtt_topic_prefix) - 1);
   p->mqtt_topic_prefix[sizeof(p->mqtt_topic_prefix) - 1] = 0;
+  strncpy(p->mqtt_client_id, lv_textarea_get_text(_instance->_set_mqtt_clientid), sizeof(p->mqtt_client_id) - 1);
+  p->mqtt_client_id[sizeof(p->mqtt_client_id) - 1] = 0;
+  strncpy(p->mqtt_subscribe, lv_textarea_get_text(_instance->_set_mqtt_subscribe), sizeof(p->mqtt_subscribe) - 1);
+  p->mqtt_subscribe[sizeof(p->mqtt_subscribe) - 1] = 0;
   p->mqtt_tls        = lv_obj_has_state(_instance->_set_mqtt_tls, LV_STATE_CHECKED) ? 1 : 0;
   p->mqtt_publish_rx = lv_obj_has_state(_instance->_set_mqtt_rx, LV_STATE_CHECKED) ? 1 : 0;
   p->mqtt_publish_tx = lv_obj_has_state(_instance->_set_mqtt_tx, LV_STATE_CHECKED) ? 1 : 0;

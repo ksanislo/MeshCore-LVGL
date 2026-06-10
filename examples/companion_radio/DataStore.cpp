@@ -290,6 +290,8 @@ static void applyAppendedPrefsDefaults(NodePrefs& _prefs) {
   _prefs.trackball_invert = 0;                                                           // 199 (normal direction)
   _prefs.font_scale = 0;                                                                 // 200 (auto by screen size)
   _prefs.touch_suppress_ms = 250;                                                        // 201 (default 250ms; 0 = off)
+  _prefs.mqtt_client_id[0] = 0;                                                           // 202 (empty -> auto from pubkey)
+  _prefs.mqtt_subscribe[0] = 0;                                                           // 203 (empty -> "<prefix>/rf")
 }
 
 void DataStore::loadPrefs(NodePrefs& prefs, double& node_lat, double& node_lon) {
@@ -399,6 +401,8 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)&_prefs.trackball_invert, sizeof(_prefs.trackball_invert));           // 199
     file.read((uint8_t *)&_prefs.font_scale, sizeof(_prefs.font_scale));                       // 200
     file.read((uint8_t *)&_prefs.touch_suppress_ms, sizeof(_prefs.touch_suppress_ms));         // 201
+    file.read((uint8_t *)_prefs.mqtt_client_id, sizeof(_prefs.mqtt_client_id));                // 202
+    file.read((uint8_t *)_prefs.mqtt_subscribe, sizeof(_prefs.mqtt_subscribe));                // 203
 
     file.close();
   }
@@ -496,6 +500,8 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)&_prefs.trackball_invert, sizeof(_prefs.trackball_invert));          // 199
     file.write((uint8_t *)&_prefs.font_scale, sizeof(_prefs.font_scale));                      // 200
     file.write((uint8_t *)&_prefs.touch_suppress_ms, sizeof(_prefs.touch_suppress_ms));        // 201
+    file.write((uint8_t *)_prefs.mqtt_client_id, sizeof(_prefs.mqtt_client_id));               // 202
+    file.write((uint8_t *)_prefs.mqtt_subscribe, sizeof(_prefs.mqtt_subscribe));               // 203
 
     file.close();
     commitTmp(_fs, "/new_prefs.tmp", "/new_prefs");

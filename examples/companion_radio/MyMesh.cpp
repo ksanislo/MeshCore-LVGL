@@ -350,7 +350,8 @@ void MyMesh::applyMqttConfig() {
   const NodePrefs* p = getNodePrefs();
   cmqtt::setConfig(p->mqtt_enabled, p->mqtt_host, p->mqtt_port, p->mqtt_user,
                    p->mqtt_password, p->mqtt_topic_prefix, p->mqtt_tls,
-                   p->mqtt_publish_rx, p->mqtt_publish_tx);
+                   p->mqtt_publish_rx, p->mqtt_publish_tx,
+                   p->mqtt_client_id, p->mqtt_subscribe);
   cmqtt::begin();
 }
 void MyMesh::getMqttStatus(char* out, size_t cap) { cmqtt::status(out, cap); }
