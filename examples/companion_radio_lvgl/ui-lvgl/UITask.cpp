@@ -9222,12 +9222,12 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   // (The owner hero above is the Profile entry -> pane 0, so no separate row.)
   makeCategoryRow(_set_launcher, LV_SYMBOL_LIST,  "About",           "Status, version, diagnostics",         CAT_ABOUT);
   makeCategoryRow(_set_launcher, LV_SYMBOL_DOWNLOAD, "Update",        "Firmware & emoji packs",               CAT_UPDATE);
-  makeCategoryRow(_set_launcher, LV_SYMBOL_WIFI,  "Radio & Routing", "Frequency, power, presets, mesh",      CAT_RADIO);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_WIFI,  "Radio & Routing", "LoRa on/off, frequency, presets, mesh", CAT_RADIO);
   makeCategoryRow(_set_launcher, LV_SYMBOL_GPS,   "Telemetry",       "Who may request our telemetry",        CAT_TELEMETRY);
   makeCategoryRow(_set_launcher, LV_SYMBOL_BELL,  "Notifications",   "New-message alerts & sound",           CAT_NOTIFY);
   makeCategoryRow(_set_launcher, LV_SYMBOL_IMAGE, "Display",         "Brightness, rotation, theme, avatars", CAT_DISPLAY);
   makeCategoryRow(_set_launcher, LV_SYMBOL_SETTINGS, "Hardware",     "GPS, clock, battery monitor",          CAT_HARDWARE);
-  makeCategoryRow(_set_launcher, LV_SYMBOL_POWER, "Power & Lock",    "LoRa radio, PIN lock, reboot",         CAT_POWER);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_POWER, "Power & Lock",    "PIN lock, auto-lock, reboot",          CAT_POWER);
   makeCategoryRow(_set_launcher, LV_SYMBOL_WIFI,  "WiFi",            "Connect to a WiFi network",            CAT_WIFI);
   makeCategoryRow(_set_launcher, LV_SYMBOL_UPLOAD,"MQTT",            "Virtual-radio bridge to a broker",     CAT_MQTT);
 
@@ -9247,6 +9247,11 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   buildProfileScreen();
 
   body = _set_pane_body[CAT_RADIO];   // Radio & Routing
+  // Master LoRa on/off -- the radio's power switch sits at the top of its own page.
+  // (radio_off persists; checked = radio on. See set_radio_sw_cb / populateSettings.)
+  { lv_obj_t* frd = makeField(body, "LoRa radio");
+    _set_radio_sw = lv_switch_create(frd);
+    lv_obj_add_event_cb(_set_radio_sw, set_radio_sw_cb, LV_EVENT_VALUE_CHANGED, NULL); }
   // ===== Radio (edit fields, then a single Apply) =====
   // Header row: "Radio" title on the left, a "Preset" button on the right.
   lv_obj_t* rhdr = lv_obj_create(body);
@@ -9379,10 +9384,6 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   body = _set_pane_body[CAT_POWER];   // Power & Lock
   // ===== Power & Lock =====
   addSettingsSection(body, "Power & Lock");
-  lv_obj_t* frd = makeField(body, "LoRa radio");
-  _set_radio_sw = lv_switch_create(frd);
-  lv_obj_add_event_cb(_set_radio_sw, set_radio_sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
-
   lv_obj_t* setpinb = lv_btn_create(body);
   lv_obj_set_width(setpinb, LV_PCT(100));
   lv_obj_add_event_cb(setpinb, set_pin_btn_cb, LV_EVENT_CLICKED, NULL);
