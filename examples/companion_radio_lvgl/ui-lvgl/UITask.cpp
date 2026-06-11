@@ -9458,30 +9458,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_add_event_cb(_set_wifi_dns_ovr, wifi_apply_cb, LV_EVENT_VALUE_CHANGED, NULL);
   _set_wifi_dns = ipField("DNS");
 
-  // NTP clock sync (uses the WiFi connection; SNTP is free with the WiFi stack).
-  // Lives on the Hardware page (with the rest of the clock controls), but is built
-  // here so its WiFi-dependent status reuses refreshNetStatus().
-  body = _set_pane_body[CAT_HARDWARE];
-  addSettingsSection(body, "Clock (NTP)");
-  _set_ntp_en = lv_checkbox_create(body);
-  lv_checkbox_set_text(_set_ntp_en, "Sync clock from NTP");
-  lv_obj_set_style_text_color(_set_ntp_en, lv_color_hex(FG_HEX), 0);
-  lv_obj_add_event_cb(_set_ntp_en, wifi_apply_cb, LV_EVENT_VALUE_CHANGED, NULL);
-  { lv_obj_t* f = makeField(body, "NTP server");
-    _set_ntp_server = makeSelTextarea(f);
-    lv_textarea_set_one_line(_set_ntp_server, true); lv_obj_add_event_cb(_set_ntp_server, UITask::ta_done_cb, LV_EVENT_READY, NULL);
-    lv_textarea_set_placeholder_text(_set_ntp_server, "pool.ntp.org");
-    lv_textarea_set_max_length(_set_ntp_server, 47);
-    lv_obj_set_width(_set_ntp_server, LV_PCT(100));
-    lv_obj_add_event_cb(_set_ntp_server, wifi_ta_event_cb, LV_EVENT_ALL, NULL); }
-  { lv_obj_t* sb = lv_btn_create(body); lv_obj_set_width(sb, LV_PCT(100));
-    lv_obj_add_event_cb(sb, ntp_sync_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t* l = lv_label_create(sb); lv_label_set_text(l, LV_SYMBOL_REFRESH " Sync clock now"); lv_obj_center(l); }
-  _set_ntp_status = lv_label_create(body);
-  lv_label_set_long_mode(_set_ntp_status, LV_LABEL_LONG_WRAP);
-  lv_obj_set_width(_set_ntp_status, LV_PCT(100));
-  lv_obj_set_style_text_color(_set_ntp_status, lv_color_hex(DIM_HEX), 0);
-  lv_label_set_text(_set_ntp_status, "");
+  // (NTP clock sync is built into the Time section on the Hardware page -- see below.)
 
   // Radio presets: fetch the official region list over WiFi -> internal flash.
   // Lives on the Radio & Routing page; built here so the fetch status reuses
@@ -9648,6 +9625,28 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_checkbox_set_text(_set_rtc_chk, "Use hardware RTC");
   lv_obj_set_style_text_color(_set_rtc_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_rtc_chk, set_rtc_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+  // NTP clock sync (uses the WiFi connection; SNTP is free with the WiFi stack). Part of the
+  // Time section, alongside the other clock sources; its status line reuses refreshNetStatus().
+  _set_ntp_en = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_ntp_en, "Sync clock from NTP");
+  lv_obj_set_style_text_color(_set_ntp_en, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_ntp_en, wifi_apply_cb, LV_EVENT_VALUE_CHANGED, NULL);
+  { lv_obj_t* f = makeField(body, "NTP server");
+    _set_ntp_server = makeSelTextarea(f);
+    lv_textarea_set_one_line(_set_ntp_server, true); lv_obj_add_event_cb(_set_ntp_server, UITask::ta_done_cb, LV_EVENT_READY, NULL);
+    lv_textarea_set_placeholder_text(_set_ntp_server, "pool.ntp.org");
+    lv_textarea_set_max_length(_set_ntp_server, 47);
+    lv_obj_set_width(_set_ntp_server, LV_PCT(100));
+    lv_obj_add_event_cb(_set_ntp_server, wifi_ta_event_cb, LV_EVENT_ALL, NULL); }
+  { lv_obj_t* sb = lv_btn_create(body); lv_obj_set_width(sb, LV_PCT(100));
+    lv_obj_add_event_cb(sb, ntp_sync_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* l = lv_label_create(sb); lv_label_set_text(l, LV_SYMBOL_REFRESH " Sync clock now"); lv_obj_center(l); }
+  _set_ntp_status = lv_label_create(body);
+  lv_label_set_long_mode(_set_ntp_status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(_set_ntp_status, LV_PCT(100));
+  lv_obj_set_style_text_color(_set_ntp_status, lv_color_hex(DIM_HEX), 0);
+  lv_label_set_text(_set_ntp_status, "");
 
   // Manual set-time: HH : MM (local). Editing either box sets the clock to HH:MM:00; an
   // AM/PM dropdown shows in 12h mode. The boxes live-tick (refreshTimeFields) except the
