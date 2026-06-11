@@ -9391,6 +9391,13 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_label_set_text(spl, LV_SYMBOL_KEYBOARD " Set lock PIN");
   lv_obj_center(spl);
 
+  // Screen sleep timeout -- lives with the lock settings since auto-lock keys off sleep.
+  lv_obj_t* fto = makeField(body, "Screen timeout");
+  _set_screen_dd = lv_dropdown_create(fto);
+  lv_dropdown_set_options(_set_screen_dd, "Never\n15 s\n30 s\n1 min\n2 min\n5 min");
+  lv_obj_set_width(_set_screen_dd, LV_PCT(100));
+  lv_obj_add_event_cb(_set_screen_dd, set_screen_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
   _set_autolock_chk = lv_checkbox_create(body);
   lv_checkbox_set_text(_set_autolock_chk, "Auto-lock on sleep");
   lv_obj_set_style_text_color(_set_autolock_chk, lv_color_hex(FG_HEX), 0);
@@ -9613,12 +9620,6 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_dropdown_set_options(_set_font_dd, "Auto\nSmall\nMedium\nLarge");
   lv_obj_set_width(_set_font_dd, LV_PCT(100));
   lv_obj_add_event_cb(_set_font_dd, set_font_cb, LV_EVENT_VALUE_CHANGED, NULL);
-
-  lv_obj_t* fto = makeField(body, "Screen timeout");
-  _set_screen_dd = lv_dropdown_create(fto);
-  lv_dropdown_set_options(_set_screen_dd, "Never\n15 s\n30 s\n1 min\n2 min\n5 min");
-  lv_obj_set_width(_set_screen_dd, LV_PCT(100));
-  lv_obj_add_event_cb(_set_screen_dd, set_screen_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
   // Per-message diagnostics in chat bubbles (incoming flood hops/bytes, and the ack count
   // once that lands). Off by default to keep bubbles clean; this reveals them.
