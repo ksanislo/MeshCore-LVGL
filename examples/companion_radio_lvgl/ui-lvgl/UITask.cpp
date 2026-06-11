@@ -9598,13 +9598,6 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_width(_set_font_dd, LV_PCT(100));
   lv_obj_add_event_cb(_set_font_dd, set_font_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-  // Per-message diagnostics in chat bubbles (incoming flood hops/bytes, and the ack count
-  // once that lands). Off by default to keep bubbles clean; this reveals them.
-  _set_meta_chk = lv_checkbox_create(body);
-  lv_checkbox_set_text(_set_meta_chk, "Show metadata in chat");
-  lv_obj_set_style_text_color(_set_meta_chk, lv_color_hex(FG_HEX), 0);
-  lv_obj_add_event_cb(_set_meta_chk, set_meta_cb, LV_EVENT_VALUE_CHANGED, NULL);
-
   // Clock controls live on the Hardware page (next to NTP); built here within the
   // Display pass but parented to the Hardware pane.
   body = _set_pane_body[CAT_HARDWARE];
@@ -9761,12 +9754,13 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_chsender_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_chsender_chk, set_chsender_colors_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-#ifdef HAS_SD_CARD
-  _set_history_chk = lv_checkbox_create(body);
-  lv_checkbox_set_text(_set_history_chk, "Save chat history");
-  lv_obj_set_style_text_color(_set_history_chk, lv_color_hex(FG_HEX), 0);
-  lv_obj_add_event_cb(_set_history_chk, set_history_cb, LV_EVENT_VALUE_CHANGED, NULL);
-#endif
+  // Per-message diagnostics in chat bubbles (incoming flood hops/bytes, and the ack count
+  // once that lands). Off by default to keep bubbles clean; this reveals them. Grouped with
+  // the other chat-rendering toggles.
+  _set_meta_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_meta_chk, "Show metadata in chat");
+  lv_obj_set_style_text_color(_set_meta_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_meta_chk, set_meta_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
   body = _set_pane_body[CAT_HARDWARE];   // battery monitor lives on the Hardware page
 
@@ -9782,6 +9776,16 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
     lv_obj_add_event_cb(_set_batt_type_dd, set_batt_type_cb, LV_EVENT_VALUE_CHANGED, NULL);
     _set_batt_cap_ta = makeNumberField(body, "Capacity (mAh)", set_radio_ta_event_cb);
   }
+
+#ifdef HAS_SD_CARD
+  // Chat-history persistence is an SD-card storage concern, so it lives on Hardware
+  // (not under Display/Appearance with the rendering toggles).
+  addSettingsSection(body, "Storage");
+  _set_history_chk = lv_checkbox_create(body);
+  lv_checkbox_set_text(_set_history_chk, "Save chat history");
+  lv_obj_set_style_text_color(_set_history_chk, lv_color_hex(FG_HEX), 0);
+  lv_obj_add_event_cb(_set_history_chk, set_history_cb, LV_EVENT_VALUE_CHANGED, NULL);
+#endif
 
   body = _set_pane_body[CAT_POWER];   // reboot belongs under Power & Lock
   // Reboot button -- handy on battery, and a clean software restart (esp_restart)
