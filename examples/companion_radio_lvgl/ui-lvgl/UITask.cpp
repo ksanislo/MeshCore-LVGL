@@ -9776,6 +9776,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   // battery ADC (T-Deck) has a fixed pack (1S Li-ion = the default curve) and is voltage-only, so the
   // sensor selector, chemistry, and capacity are all moot -- the gauge just runs with the defaults.
   if (!board_has_builtin_battery()) {
+    addSettingsSection(body, "Battery");   // separate the monitor from the Time controls above
     _set_pwrmon_dd = makeDropdownField(body, "Power monitor", "None\nINA219");
     lv_obj_add_event_cb(_set_pwrmon_dd, set_pwrmon_cb, LV_EVENT_VALUE_CHANGED, NULL);
     _set_batt_type_dd = makeDropdownField(body, "Battery type", "Li-ion 1S\nLi-ion 2S\nLiFePO4 1S");
