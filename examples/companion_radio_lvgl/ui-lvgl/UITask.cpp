@@ -8970,9 +8970,10 @@ void UITask::showSettingsCategory(int cat) {
   for (int i = 0; i < CAT_COUNT; i++) if (_set_pane[i]) lv_obj_add_flag(_set_pane[i], LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(_set_pane[cat], LV_OBJ_FLAG_HIDDEN);
   _set_active_pane = _set_pane_body[cat];
-  if (cat == CAT_WIFI || cat == CAT_MQTT) refreshNetStatus();   // freshen the status line
-  if (cat == CAT_TELEMETRY) refreshGpsStatus();                 // GPS debug line
-  if (cat == CAT_DISPLAY) refreshTimeFields();                  // seed the set-time boxes
+  // NTP status lives on Hardware, presets on Radio -- both filled by refreshNetStatus().
+  if (cat == CAT_WIFI || cat == CAT_MQTT || cat == CAT_HARDWARE || cat == CAT_RADIO)
+    refreshNetStatus();                                          // freshen the status line
+  if (cat == CAT_HARDWARE) { refreshGpsStatus(); refreshTimeFields(); }  // GPS line + set-time boxes
   if (_set_active_pane) lv_obj_scroll_to_y(_set_active_pane, 0, LV_ANIM_OFF);
   if (_set_kb) lv_obj_add_flag(_set_kb, LV_OBJ_FLAG_HIDDEN);
 }
@@ -9059,6 +9060,16 @@ void UITask::buildProfileScreen() {
   makeHeroCard(_profile_body, &_prof_avatar, &_prof_avatar_lbl, &_prof_name, &_prof_key, nullptr, &_prof_hero);
   makeHeroCopyable(_prof_hero);   // long-press -> Copy menu (target filled in the profile refresh)
   _profile_map.create(_profile_body, _screen_h <= 260 ? 140 : 200);   // our location preview
+
+  // Share button below the map -- mirrors the contact-page Share, but for OUR identity. Opens the same
+  // owner Share menu as the kebab (QR + advert zero-hop/flood). The kebab entry stays; this just makes
+  // the common action (re-advert yourself onto neighbours' lists) discoverable at a glance.
+  { lv_obj_t* shr = lv_btn_create(_profile_body);
+    lv_obj_set_width(shr, LV_PCT(100));
+    lv_obj_add_event_cb(shr, profile_share_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* sl = lv_label_create(shr);
+    lv_label_set_text(sl, LV_SYMBOL_UPLOAD " Share");
+    lv_obj_center(sl); }
 
   // ===== Public Info (owner-only edit options) =====
   addSettingsSection(_profile_body, "Public Info");
@@ -9212,9 +9223,10 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   makeCategoryRow(_set_launcher, LV_SYMBOL_LIST,  "About",           "Status, version, diagnostics",         CAT_ABOUT);
   makeCategoryRow(_set_launcher, LV_SYMBOL_DOWNLOAD, "Update",        "Firmware & emoji packs",               CAT_UPDATE);
   makeCategoryRow(_set_launcher, LV_SYMBOL_WIFI,  "Radio & Routing", "Frequency, power, presets, mesh",      CAT_RADIO);
-  makeCategoryRow(_set_launcher, LV_SYMBOL_GPS,   "Telemetry & GPS", "Telemetry sharing, GPS module",        CAT_TELEMETRY);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_GPS,   "Telemetry",       "Who may request our telemetry",        CAT_TELEMETRY);
   makeCategoryRow(_set_launcher, LV_SYMBOL_BELL,  "Notifications",   "New-message alerts & sound",           CAT_NOTIFY);
-  makeCategoryRow(_set_launcher, LV_SYMBOL_IMAGE, "Display & Time",  "Brightness, rotation, clock, avatars", CAT_DISPLAY);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_IMAGE, "Display",         "Brightness, rotation, theme, avatars", CAT_DISPLAY);
+  makeCategoryRow(_set_launcher, LV_SYMBOL_SETTINGS, "Hardware",     "GPS, clock, battery monitor",          CAT_HARDWARE);
   makeCategoryRow(_set_launcher, LV_SYMBOL_POWER, "Power & Lock",    "LoRa radio, PIN lock, reboot",         CAT_POWER);
   makeCategoryRow(_set_launcher, LV_SYMBOL_WIFI,  "WiFi",            "Connect to a WiFi network",            CAT_WIFI);
   makeCategoryRow(_set_launcher, LV_SYMBOL_UPLOAD,"MQTT",            "Virtual-radio bridge to a broker",     CAT_MQTT);
@@ -9222,9 +9234,10 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   // Profile is a full-screen detail page (built below), not an in-tab pane; the
   // launcher hero opens it. The rest are in-tab category panes.
   makeSettingsPane(CAT_RADIO,     "Radio & Routing");
-  makeSettingsPane(CAT_TELEMETRY, "Telemetry & GPS");
+  makeSettingsPane(CAT_TELEMETRY, "Telemetry");
   makeSettingsPane(CAT_NOTIFY,    "Notifications");
-  makeSettingsPane(CAT_DISPLAY,   "Display & Time");
+  makeSettingsPane(CAT_DISPLAY,   "Display");
+  makeSettingsPane(CAT_HARDWARE,  "Hardware");
   makeSettingsPane(CAT_POWER,     "Power & Lock");
   makeSettingsPane(CAT_WIFI,      "WiFi");
   makeSettingsPane(CAT_MQTT,      "MQTT");
@@ -9328,7 +9341,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
     lv_obj_center(sl); }
 
 #if ENV_INCLUDE_GPS
-  body = _set_pane_body[CAT_TELEMETRY];   // Telemetry & GPS
+  body = _set_pane_body[CAT_HARDWARE];   // GPS lives on the Hardware page
   // ===== GPS (optional module on the rear UART plug) =====
   addSettingsSection(body, "GPS");
   _set_gps_chk = lv_checkbox_create(body);
@@ -9438,6 +9451,9 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   _set_wifi_dns = ipField("DNS");
 
   // NTP clock sync (uses the WiFi connection; SNTP is free with the WiFi stack).
+  // Lives on the Hardware page (with the rest of the clock controls), but is built
+  // here so its WiFi-dependent status reuses refreshNetStatus().
+  body = _set_pane_body[CAT_HARDWARE];
   addSettingsSection(body, "Clock (NTP)");
   _set_ntp_en = lv_checkbox_create(body);
   lv_checkbox_set_text(_set_ntp_en, "Sync clock from NTP");
@@ -9460,6 +9476,9 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_label_set_text(_set_ntp_status, "");
 
   // Radio presets: fetch the official region list over WiFi -> internal flash.
+  // Lives on the Radio & Routing page; built here so the fetch status reuses
+  // refreshNetStatus() (it needs the WiFi link).
+  body = _set_pane_body[CAT_RADIO];
   addSettingsSection(body, "Radio presets");
   { lv_obj_t* sb = lv_btn_create(body); lv_obj_set_width(sb, LV_PCT(100));
     lv_obj_add_event_cb(sb, presets_update_cb, LV_EVENT_CLICKED, NULL);
@@ -9607,6 +9626,9 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_style_text_color(_set_meta_chk, lv_color_hex(FG_HEX), 0);
   lv_obj_add_event_cb(_set_meta_chk, set_meta_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  // Clock controls live on the Hardware page (next to NTP); built here within the
+  // Display pass but parented to the Hardware pane.
+  body = _set_pane_body[CAT_HARDWARE];
   addSettingsSection(body, "Time");
   // Local-time offset for the header clock. Entered in hours (decimals OK for
   // half/quarter-hour zones, e.g. 5.5, 5.75, -3.5); stored as minutes.
@@ -9701,6 +9723,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
     makeDateBox(&_set_date_dd, 2, 46);
   }
 
+  body = _set_pane_body[CAT_DISPLAY];   // back to Display for Appearance
   addSettingsSection(body, "Appearance");
   // Contact avatar color scheme: our curated palette, or iOS-app parity (same
   // color as the phone app for a given name). See nameColor() in ui_theme.h.
@@ -9744,7 +9767,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_add_event_cb(_set_history_chk, set_history_cb, LV_EVENT_VALUE_CHANGED, NULL);
 #endif
 
-  body = _set_pane_body[CAT_POWER];   // reboot belongs under Power & Lock
+  body = _set_pane_body[CAT_HARDWARE];   // battery monitor lives on the Hardware page
 
   // ----- Battery / power monitor -----------------
   // These settings are only shown when the board has NO built-in gauge. A board with a built-in
@@ -9758,6 +9781,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
     _set_batt_cap_ta = makeNumberField(body, "Capacity (mAh)", set_radio_ta_event_cb);
   }
 
+  body = _set_pane_body[CAT_POWER];   // reboot belongs under Power & Lock
   // Reboot button -- handy on battery, and a clean software restart (esp_restart)
   // vs the hardware RESET line.
   lv_obj_t* reboot = lv_btn_create(body);
@@ -13192,13 +13216,19 @@ void UITask::loop() {
         }
       }
 #endif
-      // Live-refresh the Network status lines (1 Hz) while a Network pane is open.
+      // Live-refresh the WiFi-dependent status lines (1 Hz). refreshNetStatus()
+      // updates the WiFi/MQTT lines plus the NTP status (now on Hardware) and the
+      // preset-fetch status (now on Radio), so tick it while any of those panes show.
       if (_set_active_pane == _set_pane_body[CAT_WIFI] ||
-          _set_active_pane == _set_pane_body[CAT_MQTT]) {
+          _set_active_pane == _set_pane_body[CAT_MQTT] ||
+          _set_active_pane == _set_pane_body[CAT_HARDWARE] ||
+          _set_active_pane == _set_pane_body[CAT_RADIO]) {
         refreshNetStatus();
       }
-      if (_set_active_pane == _set_pane_body[CAT_TELEMETRY]) refreshGpsStatus();
-      if (_set_active_pane == _set_pane_body[CAT_DISPLAY]) refreshTimeFields();  // tick the set-time boxes
+      if (_set_active_pane == _set_pane_body[CAT_HARDWARE]) {
+        refreshGpsStatus();
+        refreshTimeFields();  // tick the set-time boxes
+      }
 #if ENV_INCLUDE_GPS
       if (_profile_screen && lv_scr_act() == _profile_screen) refreshProfilePosition();  // live pos while profile open
 #endif

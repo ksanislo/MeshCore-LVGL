@@ -470,7 +470,7 @@ class UITask : public AbstractUITask {
   // is a sentinel launcher row that opens Node Info instead of an in-tab pane.
   enum SettingsCat {
     CAT_PROFILE = 0, CAT_RADIO, CAT_TELEMETRY, CAT_NOTIFY,
-    CAT_DISPLAY, CAT_POWER, CAT_WIFI, CAT_MQTT, CAT_COUNT,
+    CAT_DISPLAY, CAT_POWER, CAT_WIFI, CAT_MQTT, CAT_HARDWARE, CAT_COUNT,
     CAT_ABOUT = 100,
     CAT_UPDATE = 101,   // standalone "Update" screen (firmware + emoji packs); not a pane
   };
