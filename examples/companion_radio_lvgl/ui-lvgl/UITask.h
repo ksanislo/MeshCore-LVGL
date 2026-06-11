@@ -384,6 +384,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_bright_slider;
   lv_obj_t*       _set_scroll_slider = nullptr;  // trackball "Scroll speed" (created only on trackball boards)
   lv_obj_t*       _set_scroll_inv_chk = nullptr; // trackball "Reverse scroll direction" (trackball boards only)
+  lv_obj_t*       _set_sel_inv_chk = nullptr;    // trackball "Reverse selection direction" (trackball boards only)
   lv_obj_t*       _set_touchlock_slider = nullptr; // trackball "Scroll touch-lock" ms (trackball boards only)
   lv_obj_t*       _set_rot_dd;
   lv_obj_t*       _set_font_dd = nullptr;   // UI "Font size" tier dropdown (Auto/Small/Medium/Large)
@@ -1020,7 +1021,8 @@ private:
   static void set_pathmode_cb(lv_event_t* e);
   static void set_bright_cb(lv_event_t* e);
   static void set_scrollspeed_cb(lv_event_t* e);   // trackball scroll-speed slider (T-Deck)
-  static void set_scrollinvert_cb(lv_event_t* e);  // trackball reverse-direction checkbox (T-Deck)
+  static void set_scrollinvert_cb(lv_event_t* e);  // trackball reverse-scroll checkbox (T-Deck)
+  static void set_selinvert_cb(lv_event_t* e);     // trackball reverse-selection checkbox (T-Deck)
   static void set_touchlock_cb(lv_event_t* e);     // trackball scroll touch-lock slider (T-Deck)
   static void set_rot_cb(lv_event_t* e);
   static void set_font_cb(lv_event_t* e);   // UI font-size tier dropdown (restart to apply)

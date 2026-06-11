@@ -116,4 +116,6 @@ struct NodePrefs {  // persisted to file
   // layout). Both empty by default; the bridge then auto-derives them. Set either to override.
   char     mqtt_client_id[24];  // MQTT client id; empty = auto (derived from our pubkey). {pubkey} ok.
   char     mqtt_subscribe[80];  // inbound subscribe topic; empty = "<topic_prefix>/rf". {client_id}/{pubkey} ok.
+  uint8_t  trackball_sel_invert;// 1 = reverse nav-ball focus/selection direction; 0 = normal (default).
+                                // Independent of trackball_invert (scroll). Trackball boards only.
 };

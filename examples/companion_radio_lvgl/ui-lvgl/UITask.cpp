@@ -2644,7 +2644,7 @@ void UITask::pollTrackball() {
   if (selecting) {
     if (shortClick) _tb_click_pending = true;
     if (dy) {
-      int d = (_node_prefs && _node_prefs->trackball_invert) ? -dy : dy;  // reverse-scroll also reverses focus
+      int d = (_node_prefs && _node_prefs->trackball_sel_invert) ? -dy : dy;  // "Reverse selection direction" setting
       _tb_v_detent += d;
       while (_tb_v_detent >=  TB_FOCUS_DETENT) { _tb_focus_accum++; _tb_v_detent -= TB_FOCUS_DETENT; }
       while (_tb_v_detent <= -TB_FOCUS_DETENT) { _tb_focus_accum--; _tb_v_detent += TB_FOCUS_DETENT; }
@@ -9367,6 +9367,45 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_label_set_text(_set_gps_status, "");
 #endif
 
+  // ===== Input (nav ball / scroll wheel tuning -- T-Deck only) =====
+  // Only on boards with a trackball; CrowPanel is touch-only and shows nothing here.
+  if (board_has_trackball()) {
+    body = _set_pane_body[CAT_HARDWARE];
+    addSettingsSection(body, "Input");
+    // Scroll speed -- pixels per net roll-pulse used by pollTrackball; persisted as
+    // trackball_speed. Mirrors the brightness slider's cell padding (knob clearance).
+    lv_obj_t* fss = makeField(body, "Scroll speed");
+    lv_obj_set_style_pad_top(fss, 6, 0);
+    lv_obj_set_style_pad_bottom(fss, 10, 0);
+    lv_obj_set_style_pad_right(fss, 8, 0);
+    _set_scroll_slider = lv_slider_create(fss);
+    lv_slider_set_range(_set_scroll_slider, SCROLL_SPEED_MIN, SCROLL_SPEED_MAX);
+    lv_obj_set_width(_set_scroll_slider, LV_PCT(100));
+    lv_obj_add_event_cb(_set_scroll_slider, set_scrollspeed_cb, LV_EVENT_ALL, NULL);
+
+    _set_scroll_inv_chk = lv_checkbox_create(body);
+    lv_checkbox_set_text(_set_scroll_inv_chk, "Reverse scroll direction");
+    lv_obj_set_style_text_color(_set_scroll_inv_chk, lv_color_hex(FG_HEX), 0);
+    lv_obj_add_event_cb(_set_scroll_inv_chk, set_scrollinvert_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // Independent flip for SELECT mode (roll = focus prev/next on a focusable screen), separate
+    // from the scroll-direction flip above.
+    _set_sel_inv_chk = lv_checkbox_create(body);
+    lv_checkbox_set_text(_set_sel_inv_chk, "Reverse selection direction");
+    lv_obj_set_style_text_color(_set_sel_inv_chk, lv_color_hex(FG_HEX), 0);
+    lv_obj_add_event_cb(_set_sel_inv_chk, set_selinvert_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // How long to ignore touch after a scroll (anti-thumb-tap). 0..1000 ms; left edge = off.
+    lv_obj_t* ftl = makeField(body, "Scroll touch-lock (0-1s)");
+    lv_obj_set_style_pad_top(ftl, 6, 0);
+    lv_obj_set_style_pad_bottom(ftl, 10, 0);
+    lv_obj_set_style_pad_right(ftl, 8, 0);
+    _set_touchlock_slider = lv_slider_create(ftl);
+    lv_slider_set_range(_set_touchlock_slider, 0, TOUCH_LOCK_MAX_MS);
+    lv_obj_set_width(_set_touchlock_slider, LV_PCT(100));
+    lv_obj_add_event_cb(_set_touchlock_slider, set_touchlock_cb, LV_EVENT_ALL, NULL);
+  }
+
   body = _set_pane_body[CAT_NOTIFY];   // Notifications
   // ===== Notifications =====
   addSettingsSection(body, "Notifications");
@@ -9555,34 +9594,7 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_slider_set_range(_set_bright_slider, 10, 100);
   lv_obj_set_width(_set_bright_slider, LV_PCT(100));
   lv_obj_add_event_cb(_set_bright_slider, set_bright_cb, LV_EVENT_ALL, NULL);
-
-  // Scroll speed -- only on boards with a nav ball / scroll wheel (T-Deck). Drives the pixels-per-
-  // roll-pulse used by pollTrackball; persisted as trackball_speed. Mirrors the brightness slider.
-  if (board_has_trackball()) {
-    lv_obj_t* fss = makeField(body, "Scroll speed");
-    lv_obj_set_style_pad_top(fss, 6, 0);
-    lv_obj_set_style_pad_bottom(fss, 10, 0);
-    lv_obj_set_style_pad_right(fss, 8, 0);
-    _set_scroll_slider = lv_slider_create(fss);
-    lv_slider_set_range(_set_scroll_slider, SCROLL_SPEED_MIN, SCROLL_SPEED_MAX);
-    lv_obj_set_width(_set_scroll_slider, LV_PCT(100));
-    lv_obj_add_event_cb(_set_scroll_slider, set_scrollspeed_cb, LV_EVENT_ALL, NULL);
-
-    _set_scroll_inv_chk = lv_checkbox_create(body);
-    lv_checkbox_set_text(_set_scroll_inv_chk, "Reverse scroll direction");
-    lv_obj_set_style_text_color(_set_scroll_inv_chk, lv_color_hex(FG_HEX), 0);
-    lv_obj_add_event_cb(_set_scroll_inv_chk, set_scrollinvert_cb, LV_EVENT_VALUE_CHANGED, NULL);
-
-    // How long to ignore touch after a scroll (anti-thumb-tap). 0..1000 ms; left edge = off.
-    lv_obj_t* ftl = makeField(body, "Scroll touch-lock (0-1s)");
-    lv_obj_set_style_pad_top(ftl, 6, 0);
-    lv_obj_set_style_pad_bottom(ftl, 10, 0);
-    lv_obj_set_style_pad_right(ftl, 8, 0);
-    _set_touchlock_slider = lv_slider_create(ftl);
-    lv_slider_set_range(_set_touchlock_slider, 0, TOUCH_LOCK_MAX_MS);
-    lv_obj_set_width(_set_touchlock_slider, LV_PCT(100));
-    lv_obj_add_event_cb(_set_touchlock_slider, set_touchlock_cb, LV_EVENT_ALL, NULL);
-  }
+  // (Trackball/scroll tuning is on the Hardware page under "Input" -- see below.)
 
   lv_obj_t* fr = makeField(body, "Rotation (restart)");
   _set_rot_dd = lv_dropdown_create(fr);
@@ -9857,6 +9869,10 @@ void UITask::populateSettings() {
   if (_set_scroll_inv_chk) {
     if (_node_prefs->trackball_invert) lv_obj_add_state(_set_scroll_inv_chk, LV_STATE_CHECKED);
     else                               lv_obj_clear_state(_set_scroll_inv_chk, LV_STATE_CHECKED);
+  }
+  if (_set_sel_inv_chk) {
+    if (_node_prefs->trackball_sel_invert) lv_obj_add_state(_set_sel_inv_chk, LV_STATE_CHECKED);
+    else                                   lv_obj_clear_state(_set_sel_inv_chk, LV_STATE_CHECKED);
   }
   if (_set_touchlock_slider) {
     int tl = _node_prefs->touch_suppress_ms;
@@ -10230,6 +10246,15 @@ void UITask::set_scrollinvert_cb(lv_event_t* e) {
   if (!_instance || !_instance->_node_prefs) return;
   bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
   _instance->_node_prefs->trackball_invert = on ? 1 : 0;
+  pushPrefs();
+}
+
+// Trackball "Reverse selection direction" checkbox (T-Deck). Flips SELECT-mode focus stepping
+// only (independent of the scroll flip above). Applies live + persists immediately.
+void UITask::set_selinvert_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  _instance->_node_prefs->trackball_sel_invert = on ? 1 : 0;
   pushPrefs();
 }
 
