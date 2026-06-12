@@ -9460,6 +9460,17 @@ void UITask::buildSettingsTab(lv_obj_t* parent) {
   lv_obj_set_width(_set_wifi_status, LV_PCT(100));
   lv_obj_set_style_text_color(_set_wifi_status, lv_color_hex(DIM_HEX), 0);
   lv_label_set_text(_set_wifi_status, "");
+
+  // Companion-over-TCP opt-in: in WiFi mode, expose the phone/desktop app protocol on the LAN
+  // (port 5000) instead of USB. Boot-time transport choice -> reboot to apply. Default off.
+  { lv_obj_t* f = makeField(body, "App over WiFi (TCP)"); _set_tcp_companion = lv_switch_create(f);
+    lv_obj_add_event_cb(_set_tcp_companion, set_tcp_companion_cb, LV_EVENT_VALUE_CHANGED, NULL); }
+  { lv_obj_t* n = lv_label_create(body);
+    lv_label_set_long_mode(n, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(n, LV_PCT(100));
+    lv_obj_set_style_text_color(n, lv_color_hex(DIM_HEX), 0);
+    lv_label_set_text(n, "Lets the app connect over your network (port 5000). Open to anyone on the network. Reboot to apply."); }
+
   { lv_obj_t* f = makeField(body, "Network (SSID)");
     _set_wifi_ssid = makeSelTextarea(f);
     lv_textarea_set_one_line(_set_wifi_ssid, true); lv_obj_add_event_cb(_set_wifi_ssid, UITask::ta_done_cb, LV_EVENT_READY, NULL);
@@ -9917,6 +9928,7 @@ void UITask::populateSettings() {
   // Network panes (WiFi + MQTT)
   auto setSw = [](lv_obj_t* sw, bool on) { if (sw) { if (on) lv_obj_add_state(sw, LV_STATE_CHECKED); else lv_obj_clear_state(sw, LV_STATE_CHECKED); } };
   setSw(_set_wifi_en, _node_prefs->wifi_enabled);
+  setSw(_set_tcp_companion, _node_prefs->tcp_companion);
   if (_set_wifi_ssid) lv_textarea_set_text(_set_wifi_ssid, _node_prefs->wifi_ssid);
   if (_set_wifi_pw)   lv_textarea_set_text(_set_wifi_pw, _node_prefs->wifi_password);
   setSw(_set_wifi_dhcp, _node_prefs->wifi_dhcp);
@@ -12080,6 +12092,16 @@ void UITask::wifi_enable_cb(lv_event_t* e) {
   _instance->wifiApplyFromForm();
   _instance->refreshNetStatus();   // show/hide status lines for the new state
   _instance->showToast("Reboot to switch WiFi/BLE");
+}
+
+// "App over WiFi (TCP)" -- picks the WiFi-mode companion transport (TCP vs USB). Boot-time
+// choice, so just persist + tell the user to reboot.
+void UITask::set_tcp_companion_cb(lv_event_t* e) {
+  if (!_instance || !_instance->_node_prefs) return;
+  bool on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  _instance->_node_prefs->tcp_companion = on ? 1 : 0;
+  pushPrefs();
+  _instance->showToast("Reboot to apply");
 }
 
 void UITask::updateWifiFieldStates() {

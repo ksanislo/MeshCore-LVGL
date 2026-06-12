@@ -68,9 +68,15 @@ static uint32_t _atoi(const char* sp) {
     SerialBLEInterface serial_interface;
     #if defined(WITH_WIFI)
       // WiFi and BLE can't coexist on this chip, so in WiFi mode we never start the
-      // BLE stack and drive the companion frame protocol over USB serial instead.
+      // BLE stack and drive the companion frame protocol over USB serial -- or, when the
+      // user opts in (NodePrefs.tcp_companion), over a TCP socket on the LAN (port 5000).
       #include <helpers/ArduinoSerialInterface.h>
       ArduinoSerialInterface usb_serial;
+      #include <helpers/esp32/SerialWifiInterface.h>
+      SerialWifiInterface tcp_companion;
+      #ifndef TCP_PORT
+        #define TCP_PORT 5000
+      #endif
     #endif
   #elif defined(SERIAL_RX)
     #include <helpers/ArduinoSerialInterface.h>
@@ -251,9 +257,18 @@ void setup() {
   // mesh loop calls checkRecvFrame()/writeFrame() unconditionally). Toggling WiFi
   // needs a reboot to switch stacks.
   if (the_mesh.getNodePrefs()->wifi_enabled) {
-    g_dbg_serial = false;          // companion now owns USB Serial -> drop [REL]/[OTA] diagnostics (DebugLog.h)
-    usb_serial.begin(Serial);
-    the_mesh.startInterface(usb_serial);
+    if (the_mesh.getNodePrefs()->tcp_companion) {
+      // Companion over the LAN: init the netif now so the server can bind, then listen on
+      // TCP_PORT. WiFi itself connects in wifiLoop(); accepts arrive once we have an IP. USB
+      // Serial stays free for [REL]/[OTA] diagnostics in this mode.
+      WiFi.mode(WIFI_STA);
+      tcp_companion.begin(TCP_PORT);
+      the_mesh.startInterface(tcp_companion);
+    } else {
+      g_dbg_serial = false;        // companion now owns USB Serial -> drop [REL]/[OTA] diagnostics (DebugLog.h)
+      usb_serial.begin(Serial);
+      the_mesh.startInterface(usb_serial);
+    }
   } else {
   #if defined(BLE_PIN_CODE)
     serial_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());

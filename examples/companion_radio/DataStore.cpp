@@ -293,6 +293,7 @@ static void applyAppendedPrefsDefaults(NodePrefs& _prefs) {
   _prefs.mqtt_client_id[0] = 0;                                                           // 202 (empty -> auto from pubkey)
   _prefs.mqtt_subscribe[0] = 0;                                                           // 203 (empty -> "<prefix>/rf")
   _prefs.trackball_sel_invert = 0;                                                        // 204 (normal selection dir)
+  _prefs.tcp_companion = 0;                                                               // 205 (off; USB companion)
 }
 
 void DataStore::loadPrefs(NodePrefs& prefs, double& node_lat, double& node_lon) {
@@ -405,6 +406,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs, double& no
     file.read((uint8_t *)_prefs.mqtt_client_id, sizeof(_prefs.mqtt_client_id));                // 202
     file.read((uint8_t *)_prefs.mqtt_subscribe, sizeof(_prefs.mqtt_subscribe));                // 203
     file.read((uint8_t *)&_prefs.trackball_sel_invert, sizeof(_prefs.trackball_sel_invert));   // 204
+    file.read((uint8_t *)&_prefs.tcp_companion, sizeof(_prefs.tcp_companion));                 // 205
 
     file.close();
   }
@@ -505,6 +507,7 @@ void DataStore::savePrefs(const NodePrefs& _prefs, double node_lat, double node_
     file.write((uint8_t *)_prefs.mqtt_client_id, sizeof(_prefs.mqtt_client_id));               // 202
     file.write((uint8_t *)_prefs.mqtt_subscribe, sizeof(_prefs.mqtt_subscribe));               // 203
     file.write((uint8_t *)&_prefs.trackball_sel_invert, sizeof(_prefs.trackball_sel_invert));  // 204
+    file.write((uint8_t *)&_prefs.tcp_companion, sizeof(_prefs.tcp_companion));                // 205
 
     file.close();
     commitTmp(_fs, "/new_prefs.tmp", "/new_prefs");

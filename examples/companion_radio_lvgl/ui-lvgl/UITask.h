@@ -411,6 +411,7 @@ class UITask : public AbstractUITask {
   lv_obj_t*       _set_wifi_gw;         // static / live gateway
   lv_obj_t*       _set_wifi_dns;        // DNS (static, or override)
   lv_obj_t*       _set_wifi_status;     // live status label
+  lv_obj_t*       _set_tcp_companion = nullptr;  // "App over WiFi (TCP)" switch -> NodePrefs.tcp_companion
   lv_obj_t*       _set_ntp_en;          // NTP enable checkbox
   lv_obj_t*       _set_ntp_server;      // NTP server field
   lv_obj_t*       _set_ntp_status;      // NTP status label
@@ -1097,6 +1098,7 @@ private:
   static void wifi_ta_event_cb(lv_event_t* e);  // WiFi text field: kb on focus, apply on defocus
   static void wifi_apply_cb(lv_event_t* e);     // WiFi DHCP/override changed -> apply
   static void wifi_enable_cb(lv_event_t* e);    // WiFi enable toggled -> apply + reboot prompt
+  static void set_tcp_companion_cb(lv_event_t* e); // "App over WiFi (TCP)" toggled -> pref + reboot note
   static void mqtt_save_cb(lv_event_t* e);
   static void ntp_sync_cb(lv_event_t* e);       // "Sync clock now"
   static void presets_update_cb(lv_event_t* e); // "Update radio presets"

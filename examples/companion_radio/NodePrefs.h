@@ -118,4 +118,6 @@ struct NodePrefs {  // persisted to file
   char     mqtt_subscribe[80];  // inbound subscribe topic; empty = "<topic_prefix>/rf". {client_id}/{pubkey} ok.
   uint8_t  trackball_sel_invert;// 1 = reverse nav-ball focus/selection direction; 0 = normal (default).
                                 // Independent of trackball_invert (scroll). Trackball boards only.
+  uint8_t  tcp_companion;       // 1 = in WiFi mode, expose the companion frame protocol over TCP (port
+                                // 5000, LAN) instead of USB serial. Default 0 (off). Reboot to apply.
 };
