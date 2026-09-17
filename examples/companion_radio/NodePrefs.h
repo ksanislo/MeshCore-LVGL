@@ -248,6 +248,15 @@ private:
   CompanionPrefs companion;
 
   // ---- fork-only groups -----------------------------------------------------
+  // !! SERIALIZER KEY CHARSET !!  Keys must contain ONLY [A-Za-z_] -- no digits.
+  // ConfigSerializer's tokenizer (src/helpers/ConfigSerializer.cpp, is_key_char) accepts
+  // letters and '_' only, while the writer will happily emit any key you give it. A key
+  // with a digit therefore round-trips as a file that CANNOT be read back: the reader
+  // returns TOK_ERROR at that character and abandons the rest of the file. That is not
+  // theoretical -- "clk12" in this group silently truncated every /prefs.json at that
+  // point, so "cfgver" (defined last) always read back as 0, rescueAppendedPrefs() then
+  // treated the file as foreign and re-applied defaults, and NO fork setting could ever
+  // persist across a reboot.
   class UiPrefs : public ConfigSerializer {
     NodePrefs* _parent;
   protected:
@@ -257,7 +266,7 @@ private:
       def("c_order", _parent->contacts_order);
       def("c_filter", _parent->contacts_filter);
       def("tz_min", _parent->tz_offset_minutes);
-      def("clk12", _parent->clock_12h);
+      def("clk_ampm", _parent->clock_12h);   // NOT "clk12": see the key-charset warning above
       def("hist", _parent->persist_history);
       def("timeout", _parent->screen_timeout_s);
       def("pin", _parent->lock_pin, sizeof(_parent->lock_pin));
