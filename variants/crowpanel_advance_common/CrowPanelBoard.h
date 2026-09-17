@@ -21,11 +21,26 @@
   #define BL_DEFAULT_DUTY 128   // ~50% of 255
 #endif
 
-// Audio path: buzzer on GPIO8, speaker-amp mute on GPIO21. Left floating, the
+// ---- SPI-tier (2.4/2.8/3.5) audio path ----------------------------------------
+// GPIO14 and GPIO21 carry RGB data lines (d10/d0) on the 4.3/5.0/7.0, so none of
+// these pins mean anything there -- the whole block is SPI-tier only.
+//
+// IMPORTANT: PIN_PIEZO must NOT get a header-only default. AudioSink.h derives
+// HAS_PIEZO from it, and UITask.h declares a PiezoSink member under that macro.
+// A default visible only to translation units that include this header makes
+// HAS_PIEZO disagree across TUs -> ODR violation -> "undefined reference to
+// vtable for PiezoSink" at link. Every SPI-tier env therefore passes
+// -D PIN_PIEZO=8 in its platformio.ini, so all TUs see the same value; the
+// #ifndef below is belt-and-braces for that case, never the sole definition.
+#ifndef CROWPANEL_RGB
+
+// Audio path: piezo buzzer on GPIO8, speaker-amp mute on GPIO21. Left floating, the
 // amp/buzzer pick up EMI from SPI/touch activity and click. The factory
 // firmware drives the buzzer pin and asserts mute (GPIO21 HIGH) at boot.
-#ifndef PIN_BUZZER
-  #define PIN_BUZZER 8
+// NOTE: fork-owned macro PIN_PIEZO (not upstream PIN_BUZZER) -- the audio backend
+// lives entirely in our ui-lvgl PiezoSink; upstream MeshCore sees no buzzer.
+#ifndef PIN_PIEZO
+  #define PIN_PIEZO 8
 #endif
 // Factory speaker idle state: GPIO14 LOW + GPIO21 HIGH (mute). GPIO21 LOW
 // unmutes to play; GPIO14 is the amp's other control line, held low.
@@ -46,6 +61,8 @@
 #ifndef PIN_I2S_DOUT
   #define PIN_I2S_DOUT 12
 #endif
+
+#endif // !CROWPANEL_RGB
 
 // GT911 capacitive touch control lines (the I2C data pins live in target.h as
 // P_TOUCH_SDA/SCL). We reset the controller ourselves in begin() with correct

@@ -138,8 +138,45 @@ bool MapView::firstContactPos(double& lat, double& lon) {
   return found;
 }
 
+// Deepest numeric zoom directory present under /tiles (or -1 if none / SD not ready).
+// Scanned once and cached: the card cannot change without a remount, and this is consulted
+// from the recompose path. Exists because hardcoding a zoom means a card holding only, say,
+// z12 renders an entirely empty map with no indication of why.
+static int s_tiles_max_z = -2;   // -2 = not scanned yet, -1 = scanned, nothing usable found
+
+int MapView::availableMaxZoom() {
+  if (s_tiles_max_z != -2) return s_tiles_max_z;
+  if (!SdSvc::ready()) return -1;          // leave uncached so we rescan once the card mounts
+  int best = -1;
+  {
+    SdSvc::Lock lk;
+    FsFile d = sd.open("/tiles", O_RDONLY);
+    if (d && d.isDir()) {
+      FsFile e; char nm[32];
+      while (e.openNext(&d, O_RDONLY)) {
+        if (e.isDir()) {
+          nm[0] = 0; e.getName(nm, sizeof(nm));
+          int v = 0; bool numeric = (nm[0] != 0);
+          for (const char* p = nm; *p; p++) {
+            if (*p < '0' || *p > '9') { numeric = false; break; }
+            v = v * 10 + (*p - '0');
+          }
+          if (numeric && v >= 0 && v <= 22 && v > best) best = v;
+        }
+        e.close();
+      }
+    }
+    if (d) d.close();
+  }
+  s_tiles_max_z = best;
+  return best;
+}
 void MapView::centerOnSelf() {
-  _z = 14;
+  // Prefer the deepest zoom the card actually holds (capped at the UI's max of 14). A hardcoded
+  // 14 renders nothing at all on a card that only goes to, say, z12 -- and because the fallback
+  // below uses z3, setting a position could move you from one absent zoom straight to another.
+  int zmax = availableMaxZoom();
+  _z = (zmax >= 1 && zmax < 14) ? zmax : 14;
   int32_t lat_e6 = 0, lon_e6 = 0;
   mproxy::selfLatLon(lat_e6, lon_e6);
   if (lat_e6 != 0 || lon_e6 != 0) { setCenter(lat_e6 / 1e6, lon_e6 / 1e6); return; }
@@ -206,8 +243,22 @@ bool MapView::stepRecompose(int max_tiles) {
       // Empty-state only reflects a FULL render (a soft pass only touches the exposed strip,
       // so a near-empty strip mustn't hide a populated interior).
       if (_empty_lbl && _rc_was_full) {
-        if (_rc_drawn == 0) lv_obj_clear_flag(_empty_lbl, LV_OBJ_FLAG_HIDDEN);
-        else                lv_obj_add_flag(_empty_lbl, LV_OBJ_FLAG_HIDDEN);
+        if (_rc_drawn == 0) {
+          // Name the tile actually requested. The old text was the literal string
+          // "/tiles/<z>/<x>/<y>.png", which reads as "your files are missing" and sends people
+          // checking paths and card formatting -- when the usual cause is simply that the view
+          // is at a zoom the card doesn't carry.
+          int ctx = (int)floor((double)(_rc_ox + _mx + _vw / 2) / 256.0);
+          int cty = (int)floor((double)(_rc_oy + _my + _vh / 2) / 256.0);
+          int zmax = availableMaxZoom();
+          if (zmax >= 1 && zmax != _rc_z)
+            lv_label_set_text_fmt(_empty_lbl, "No tile /tiles/%d/%d/%d.png\nCard has zoom %d",
+                                  _rc_z, ctx, cty, zmax);
+          else
+            lv_label_set_text_fmt(_empty_lbl, "No tile /tiles/%d/%d/%d.png", _rc_z, ctx, cty);
+          lv_obj_clear_flag(_empty_lbl, LV_OBJ_FLAG_HIDDEN);
+        }
+        else lv_obj_add_flag(_empty_lbl, LV_OBJ_FLAG_HIDDEN);
       }
       break;
     }
@@ -508,7 +559,7 @@ void MapView::build(lv_obj_t* parent, uint16_t w, uint16_t h, MarkerTapCb cb, vo
   // Empty-state hint, pinned to the bottom of the map (on _root, so it doesn't pan and
   // leaves the middle clear for markers). Shown when a recompose renders zero tiles.
   _empty_lbl = lv_label_create(parent);
-  lv_label_set_text(_empty_lbl, "No map tiles on SD  -  /tiles/<z>/<x>/<y>.png");
+  lv_label_set_text(_empty_lbl, "No map tiles");   // replaced per-render with the exact path
   lv_obj_set_style_text_align(_empty_lbl, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_set_style_text_color(_empty_lbl, lv_color_hex(0xFFFFFF), 0);
   lv_obj_set_style_text_font(_empty_lbl, &lv_font_montserrat_14, 0);
@@ -707,24 +758,94 @@ void MapView::marker_event_cb(lv_event_t* e) {
 }
 
 // --- spike / diagnostic ---------------------------------------------------------
+// List up to maxn entries of `path`; records the first subdirectory name into first_dir.
+// Caller must already hold an SdSvc::Lock.
+static bool listDirInto(const char* path, int maxn, char* first_dir, size_t fd_len) {
+  if (first_dir && fd_len) first_dir[0] = 0;
+  FsFile d = sd.open(path, O_RDONLY);
+  if (!d)         { Serial.printf("[MAP]   %s -> CANNOT OPEN\n", path); return false; }
+  if (!d.isDir()) { Serial.printf("[MAP]   %s -> NOT A DIRECTORY\n", path); d.close(); return false; }
+  Serial.printf("[MAP]   %s ->", path);
+  FsFile e; char nm[64]; int n = 0, total = 0;
+  while (e.openNext(&d, O_RDONLY)) {
+    total++;
+    if (n < maxn) {
+      nm[0] = 0; e.getName(nm, sizeof(nm));
+      Serial.printf(" %s%s", nm, e.isDir() ? "/" : "");
+      if (e.isDir() && first_dir && fd_len && !first_dir[0]) snprintf(first_dir, fd_len, "%s", nm);
+      n++;
+    }
+    e.close();
+  }
+  Serial.printf("%s  (%d entries)\n", total ? "" : " (empty)", total);
+  d.close();
+  return total > 0;
+}
+
 void MapView::selfTest() {
-  // A few real tiles from the user's set (z14, US Pacific NW). 1-bit, dense, etc.
-  static const char* paths[] = {
-    "/tiles/14/2749/5849.png",
-    "/tiles/14/2562/5833.png",
-    "/tiles/1/0/0.png",
-  };
-  Serial.printf("[MAP] selfTest: SD ready=%d freePSRAM=%u\n",
-                (int)SdSvc::ready(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  for (auto path : paths) {
+  Serial.printf("[MAP] SD ready=%d mount_err=%u/%u freePSRAM=%u\n",
+                (int)SdSvc::ready(), (unsigned)sd_last_err_code, (unsigned)sd_last_err_data,
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
+  // 1) Where will the map look? (independent of the card)
+  int32_t lat_e6 = 0, lon_e6 = 0;
+  mproxy::selfLatLon(lat_e6, lon_e6);
+  Serial.printf("[MAP] self position: lat_e6=%ld lon_e6=%ld\n", (long)lat_e6, (long)lon_e6);
+  if (lat_e6 || lon_e6) {
+    double lat = lat_e6 / 1e6, lon = lon_e6 / 1e6;
+    Serial.printf("[MAP] centerOnSelf -> z14 at %.6f,%.6f; tiles it will request:\n", lat, lon);
+    for (int z = 10; z <= 16; z++) {
+      int tx = (int)floor(lonToWorldX(lon, z) / 256.0);
+      int ty = (int)floor(latToWorldY(lat, z) / 256.0);
+      int flip = (1 << z) - 1 - ty;   // the same tile in TMS numbering, for comparison
+      Serial.printf("[MAP]   z%-2d -> /tiles/%d/%d/%d.png   (TMS y would be %d)\n", z, z, tx, ty, flip);
+    }
+  } else {
+    Serial.println("[MAP] NO self position -> falls back to z3 @ (0,0): /tiles/3/3..4/3..4.png");
+  }
+
+  // 2) What is on the card, as SdFat sees it? Walk /tiles -> <z> -> <x>, grab a real leaf.
+  if (!SdSvc::ready()) { Serial.println("[MAP] SD not mounted -- nothing further to check"); return; }
+  char zdir[64] = {0}, xdir[64] = {0}, ydir[64] = {0};
+  char zpath[160], xpath[224], leaf[300];
+  bool have_leaf = false;
+  {
+    SdSvc::Lock lk;
+    listDirInto("/", 12, NULL, 0);
+    listDirInto("/tiles", 20, zdir, sizeof(zdir));
+    if (zdir[0]) {
+      snprintf(zpath, sizeof(zpath), "/tiles/%s", zdir);
+      listDirInto(zpath, 12, xdir, sizeof(xdir));
+      if (xdir[0]) {
+        snprintf(xpath, sizeof(xpath), "/tiles/%s/%s", zdir, xdir);
+        listDirInto(xpath, 12, ydir, sizeof(ydir));
+        FsFile d = sd.open(xpath, O_RDONLY);
+        if (d && d.isDir()) {
+          FsFile e; char nm[64];
+          while (e.openNext(&d, O_RDONLY)) {
+            if (!e.isDir()) {
+              nm[0] = 0; e.getName(nm, sizeof(nm));
+              snprintf(leaf, sizeof(leaf), "%s/%s", xpath, nm);
+              have_leaf = true;
+            }
+            e.close();
+            if (have_leaf) break;
+          }
+        }
+        if (d) d.close();
+      }
+    }
+  }
+  // 3) Decode a tile that definitely exists (outside the lock -- decode is slow).
+  if (have_leaf) {
     uint32_t t0 = millis();
-    uint8_t* rgba = nullptr; uint32_t w = 0, h = 0;
-    bool ok = decodeTileRGBA(path, &rgba, &w, &h);
-    uint32_t dt = millis() - t0;
-    Serial.printf("[MAP]   %-26s ok=%d %ux%u %ums freePSRAM=%u\n",
-                  path, (int)ok, (unsigned)w, (unsigned)h, (unsigned)dt,
-                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    uint8_t* rgba = NULL; uint32_t w = 0, h = 0;
+    bool ok = decodeTileRGBA(leaf, &rgba, &w, &h);
+    Serial.printf("[MAP] decode %s -> ok=%d %ux%u %ums\n", leaf, (int)ok,
+                  (unsigned)w, (unsigned)h, (unsigned)(millis() - t0));
     if (rgba) heap_caps_free(rgba);
+  } else {
+    Serial.println("[MAP] no leaf tile found under /tiles to decode");
   }
 }
 

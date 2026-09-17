@@ -37,6 +37,7 @@ public:
 
   // Spike/diagnostic: decode one known tile from SD, log dims/time/free-PSRAM.
   static void selfTest();
+  static int  availableMaxZoom();   // deepest /tiles/<z> on the card, -1 if none/unmounted
 
   // Shared tile reader+decoder (read under SdSvc::Lock, decode off-bus to RGBA8888 in PSRAM).
   // Caller heap_caps_free()s *out_rgba. Used by MapView and the static MapThumb below.

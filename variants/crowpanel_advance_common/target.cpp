@@ -208,6 +208,17 @@ bool radio_init() {
   hspi_mutex_ensure();   // before any radio/SD SPI transaction can take it
   if (!s_i2c_mtx) s_i2c_mtx = xSemaphoreCreateMutex();   // before the first RTC bus access
   rtc_clock.begin();
+  // Boot I2C inventory. The blind-bring-up variants (2.4/2.8/4.3/5.0/7.0) need to know which touch
+  // controller is actually fitted -- 0x14/0x5D = GT911, 0x38 = FT6336U -- and the UI's Node Info scan
+  // is unreachable precisely when touch is the broken thing. ~112 probes at 100 kHz, once, ~30 ms.
+  {
+    uint8_t addrs[16];
+    int n = board_i2c_scan(addrs, 16);
+    Serial.print("[I2C] boot scan:");
+    for (int i = 0; i < n; i++) { Serial.print(" 0x"); Serial.print(addrs[i], HEX); }
+    if (n == 0) Serial.print(" (no devices ACKed)");
+    Serial.println();
+  }
   // CardKB detection is lazy (board_has_physical_kbd(), driven from the UI loop): a unit not yet
   // ACKing this early -- or hot-plugged later -- is still picked up. No boot probe needed here.
 

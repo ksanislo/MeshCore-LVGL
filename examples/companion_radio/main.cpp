@@ -290,10 +290,11 @@ void setup() {
 
   the_mesh.startInterface(interface_manager);
 
-#if defined(ELECROW_CROWPANEL_ADVANCE_35) && (ENV_INCLUDE_GPS == 1)
-  // CrowPanel GPS bring-up is DEFERRED to after ui_task.begin() (see below): the GPS UART (17/18)
-  // sits next to the GT911 touch I2C (15/16) on the connector edge, and an active GPS UART during the
-  // touch controller's I2C bring-up intermittently re-opens the boot "no touch" race. Nothing here.
+#if defined(DEFER_GPS_INIT) && (ENV_INCLUDE_GPS == 1)
+  // GPS bring-up is DEFERRED to after ui_task.begin() (see below) on boards that set DEFER_GPS_INIT:
+  // their GPS UART sits next to the touch controller's I2C pins on the connector edge, and an active
+  // UART during the touch bring-up intermittently re-opens the boot "no touch" race. On the CrowPanel
+  // Advance that is GPS 17/18 alongside touch I2C 15/16. Nothing here.
 #else
   sensors.begin();
   #if ENV_INCLUDE_GPS == 1
@@ -318,10 +319,10 @@ void setup() {
   ui_task.begin(disp, &sensors, the_mesh.getNodePrefs());  // still want to pass this in as dependency, as prefs might be moved
 #endif
 
-#if defined(ELECROW_CROWPANEL_ADVANCE_35) && (ENV_INCLUDE_GPS == 1)
-  // GPS UART up only NOW -- after the GT911 touch controller is fully configured in ui_task.begin()
-  // above. The GPS UART (17/18) is adjacent to the touch I2C (15/16) on the connector; an active UART
-  // during the GT911 I2C bring-up intermittently leaves it ACKing but never reporting touch (the boot
+#if defined(DEFER_GPS_INIT) && (ENV_INCLUDE_GPS == 1)
+  // GPS UART up only NOW -- after the touch controller is fully configured in ui_task.begin() above.
+  // The GPS UART is adjacent to the touch I2C on the connector; an active UART during the touch
+  // controller's I2C bring-up intermittently leaves it ACKing but never reporting touch (the boot
   // no-touch race). meshTask is still parked on s_ui_ready, so applyGpsPrefs() doesn't race the_mesh.
   // (Explicit pins: the shared initBasicGPS() calls Serial1.setPins() before begin(), a no-op on ESP32
   // since the UART driver isn't up yet to attach pins -- so we install the driver on 17/18 first.)

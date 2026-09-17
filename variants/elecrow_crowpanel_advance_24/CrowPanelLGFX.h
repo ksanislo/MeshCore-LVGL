@@ -11,12 +11,15 @@
 //           CrowPanelBoard::begin() (GT911 INT/RST timing, addr 0x14).
 //  Backlight on GPIO38, PWM (LEDC) via CrowPanelBoard.
 //
-// BLIND BUILD -- VERIFY ON DEVICE: Elecrow's spec lists the 2.4/2.8 touch as
-// FT6336U, but Meshtastic treats 2.4/2.8/3.5 identically (same touch INT 47) and
-// our 3.5 is GT911, so we configure GT911 here for platform consistency. If touch
-// is dead, switch `lgfx::Touch_GT911` -> `lgfx::Touch_FT5x06` (FT6336U) and drop the
-// gt911_reset() in CrowPanelBoard. Also verify ST7789 invert/rgb_order/offsets and
-// the panel pin map (cloned from the 3.5: SCLK42/MOSI39/DC41/CS40, dedicated SPI2).
+// CONFIRMED ON 2.8" HARDWARE (the 2.4 shares this board; inferred, not yet measured):
+//  * Panel: the pin map cloned from the 3.5 (SCLK42/MOSI39/DC41/CS40, dedicated SPI2)
+//    and the ST7789 settings below (invert/rgb_order/offsets) render correctly.
+//  * Touch: FT6336U at 0x38, NOT the GT911 we originally guessed. A boot I2C scan on a
+//    2.8 reported exactly one device -- 0x38 -- with nothing at 0x14/0x5D. Elecrow's
+//    spec was right; the earlier "treat 2.4/2.8/3.5 as one tier" assumption was wrong.
+//    LovyanGFX's Touch_FT5x06 driver covers the FT6206/FT6236/FT6336 family.
+//  * That same scan found no 0x51 (no PCF8563 RTC) and no 0x40 (no INA219), so this
+//    board has neither -- unlike the 3.5.
 
 #ifndef CROWPANEL_TFT_ROTATION
   #define CROWPANEL_TFT_ROTATION 1   // landscape 320x240; flip to 3 if upside-down
@@ -25,7 +28,7 @@
 class CrowPanelLGFX : public lgfx::LGFX_Device {
   lgfx::Panel_ST7789 _panel;
   lgfx::Bus_SPI      _bus;
-  lgfx::Touch_GT911  _touch;
+  lgfx::Touch_FT5x06 _touch;
 
 public:
   static constexpr uint16_t native_w = 240;   // ST7789 native (portrait); landscape via rotation
@@ -75,12 +78,12 @@ public:
       cfg.x_max       = native_w - 1;
       cfg.y_min       = 0;
       cfg.y_max       = native_h - 1;
-      cfg.pin_int     = 47;     // matches Meshtastic SCREEN_TOUCH_INT for the 2.4/2.8/3.5 tier
-      cfg.pin_rst     = -1;     // owned by CrowPanelBoard::begin() (deterministic GT911 reset)
+      cfg.pin_int     = 47;     // shared with the 3.5 tier; UITask gates I2C reads on it
+      cfg.pin_rst     = -1;     // owned by CrowPanelBoard::begin() (touch_reset)
       cfg.bus_shared  = false;
       cfg.offset_rotation = 0;
       cfg.i2c_port    = 0;
-      cfg.i2c_addr    = 0x14;
+      cfg.i2c_addr    = 0x38;   // FT6336U (fixed address; measured)
       cfg.pin_sda     = 15;
       cfg.pin_scl     = 16;
       cfg.freq        = 400000;

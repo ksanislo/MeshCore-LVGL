@@ -1,6 +1,10 @@
 #include "CrowPanelBoard.h"
 
-// Deterministic GT911 power-on reset. The controller latches BOTH its I2C slave
+// Deterministic touch-controller power-on reset, done here (before display.begin())
+// rather than left to LovyanGFX. Which sequence runs depends on the part fitted:
+// the 3.5 has a GT911, the 2.4/2.8 an FT6336U (CROWPANEL_TOUCH_FT6336).
+//
+// GT911 branch: the controller latches BOTH its I2C slave
 // address and its startup state from the INT line level at the moment RST is
 // released. LovyanGFX's Touch_GT911::init() pulses only RST and leaves INT
 // floating, so it occasionally comes up ACKing I2C but never asserting data-ready
@@ -9,7 +13,20 @@
 // before display.begin(), with the datasheet INT/RST timing and INT held HIGH at
 // the RST rising edge to select addr 0x14 (matching CrowPanelLGFX's touch config).
 #ifndef CROWPANEL_RGB
-static void gt911_reset() {
+#if defined(CROWPANEL_TOUCH_FT6336)
+// 2.4"/2.8": FT6336U at a FIXED I2C address (0x38) -- measured, see CrowPanelLGFX.h. There is
+// no INT-level address strapping to honour, so INT stays an input the whole time and we only
+// pulse RST. Driving INT here would be actively wrong: it is the controller's output.
+static void touch_reset() {
+  pinMode(PIN_TOUCH_INT, INPUT);
+  pinMode(PIN_TOUCH_RST, OUTPUT);
+  digitalWrite(PIN_TOUCH_RST, LOW);
+  delay(10);                           // datasheet: RST low > 5 ms
+  digitalWrite(PIN_TOUCH_RST, HIGH);
+  delay(300);                          // controller boot before it will ACK I2C
+}
+#else
+static void touch_reset() {
   pinMode(PIN_TOUCH_RST, OUTPUT);
   pinMode(PIN_TOUCH_INT, OUTPUT);
   digitalWrite(PIN_TOUCH_RST, LOW);    // assert reset
@@ -23,7 +40,8 @@ static void gt911_reset() {
   delay(55);                           // firmware boot (>50 ms) before first I2C
   pinMode(PIN_TOUCH_INT, INPUT);       // hand INT back as the interrupt line
 }
-#endif
+#endif // CROWPANEL_TOUCH_FT6336
+#endif // !CROWPANEL_RGB
 
 void CrowPanelBoard::begin() {
   ESP32Board::begin();
@@ -31,7 +49,7 @@ void CrowPanelBoard::begin() {
 #ifndef CROWPANEL_RGB
   // ---- SPI tier (2.4/2.8/3.5): SPI display, GT911 on its own INT/RST, PWM backlight, audio path ----
   // Bring the touch controller up deterministically before anything probes it.
-  gt911_reset();
+  touch_reset();
 
   pinMode(PIN_LORA_MIC_MUX, OUTPUT);
   digitalWrite(PIN_LORA_MIC_MUX, LOW);
@@ -45,8 +63,8 @@ void CrowPanelBoard::begin() {
   // Quiet the audio path so it doesn't click on touch/SPI EMI. Matches the
   // factory firmware's idle state: buzzer low, GPIO14 low, speaker-amp muted
   // (GPIO21 high). None of these should float.
-  pinMode(PIN_BUZZER, OUTPUT);
-  digitalWrite(PIN_BUZZER, LOW);
+  pinMode(PIN_PIEZO, OUTPUT);
+  digitalWrite(PIN_PIEZO, LOW);
   pinMode(PIN_SPK_CTL, OUTPUT);
   digitalWrite(PIN_SPK_CTL, LOW);
   pinMode(PIN_SPK_MUTE, OUTPUT);
@@ -82,6 +100,18 @@ extern "C" void board_set_backlight(uint8_t duty) {
   #endif
 #endif
 }
+
+// I2S amp gate, called by the ui-lvgl I2SBuzzer around playback (weak no-op elsewhere).
+// PIN_SPK_MUTE is active-LOW to play: LOW = unmute/play, HIGH = mute/idle (EMI-safe).
+// PIN_SPK_CTL stays LOW (set in begin()). I2SBuzzer mutes before halting the I2S clock
+// and un-mutes after starting it, so touch/SPI EMI isn't amplified into the speaker.
+// SPI tier only: on the RGB tier GPIO21 is RGB data line d0 -- driving it would corrupt
+// the panel, and that tier has no I2S amp wired anyway.
+#ifndef CROWPANEL_RGB
+extern "C" void board_audio_amp_enable(bool on) {
+  digitalWrite(PIN_SPK_MUTE, on ? LOW : HIGH);
+}
+#endif
 
 // ---- INA219 battery monitor -------------------------------------------------
 // On the shared touch I2C bus (PIN_TOUCH_SDA/SCL), alongside the GT911 and the

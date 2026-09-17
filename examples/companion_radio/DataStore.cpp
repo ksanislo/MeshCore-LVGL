@@ -473,7 +473,12 @@ void DataStore::loadPrefs(NodePrefs& prefs) {
   if (_fs->exists("/prefs.json")) {
     File file = openRead(_fs, "/prefs.json");
     if (file) {
-      prefs.loadSerial(file);   // new Serial prefs
+      // Check the return: a tokenizer error abandons the REST of the file, leaving every
+      // later field at its default with no other symptom. Silent truncation here is how a
+      // bad serializer key went unnoticed (see the charset warning in NodePrefs.h).
+      if (!prefs.loadSerial(file)) {
+        Serial.printf("[PREFS] WARNING: /prefs.json parse failed -- fields after the fault are DEFAULTS\n");
+      }
       file.close();
     }
     // Sanity-check what we just loaded. A /prefs.json can be corrupt or partial --
